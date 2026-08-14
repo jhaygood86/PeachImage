@@ -156,14 +156,33 @@ internal sealed class Vector256ColorConverter : IColorConverter
     private static Vector256<int> ToRoundedInt(Vector256<float> value) => Vector256.ConvertToInt32(value + RoundingBias);
 
     /// <summary>
-    /// Rounds <paramref name="value"/> (already <see cref="Clamp"/>-ed to [0,255]) via <see cref="ToRoundedInt"/>
-    /// and scatters the <see cref="Lanes"/> resulting bytes into <paramref name="destination"/> at the given
-    /// <paramref name="stride"/> — the interleaved-output counterpart of <see cref="LoadWidenedInterleaved"/>'s
-    /// gather. When <paramref name="invert"/>, stores <c>255 - rounded</c> instead of <c>rounded</c> — inverting
-    /// the already-rounded integer, not the pre-rounded float (see the <see cref="YcckToCmyk"/> call site).
+    /// Rounds <paramref name="value"/> and writes the <see cref="Lanes"/> resulting bytes into
+    /// <paramref name="destination"/> at the given <paramref name="stride"/>.
     /// </summary>
+    /// <remarks>
+    /// Two genuinely different shapes, not one path with a fast-path check bolted on top: the
+    /// <c>stride == 1</c>/no-invert case (the planar case — <see cref="RgbToYCbCr"/>'s <c>y</c>/<c>cb</c>/<c>cr</c>
+    /// outputs) narrows straight to a <see cref="Vector64{Byte}"/> (int-&gt;uint-&gt;ushort-&gt;byte) and does
+    /// a genuine vector store, no loop at all. The interleaved (RGB/CMYK scatter) and invert (YCCK) cases keep
+    /// the plain <c>stackalloc int[]</c> + scalar-cast loop — <b>measured</b> (BenchmarkDotNet, not just
+    /// reasoned about) that routing them through the same narrow chain as the planar case made decode slower,
+    /// not faster: the narrow chain's extra instructions aren't free, and when the store was going to stay a
+    /// scalar per-lane loop regardless (unavoidable for a strided destination), paying for the narrow up front
+    /// bought nothing. Isolated by 4:4:4 decode specifically (it never calls the chroma upsampler, so it's the
+    /// one benchmark scenario that exercises only this path) regressing ~5% when both cases shared the narrow
+    /// chain — reverted for this case rather than kept on the strength of it "should" be faster.
+    /// </remarks>
     private static void StoreRounded(Vector256<float> value, Span<byte> destination, int firstOffset, int stride, bool invert = false)
     {
+        if (stride == 1 && !invert)
+        {
+            var asUInt = ToRoundedInt(value).AsUInt32();
+            var narrowedToUShort = Vector128.Narrow(asUInt.GetLower(), asUInt.GetUpper());
+            var bytes = Vector128.Narrow(narrowedToUShort, Vector128<ushort>.Zero).GetLower();
+            bytes.CopyTo(destination.Slice(firstOffset, Lanes));
+            return;
+        }
+
         Span<int> rounded = stackalloc int[Lanes];
         ToRoundedInt(value).CopyTo(rounded);
         for (int lane = 0; lane < Lanes; lane++)

@@ -141,13 +141,32 @@ internal sealed class Vector128ColorConverter : IColorConverter
 
     private static Vector128<int> ToRoundedInt(Vector128<float> value) => Vector128.ConvertToInt32(value + RoundingBias);
 
+    /// <summary>
+    /// Rounds <paramref name="value"/> and writes the <see cref="Lanes"/> resulting bytes into
+    /// <paramref name="destination"/> at the given <paramref name="stride"/>. See
+    /// <see cref="Vector256ColorConverter.StoreRounded"/>'s remarks: only the planar (<c>stride == 1</c>,
+    /// no invert) case is worth narrowing via the hardware int-&gt;uint-&gt;ushort-&gt;byte chain for a
+    /// genuine vector store — measured slower, not faster, for the interleaved/invert cases where the store
+    /// stays a scalar loop regardless, so those keep the plain <c>stackalloc int[]</c> + scalar-cast path.
+    /// </summary>
     private static void StoreRounded(Vector128<float> value, Span<byte> destination, int firstOffset, int stride, bool invert = false)
     {
+        if (stride == 1 && !invert)
+        {
+            var asUInt = ToRoundedInt(value).AsUInt32();
+            var narrowedToUShort = Vector128.Narrow(asUInt, Vector128<uint>.Zero);
+            var bytes = Vector128.Narrow(narrowedToUShort, Vector128<ushort>.Zero).GetLower();
+            Span<byte> lane8 = stackalloc byte[8];
+            bytes.CopyTo(lane8);
+            lane8[..Lanes].CopyTo(destination.Slice(firstOffset, Lanes));
+            return;
+        }
+
         Span<int> rounded = stackalloc int[Lanes];
         ToRoundedInt(value).CopyTo(rounded);
-        for (int lane = 0; lane < Lanes; lane++)
+        for (int i = 0; i < Lanes; i++)
         {
-            destination[firstOffset + (lane * stride)] = (byte)(invert ? 255 - rounded[lane] : rounded[lane]);
+            destination[firstOffset + (i * stride)] = (byte)(invert ? 255 - rounded[i] : rounded[i]);
         }
     }
 
