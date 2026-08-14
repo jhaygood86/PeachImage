@@ -66,26 +66,58 @@ internal static class FrameReconstructor
 
     private static byte[] ReconstructComponentPlane(ComponentDecodeState component, int width, int height, int hMax, int vMax, IChromaUpsampler upsampler, List<byte[]> rented)
     {
-        int planeStride = component.Coefficients.BlocksWide * 8;
-        int planeRows = component.Coefficients.BlocksHigh * 8;
-        var raw = Rent(planeStride * planeRows, rented);
+        int actualWidth = component.ActualWidthInSamples;
+        int actualHeight = component.ActualHeightInSamples;
+        var cropped = Rent(actualWidth * actualHeight, rented);
 
         var dequant = DctKernelSelector.Inverse.PrepareDequantTable(component.QuantizationTable.Values);
+
+        // IDCT writes straight into `cropped` at its actual (non-MCU-padded) size — skipping the
+        // MCU-padded-buffer-then-row-copy this used to do — by classifying each block against the
+        // actual/padding boundary: an interior block (entirely within actualWidth/actualHeight) can take
+        // outputStride = actualWidth directly, since both selected kernels (AanScalarInverseDct,
+        // Vector256AanInverseDct — the only two DctKernelSelector.Inverse ever returns) write the full 8x8
+        // unconditionally and an interior block's last written index never crosses a `cropped` row boundary.
+        // A block straddling (or lying entirely past) that boundary — routine at any width/height that isn't
+        // a multiple of 8 * samplingFactor, not just "the last block" — goes through a local 8x8 scratch
+        // buffer first, and only the valid rows/columns are copied out; a block entirely past the boundary
+        // (possible with sampling factors > 1) skips the transform altogether.
+        Span<byte> scratch = stackalloc byte[64];
         for (int by = 0; by < component.Coefficients.BlocksHigh; by++)
         {
+            int blockTop = by * 8;
+            if (blockTop >= actualHeight)
+            {
+                break;
+            }
+
+            int rowsInBlock = Math.Min(8, actualHeight - blockTop);
+
             for (int bx = 0; bx < component.Coefficients.BlocksWide; bx++)
             {
-                var block = component.Coefficients.Block(bx, by);
-                int outOffset = (by * 8 * planeStride) + (bx * 8);
-                DctKernelSelector.Inverse.Transform(block, dequant, raw.AsSpan(outOffset), planeStride);
-            }
-        }
+                int blockLeft = bx * 8;
+                if (blockLeft >= actualWidth)
+                {
+                    break;
+                }
 
-        var cropped = Rent(component.ActualWidthInSamples * component.ActualHeightInSamples, rented);
-        for (int y = 0; y < component.ActualHeightInSamples; y++)
-        {
-            raw.AsSpan(y * planeStride, component.ActualWidthInSamples)
-                .CopyTo(cropped.AsSpan(y * component.ActualWidthInSamples, component.ActualWidthInSamples));
+                var block = component.Coefficients.Block(bx, by);
+
+                if (rowsInBlock == 8 && blockLeft + 8 <= actualWidth)
+                {
+                    int outOffset = (blockTop * actualWidth) + blockLeft;
+                    DctKernelSelector.Inverse.Transform(block, dequant, cropped.AsSpan(outOffset), actualWidth);
+                }
+                else
+                {
+                    int colsInBlock = Math.Min(8, actualWidth - blockLeft);
+                    DctKernelSelector.Inverse.Transform(block, dequant, scratch, outputStride: 8);
+                    for (int y = 0; y < rowsInBlock; y++)
+                    {
+                        scratch.Slice(y * 8, colsInBlock).CopyTo(cropped.AsSpan(((blockTop + y) * actualWidth) + blockLeft, colsInBlock));
+                    }
+                }
+            }
         }
 
         int hRatio = hMax / component.Frame.HorizontalSamplingFactor;
@@ -93,13 +125,13 @@ internal static class FrameReconstructor
 
         if (hRatio == 1 && vRatio == 1)
         {
-            return CropOrPad(cropped, component.ActualWidthInSamples, component.ActualHeightInSamples, width, height, rented);
+            return CropOrPad(cropped, actualWidth, actualHeight, width, height, rented);
         }
 
-        int upsampledWidth = component.ActualWidthInSamples * hRatio;
-        int upsampledHeight = component.ActualHeightInSamples * vRatio;
+        int upsampledWidth = actualWidth * hRatio;
+        int upsampledHeight = actualHeight * vRatio;
         var upsampled = Rent(upsampledWidth * upsampledHeight, rented);
-        upsampler.Upsample(cropped, component.ActualWidthInSamples, component.ActualHeightInSamples, upsampled, upsampledWidth, upsampledHeight, hRatio, vRatio);
+        upsampler.Upsample(cropped, actualWidth, actualHeight, upsampled, upsampledWidth, upsampledHeight, hRatio, vRatio);
 
         return CropOrPad(upsampled, upsampledWidth, upsampledHeight, width, height, rented);
     }

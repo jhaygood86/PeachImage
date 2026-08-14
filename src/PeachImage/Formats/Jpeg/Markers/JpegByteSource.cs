@@ -127,6 +127,44 @@ internal sealed class JpegByteSource(Stream stream)
         return total;
     }
 
+    /// <summary>
+    /// Copies up to <paramref name="destination"/>'s length bytes into it from the currently-buffered region,
+    /// stopping at the first <c>0xFF</c> (never consuming it) or when the buffer runs dry. Used by
+    /// <see cref="Entropy.JpegEntropyReader"/> to bulk-consume runs of data that cannot possibly contain
+    /// byte-stuffing or a marker (since neither can start without an <c>0xFF</c>), skipping the per-byte
+    /// stuffing check for the common case. Never triggers a blocking stream read beyond one <see cref="Refill"/>
+    /// and never consumes pushed-back bytes — returns 0 whenever pending bytes exist, the buffer is empty and
+    /// can't be refilled, or the very next byte is <c>0xFF</c>, in which case the caller falls back to
+    /// <see cref="TryReadByte"/>-based single-byte handling, which alone knows how to interpret an <c>0xFF</c>.
+    /// </summary>
+    public int ReadCleanRun(Span<byte> destination)
+    {
+        if (_pendingCount > 0 || destination.IsEmpty)
+        {
+            return 0;
+        }
+
+        if (_bufferStart >= _bufferEnd && !Refill())
+        {
+            return 0;
+        }
+
+        int available = _bufferEnd - _bufferStart;
+        var window = _buffer.AsSpan(_bufferStart, Math.Min(available, destination.Length));
+        int ffIndex = window.IndexOf((byte)0xFF);
+        int runLength = ffIndex < 0 ? window.Length : ffIndex;
+
+        if (runLength == 0)
+        {
+            return 0;
+        }
+
+        window[..runLength].CopyTo(destination);
+        _bufferStart += runLength;
+        _position += runLength;
+        return runLength;
+    }
+
     private bool Refill()
     {
         _bufferStart = 0;

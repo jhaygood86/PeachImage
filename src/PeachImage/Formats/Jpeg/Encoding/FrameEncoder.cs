@@ -1,3 +1,4 @@
+using System.Buffers;
 using PeachImage.Formats.Jpeg.ColorConversion;
 using PeachImage.Formats.Jpeg.Dct;
 using PeachImage.Formats.Jpeg.Entropy;
@@ -10,6 +11,15 @@ namespace PeachImage.Formats.Jpeg.Encoding;
 /// chroma, forward-DCTs and quantizes every block, and writes standard-Huffman-coded entropy data.
 /// Supports grayscale and YCbCr (RGB/RGBA source) output; CMYK/YCCK encode is not implemented in v1.
 /// </summary>
+/// <remarks>
+/// Every intermediate plane/coefficient buffer is rented from <see cref="ArrayPool{T}"/> and returned once
+/// the frame is fully written — the same rent/track/return-in-<c>finally</c> shape
+/// <see cref="Decoding.FrameReconstructor"/> uses on the decode side. None of these buffers are ever read
+/// past the exact width/height/block-count the caller tracks separately, so a pool-provided buffer larger
+/// than requested is never a correctness hazard; and every buffer is fully overwritten before being read
+/// (no progressive/partial fills like <see cref="Decoding.JpegCoefficientBuffer"/> needs to guard against),
+/// so none of them need zeroing after renting.
+/// </remarks>
 internal static class FrameEncoder
 {
     /// <summary>Encodes <paramref name="image"/> and writes the result to <paramref name="stream"/>.</summary>
@@ -24,68 +34,107 @@ internal static class FrameEncoder
         int height = image.Height;
         bool grayscale = image.PixelFormat == PixelFormat.Gray8;
 
-        byte[] yPlane;
-        byte[]? cbPlane = null;
-        byte[]? crPlane = null;
+        var rentedBytes = new List<byte[]>();
+        var rentedShorts = new List<short[]>();
 
-        if (grayscale)
+        try
         {
-            yPlane = image.GetPixelSpan().ToArray();
-        }
-        else
-        {
-            byte[] rgb = image.PixelFormat == PixelFormat.Rgba32 ? StripAlpha(image) : image.GetPixelSpan().ToArray();
-            yPlane = new byte[width * height];
-            cbPlane = new byte[width * height];
-            crPlane = new byte[width * height];
-            ColorConverterSelector.Instance.RgbToYCbCr(rgb, yPlane, cbPlane, crPlane, width * height);
-        }
+            byte[] yPlane;
+            byte[]? cbPlane = null;
+            byte[]? crPlane = null;
 
-        (int chromaHRatio, int chromaVRatio) = grayscale ? (1, 1) : GetRatios(options.Subsampling);
-        int hMax = grayscale ? 1 : chromaHRatio;
-        int vMax = grayscale ? 1 : chromaVRatio;
-
-        int mcuWidth = 8 * hMax;
-        int mcuHeight = 8 * vMax;
-        int mcusAcross = (width + mcuWidth - 1) / mcuWidth;
-        int mcusDown = (height + mcuHeight - 1) / mcuHeight;
-
-        var luminanceQuant = QuantizationTableFactory.CreateLuminance(options.Quality);
-        var chrominanceQuant = grayscale ? null : QuantizationTableFactory.CreateChrominance(options.Quality);
-
-        var components = BuildComponentPlans(grayscale, chromaHRatio, chromaVRatio, mcusAcross, mcusDown);
-
-        var quantizedComponents = new short[components.Length][];
-        for (int i = 0; i < components.Length; i++)
-        {
-            var plan = components[i];
-            byte[] sourcePlane = plan.Index switch
+            if (grayscale)
             {
-                0 => yPlane,
-                1 => cbPlane!,
-                2 => crPlane!,
-                _ => throw new InvalidOperationException("Unreachable: JPEG frames encoded here have at most 3 components."),
-            };
-
-            int sourceWidth = width;
-            int sourceHeight = height;
-            if (plan.Index != 0 && (chromaHRatio != 1 || chromaVRatio != 1))
+                yPlane = RentAndCopy(image.GetPixelSpan(), rentedBytes);
+            }
+            else
             {
-                sourcePlane = ChromaDownsampler.Downsample(sourcePlane, width, height, chromaHRatio, chromaVRatio, out sourceWidth, out sourceHeight);
+                byte[] rgb = image.PixelFormat == PixelFormat.Rgba32 ? StripAlpha(image, rentedBytes) : RentAndCopy(image.GetPixelSpan(), rentedBytes);
+                yPlane = Rent(width * height, rentedBytes);
+                cbPlane = Rent(width * height, rentedBytes);
+                crPlane = Rent(width * height, rentedBytes);
+                ColorConverterSelector.Instance.RgbToYCbCr(rgb, yPlane, cbPlane, crPlane, width * height);
             }
 
-            var padded = PadToBlockGrid(sourcePlane, sourceWidth, sourceHeight, plan.BlocksWide, plan.BlocksHigh);
-            quantizedComponents[i] = QuantizeComponent(padded, plan.BlocksWide, plan.BlocksHigh, plan.Index == 0 ? luminanceQuant : chrominanceQuant!);
-        }
+            (int chromaHRatio, int chromaVRatio) = grayscale ? (1, 1) : GetRatios(options.Subsampling);
+            int hMax = grayscale ? 1 : chromaHRatio;
+            int vMax = grayscale ? 1 : chromaVRatio;
 
-        WriteBitstream(stream, options, width, height, grayscale, components, quantizedComponents, luminanceQuant, chrominanceQuant, mcusAcross, mcusDown);
+            int mcuWidth = 8 * hMax;
+            int mcuHeight = 8 * vMax;
+            int mcusAcross = (width + mcuWidth - 1) / mcuWidth;
+            int mcusDown = (height + mcuHeight - 1) / mcuHeight;
+
+            var luminanceQuant = QuantizationTableFactory.CreateLuminance(options.Quality);
+            var chrominanceQuant = grayscale ? null : QuantizationTableFactory.CreateChrominance(options.Quality);
+
+            var components = BuildComponentPlans(grayscale, chromaHRatio, chromaVRatio, mcusAcross, mcusDown);
+
+            var quantizedComponents = new short[components.Length][];
+            for (int i = 0; i < components.Length; i++)
+            {
+                var plan = components[i];
+                byte[] sourcePlane = plan.Index switch
+                {
+                    0 => yPlane,
+                    1 => cbPlane!,
+                    2 => crPlane!,
+                    _ => throw new InvalidOperationException("Unreachable: JPEG frames encoded here have at most 3 components."),
+                };
+
+                int sourceWidth = width;
+                int sourceHeight = height;
+                if (plan.Index != 0 && (chromaHRatio != 1 || chromaVRatio != 1))
+                {
+                    sourcePlane = ChromaDownsampler.Downsample(sourcePlane, width, height, chromaHRatio, chromaVRatio, out sourceWidth, out sourceHeight, rentedBytes);
+                }
+
+                var padded = PadToBlockGrid(sourcePlane, sourceWidth, sourceHeight, plan.BlocksWide, plan.BlocksHigh, rentedBytes);
+                quantizedComponents[i] = QuantizeComponent(padded, plan.BlocksWide, plan.BlocksHigh, plan.Index == 0 ? luminanceQuant : chrominanceQuant!, rentedShorts);
+            }
+
+            WriteBitstream(stream, options, width, height, grayscale, components, quantizedComponents, luminanceQuant, chrominanceQuant, mcusAcross, mcusDown);
+        }
+        finally
+        {
+            foreach (var buffer in rentedBytes)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+
+            foreach (var buffer in rentedShorts)
+            {
+                ArrayPool<short>.Shared.Return(buffer);
+            }
+        }
     }
 
-    private static byte[] StripAlpha(Image image)
+    private static byte[] Rent(int size, List<byte[]> rented)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent(size);
+        rented.Add(buffer);
+        return buffer;
+    }
+
+    private static short[] RentShorts(int size, List<short[]> rented)
+    {
+        var buffer = ArrayPool<short>.Shared.Rent(size);
+        rented.Add(buffer);
+        return buffer;
+    }
+
+    private static byte[] RentAndCopy(ReadOnlySpan<byte> source, List<byte[]> rented)
+    {
+        var buffer = Rent(source.Length, rented);
+        source.CopyTo(buffer);
+        return buffer;
+    }
+
+    private static byte[] StripAlpha(Image image, List<byte[]> rented)
     {
         var source = image.GetPixelSpan();
         int pixelCount = image.Width * image.Height;
-        var rgb = new byte[pixelCount * 3];
+        var rgb = Rent(pixelCount * 3, rented);
         for (int i = 0; i < pixelCount; i++)
         {
             source.Slice(i * 4, 3).CopyTo(rgb.AsSpan(i * 3, 3));
@@ -118,7 +167,7 @@ internal static class FrameEncoder
         ];
     }
 
-    private static byte[] PadToBlockGrid(byte[] plane, int width, int height, int blocksWide, int blocksHigh)
+    private static byte[] PadToBlockGrid(byte[] plane, int width, int height, int blocksWide, int blocksHigh, List<byte[]> rented)
     {
         int paddedWidth = blocksWide * 8;
         int paddedHeight = blocksHigh * 8;
@@ -127,7 +176,7 @@ internal static class FrameEncoder
             return plane;
         }
 
-        var padded = new byte[paddedWidth * paddedHeight];
+        var padded = Rent(paddedWidth * paddedHeight, rented);
         for (int y = 0; y < paddedHeight; y++)
         {
             int sy = Math.Min(y, height - 1);
@@ -149,10 +198,10 @@ internal static class FrameEncoder
     private const double RoundingBias = 16384.5;
     private const int RoundingShift = 16384;
 
-    private static short[] QuantizeComponent(byte[] padded, int blocksWide, int blocksHigh, ushort[] quantTable)
+    private static short[] QuantizeComponent(byte[] padded, int blocksWide, int blocksHigh, ushort[] quantTable, List<short[]> rentedShorts)
     {
         int stride = blocksWide * 8;
-        var coefficients = new short[blocksWide * blocksHigh * 64];
+        var coefficients = RentShorts(blocksWide * blocksHigh * 64, rentedShorts);
         Span<double> fdctOutput = stackalloc double[64];
         var effectiveQuant = DctKernelSelector.Forward.PrepareQuantTable(quantTable);
 
@@ -392,15 +441,8 @@ internal static class FrameEncoder
 
     private static int MagnitudeBits(int value)
     {
-        value = Math.Abs(value);
-        int bits = 0;
-        while (value > 0)
-        {
-            bits++;
-            value >>= 1;
-        }
-
-        return bits;
+        uint magnitude = (uint)Math.Abs(value);
+        return magnitude == 0 ? 0 : 32 - System.Numerics.BitOperations.LeadingZeroCount(magnitude);
     }
 
     private static int EncodeMagnitude(int value, int size) =>

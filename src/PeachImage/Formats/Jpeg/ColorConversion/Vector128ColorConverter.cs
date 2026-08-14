@@ -7,6 +7,7 @@ namespace PeachImage.Formats.Jpeg.ColorConversion;
 /// multiply-add chain (see <see cref="ScalarColorConverter"/> for the underlying math) is computed 4 pixels
 /// at a time. JITs to SSE2 on x86 and AdvSimd on Arm from one source file.
 /// </summary>
+/// <remarks>See <see cref="Vector256ColorConverter"/>'s remarks — same widen/narrow approach, 4 lanes instead of 8.</remarks>
 internal sealed class Vector128ColorConverter : IColorConverter
 {
     private const int Lanes = 4;
@@ -27,30 +28,20 @@ internal sealed class Vector128ColorConverter : IColorConverter
     private static readonly Vector128<float> V0_418688 = Vector128.Create(0.418688f);
     private static readonly Vector128<float> V0_081312 = Vector128.Create(0.081312f);
 
+    private static readonly Vector128<float> RoundingBias = Vector128.Create(0.5f);
+
     public void YCbCrToRgb(ReadOnlySpan<byte> y, ReadOnlySpan<byte> cb, ReadOnlySpan<byte> cr, Span<byte> rgb, int pixelCount)
     {
-        Span<float> rBuf = stackalloc float[Lanes];
-        Span<float> gBuf = stackalloc float[Lanes];
-        Span<float> bBuf = stackalloc float[Lanes];
-
         int i = 0;
         for (; i + Lanes <= pixelCount; i += Lanes)
         {
-            var yv = Load(y, i);
-            var cbv = Load(cb, i) - V128;
-            var crv = Load(cr, i) - V128;
+            var yv = LoadWidened(y, i);
+            var cbv = LoadWidened(cb, i) - V128;
+            var crv = LoadWidened(cr, i) - V128;
 
-            Clamp(yv + (V1_402 * crv)).CopyTo(rBuf);
-            Clamp(yv - (V0_344136 * cbv) - (V0_714136 * crv)).CopyTo(gBuf);
-            Clamp(yv + (V1_772 * cbv)).CopyTo(bBuf);
-
-            for (int lane = 0; lane < Lanes; lane++)
-            {
-                int offset = (i + lane) * 3;
-                rgb[offset] = ToByte(rBuf[lane]);
-                rgb[offset + 1] = ToByte(gBuf[lane]);
-                rgb[offset + 2] = ToByte(bBuf[lane]);
-            }
+            StoreRounded(Clamp(yv + (V1_402 * crv)), rgb, (i * 3) + 0, 3);
+            StoreRounded(Clamp(yv - (V0_344136 * cbv) - (V0_714136 * crv)), rgb, (i * 3) + 1, 3);
+            StoreRounded(Clamp(yv + (V1_772 * cbv)), rgb, (i * 3) + 2, 3);
         }
 
         for (; i < pixelCount; i++)
@@ -65,28 +56,25 @@ internal sealed class Vector128ColorConverter : IColorConverter
 
     public void YcckToCmyk(ReadOnlySpan<byte> y, ReadOnlySpan<byte> cb, ReadOnlySpan<byte> cr, ReadOnlySpan<byte> k, Span<byte> cmyk, int pixelCount)
     {
-        Span<float> rBuf = stackalloc float[Lanes];
-        Span<float> gBuf = stackalloc float[Lanes];
-        Span<float> bBuf = stackalloc float[Lanes];
-
         int i = 0;
         for (; i + Lanes <= pixelCount; i += Lanes)
         {
-            var yv = Load(y, i);
-            var cbv = Load(cb, i) - V128;
-            var crv = Load(cr, i) - V128;
+            var yv = LoadWidened(y, i);
+            var cbv = LoadWidened(cb, i) - V128;
+            var crv = LoadWidened(cr, i) - V128;
 
-            Clamp(yv + (V1_402 * crv)).CopyTo(rBuf);
-            Clamp(yv - (V0_344136 * cbv) - (V0_714136 * crv)).CopyTo(gBuf);
-            Clamp(yv + (V1_772 * cbv)).CopyTo(bBuf);
+            var rv = Clamp(yv + (V1_402 * crv));
+            var gv = Clamp(yv - (V0_344136 * cbv) - (V0_714136 * crv));
+            var bv = Clamp(yv + (V1_772 * cbv));
+
+            // Round R/G/B first, then invert — see Vector256ColorConverter.YcckToCmyk's remarks.
+            StoreRounded(rv, cmyk, (i * 4) + 0, 4, invert: true);
+            StoreRounded(gv, cmyk, (i * 4) + 1, 4, invert: true);
+            StoreRounded(bv, cmyk, (i * 4) + 2, 4, invert: true);
 
             for (int lane = 0; lane < Lanes; lane++)
             {
-                int offset = (i + lane) * 4;
-                cmyk[offset] = (byte)(255 - ToByte(rBuf[lane]));
-                cmyk[offset + 1] = (byte)(255 - ToByte(gBuf[lane]));
-                cmyk[offset + 2] = (byte)(255 - ToByte(bBuf[lane]));
-                cmyk[offset + 3] = k[i + lane];
+                cmyk[((i + lane) * 4) + 3] = k[i + lane];
             }
         }
 
@@ -103,38 +91,14 @@ internal sealed class Vector128ColorConverter : IColorConverter
 
     public void RgbToYCbCr(ReadOnlySpan<byte> rgb, Span<byte> y, Span<byte> cb, Span<byte> cr, int pixelCount)
     {
-        Span<float> yBuf = stackalloc float[Lanes];
-        Span<float> cbBuf = stackalloc float[Lanes];
-        Span<float> crBuf = stackalloc float[Lanes];
-        Span<float> rLane = stackalloc float[Lanes];
-        Span<float> gLane = stackalloc float[Lanes];
-        Span<float> bLane = stackalloc float[Lanes];
-
         int i = 0;
         for (; i + Lanes <= pixelCount; i += Lanes)
         {
-            for (int lane = 0; lane < Lanes; lane++)
-            {
-                int offset = (i + lane) * 3;
-                rLane[lane] = rgb[offset];
-                gLane[lane] = rgb[offset + 1];
-                bLane[lane] = rgb[offset + 2];
-            }
+            var (rv, gv, bv) = LoadWidenedInterleaved(rgb, i);
 
-            var rv = Vector128.Create((ReadOnlySpan<float>)rLane);
-            var gv = Vector128.Create((ReadOnlySpan<float>)gLane);
-            var bv = Vector128.Create((ReadOnlySpan<float>)bLane);
-
-            Clamp((V0_299 * rv) + (V0_587 * gv) + (V0_114 * bv)).CopyTo(yBuf);
-            Clamp(V128 - (V0_168736 * rv) - (V0_331264 * gv) + (V0_5 * bv)).CopyTo(cbBuf);
-            Clamp(V128 + (V0_5 * rv) - (V0_418688 * gv) - (V0_081312 * bv)).CopyTo(crBuf);
-
-            for (int lane = 0; lane < Lanes; lane++)
-            {
-                y[i + lane] = ToByte(yBuf[lane]);
-                cb[i + lane] = ToByte(cbBuf[lane]);
-                cr[i + lane] = ToByte(crBuf[lane]);
-            }
+            StoreRounded(Clamp((V0_299 * rv) + (V0_587 * gv) + (V0_114 * bv)), y, i, 1);
+            StoreRounded(Clamp(V128 - (V0_168736 * rv) - (V0_331264 * gv) + (V0_5 * bv)), cb, i, 1);
+            StoreRounded(Clamp(V128 + (V0_5 * rv) - (V0_418688 * gv) - (V0_081312 * bv)), cr, i, 1);
         }
 
         for (; i < pixelCount; i++)
@@ -143,10 +107,49 @@ internal sealed class Vector128ColorConverter : IColorConverter
         }
     }
 
-    private static Vector128<float> Load(ReadOnlySpan<byte> source, int offset) =>
-        Vector128.Create((float)source[offset], source[offset + 1], source[offset + 2], source[offset + 3]);
+    private static Vector128<float> LoadWidened(ReadOnlySpan<byte> source, int offset)
+    {
+        Span<byte> padded = stackalloc byte[16];
+        source.Slice(offset, Lanes).CopyTo(padded);
+        return WidenBytes(padded);
+    }
+
+    private static (Vector128<float> R, Vector128<float> G, Vector128<float> B) LoadWidenedInterleaved(ReadOnlySpan<byte> rgb, int i)
+    {
+        Span<byte> rPadded = stackalloc byte[16];
+        Span<byte> gPadded = stackalloc byte[16];
+        Span<byte> bPadded = stackalloc byte[16];
+        for (int lane = 0; lane < Lanes; lane++)
+        {
+            int offset = (i + lane) * 3;
+            rPadded[lane] = rgb[offset];
+            gPadded[lane] = rgb[offset + 1];
+            bPadded[lane] = rgb[offset + 2];
+        }
+
+        return (WidenBytes(rPadded), WidenBytes(gPadded), WidenBytes(bPadded));
+    }
+
+    /// <summary><paramref name="padded16"/>'s first <see cref="Lanes"/> bytes widened to a <see cref="Vector128{Single}"/> via byte-&gt;ushort-&gt;uint widen then a hardware uint-&gt;float convert — the rest of the 16 bytes is don't-care padding, never read past lane 3.</summary>
+    private static Vector128<float> WidenBytes(ReadOnlySpan<byte> padded16)
+    {
+        var byteVec = Vector128.Create(padded16);
+        var ushortVec = Vector128.WidenLower(byteVec);
+        var uintVec = Vector128.WidenLower(ushortVec);
+        return Vector128.ConvertToSingle(uintVec);
+    }
+
+    private static Vector128<int> ToRoundedInt(Vector128<float> value) => Vector128.ConvertToInt32(value + RoundingBias);
+
+    private static void StoreRounded(Vector128<float> value, Span<byte> destination, int firstOffset, int stride, bool invert = false)
+    {
+        Span<int> rounded = stackalloc int[Lanes];
+        ToRoundedInt(value).CopyTo(rounded);
+        for (int lane = 0; lane < Lanes; lane++)
+        {
+            destination[firstOffset + (lane * stride)] = (byte)(invert ? 255 - rounded[lane] : rounded[lane]);
+        }
+    }
 
     private static Vector128<float> Clamp(Vector128<float> value) => Vector128.Min(Vector128.Max(value, VZero), V255);
-
-    private static byte ToByte(float value) => (byte)MathF.Round(value, MidpointRounding.AwayFromZero);
 }

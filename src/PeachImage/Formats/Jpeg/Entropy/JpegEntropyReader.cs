@@ -115,8 +115,33 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
 
     private void EnsureBits(int count)
     {
+        Span<byte> clean = stackalloc byte[4];
         while (_bitCount < count && _bitCount <= 24)
         {
+            if (!AtMarkerBoundary)
+            {
+                // Normally 1-4 (32-bit _buffer, entry guarantees 0 <= _bitCount <= 24 so at least 1 byte
+                // fits): the exact number of whole bytes that can be packed in without _bitCount exceeding 32.
+                // Clamped defensively: GetBits doesn't validate its caller-supplied count against a malformed
+                // stream's Huffman-decoded "size" values before subtracting it from _bitCount, so a
+                // sufficiently adversarial file (see the corpus crashtest suite) can already have driven
+                // _bitCount negative by the time control reaches here — the same way the original byte-at-a-
+                // time EnsureBits tolerated it (via a wraparound shift amount, not a crash), this must not
+                // turn that into an out-of-range span slice.
+                int maxBulk = Math.Clamp((32 - _bitCount) / 8, 0, 4);
+                int read = maxBulk == 0 ? 0 : source.ReadCleanRun(clean[..maxBulk]);
+                if (read > 0)
+                {
+                    for (int i = 0; i < read; i++)
+                    {
+                        _buffer |= (uint)clean[i] << (24 - _bitCount);
+                        _bitCount += 8;
+                    }
+
+                    continue;
+                }
+            }
+
             byte b = 0;
             if (!AtMarkerBoundary && !TryReadStuffedByte(out b))
             {
