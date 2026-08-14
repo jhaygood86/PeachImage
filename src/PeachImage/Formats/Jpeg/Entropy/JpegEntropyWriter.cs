@@ -6,6 +6,8 @@ namespace PeachImage.Formats.Jpeg.Entropy;
 /// </summary>
 internal sealed class JpegEntropyWriter(Stream stream)
 {
+    private readonly byte[] _outBuffer = new byte[8192];
+    private int _outCount;
     private uint _buffer;
     private int _bitCount;
 
@@ -38,6 +40,8 @@ internal sealed class JpegEntropyWriter(Stream stream)
             int padBits = 8 - _bitCount;
             WriteBits((1 << padBits) - 1, padBits);
         }
+
+        DrainBuffer();
     }
 
     /// <summary>Resets bit-accumulation state, e.g. after writing a restart marker.</summary>
@@ -49,10 +53,29 @@ internal sealed class JpegEntropyWriter(Stream stream)
 
     private void WriteStuffedByte(byte b)
     {
-        stream.WriteByte(b);
+        AppendByte(b);
         if (b == 0xFF)
         {
-            stream.WriteByte(0x00);
+            AppendByte(0x00);
+        }
+    }
+
+    private void AppendByte(byte b)
+    {
+        if (_outCount == _outBuffer.Length)
+        {
+            DrainBuffer();
+        }
+
+        _outBuffer[_outCount++] = b;
+    }
+
+    private void DrainBuffer()
+    {
+        if (_outCount > 0)
+        {
+            stream.Write(_outBuffer, 0, _outCount);
+            _outCount = 0;
         }
     }
 }
