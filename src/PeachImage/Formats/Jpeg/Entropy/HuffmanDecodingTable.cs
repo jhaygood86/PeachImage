@@ -60,6 +60,13 @@ internal sealed class HuffmanDecodingTable
     private readonly short[] _fastAcValue = new short[FastTableSize];
     private readonly byte[] _fastAcBits = new byte[FastTableSize];
 
+    // Same idea as _fastAc* above, for DC decode: a DC symbol is a bare magnitude size (no run nibble),
+    // so this needs only a value + total-bits pair per slot, no separate "kind" byte — _fastDcBits[i] == 0
+    // unambiguously means "no combined match" (a real match's bits is always >= 1, the shortest possible
+    // Huffman code), the same sentinel convention _fastLength already uses above.
+    private readonly short[] _fastDcValue = new short[FastTableSize];
+    private readonly byte[] _fastDcBits = new byte[FastTableSize];
+
     private HuffmanDecodingTable(int[] minCode, int[] maxCode, int[] valPtr, byte[] values)
     {
         _minCode = minCode;
@@ -70,6 +77,7 @@ internal sealed class HuffmanDecodingTable
         Array.Fill(_fastSymbol, (short)-1);
         BuildFastTable();
         BuildAcFastTable();
+        BuildDcFastTable();
     }
 
     /// <summary>Builds a decoding table from a parsed DHT table specification.</summary>
@@ -158,6 +166,28 @@ internal sealed class HuffmanDecodingTable
 
         value = reader.ReceiveExtend(size);
         return AcSymbolKind.Coefficient;
+    }
+
+    /// <summary>
+    /// Decodes the next DC difference value — a Huffman-coded magnitude size plus its sign-extended
+    /// magnitude — from <paramref name="reader"/>. Used by both baseline and progressive-first DC decode
+    /// (identical operation in both; progressive-first applies its own successive-approximation shift
+    /// afterward). Simpler than <see cref="DecodeAc"/>: a DC symbol has no run/EOB/ZRL cases to dispatch on,
+    /// it's always exactly "decode a size, then read that many magnitude bits" — so resolving both in one
+    /// lookup needs only a value and a total-bits-consumed pair per fast-table slot, not a kind byte too.
+    /// </summary>
+    public int DecodeDcDiff(JpegEntropyReader reader)
+    {
+        int peeked = reader.PeekBits(FastTableBits);
+        byte bits = _fastDcBits[peeked];
+        if (bits != 0)
+        {
+            reader.GetBits(bits);
+            return _fastDcValue[peeked];
+        }
+
+        int size = Decode(reader);
+        return reader.ReceiveExtend(size);
     }
 
     private int DecodeSlow(JpegEntropyReader reader)
@@ -265,6 +295,69 @@ internal sealed class HuffmanDecodingTable
                         _fastAcRun[slot] = (byte)run;
                         _fastAcValue[slot] = value;
                         _fastAcBits[slot] = totalBits;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Builds the DC-specific fast table <see cref="DecodeDcDiff"/> uses — see the type-level remarks.
+    /// Also built (and equally harmless) for an AC table: interpreting an AC symbol's full
+    /// <c>run&lt;&lt;4|size</c> byte as a bare DC size produces well-bounded but meaningless entries (the
+    /// same <c>length + size &gt; FastTableBits</c> guard below still protects every array access, same as
+    /// for a genuine DC table) — safe regardless of the interpretation, but the only reason it's fine to
+    /// skip a table-kind check entirely is that <see cref="DecodeDcDiff"/> is never actually invoked on an
+    /// AC table (<c>FrameDecoder</c> keeps <c>dcTables</c>/<c>acTables</c> strictly separate), so nothing
+    /// ever reads whatever ends up in these slots for one.
+    /// </summary>
+    private void BuildDcFastTable()
+    {
+        for (int length = 1; length <= FastTableBits; length++)
+        {
+            if (_maxCode[length] == -1)
+            {
+                continue;
+            }
+
+            for (int code = _minCode[length]; code <= _maxCode[length]; code++)
+            {
+                int size = _values[_valPtr[length] + (code - _minCode[length])];
+                int codeBase = code << (FastTableBits - length);
+                int fillCount = 1 << (FastTableBits - length);
+
+                if (size == 0)
+                {
+                    // Matches ReceiveExtend's own early return (magnitudeBits == 0 => 0) — no magnitude
+                    // bits to read, the DC difference is exactly 0.
+                    for (int fill = 0; fill < fillCount; fill++)
+                    {
+                        _fastDcValue[codeBase | fill] = 0;
+                        _fastDcBits[codeBase | fill] = (byte)length;
+                    }
+
+                    continue;
+                }
+
+                if (length + size > FastTableBits)
+                {
+                    continue;
+                }
+
+                int magnitudeShift = FastTableBits - length - size;
+                int magnitudeCount = 1 << size;
+                int dontCareCount = 1 << magnitudeShift;
+                byte totalBits = (byte)(length + size);
+
+                for (int magnitude = 0; magnitude < magnitudeCount; magnitude++)
+                {
+                    short value = (short)JpegEntropyReader.ExtendSign(magnitude, size);
+                    int magnitudeBase = codeBase | (magnitude << magnitudeShift);
+                    for (int dontCare = 0; dontCare < dontCareCount; dontCare++)
+                    {
+                        int slot = magnitudeBase | dontCare;
+                        _fastDcValue[slot] = value;
+                        _fastDcBits[slot] = totalBits;
                     }
                 }
             }

@@ -178,8 +178,7 @@ internal static class ProgressiveScanDecoder
 
     private static void DecodeDcFirstBlock(JpegEntropyReader entropy, HuffmanDecodingTable dcTable, ComponentDecodeState component, Span<short> block, int al)
     {
-        int size = dcTable.Decode(entropy);
-        int diff = entropy.ReceiveExtend(size);
+        int diff = dcTable.DecodeDcDiff(entropy);
         component.DcPredictor += diff;
         block[0] = (short)(component.DcPredictor << al);
     }

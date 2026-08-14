@@ -99,8 +99,7 @@ internal static class BaselineScanDecoder
         // ProgressiveScanDecoder relies on the same guarantee without ever clearing per-block either.
         var block = component.Coefficients.Block(blockX, blockY);
 
-        int dcSize = dcTable.Decode(entropy);
-        int diff = entropy.ReceiveExtend(dcSize);
+        int diff = dcTable.DecodeDcDiff(entropy);
         component.DcPredictor += diff;
         block[0] = (short)component.DcPredictor;
 

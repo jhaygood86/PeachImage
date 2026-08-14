@@ -1,3 +1,4 @@
+using PeachImage.Formats.Jpeg;
 using PeachImage.Formats.Jpeg.Entropy;
 using PeachImage.Formats.Jpeg.Markers;
 
@@ -88,8 +89,41 @@ public class HuffmanDecodingTableAcTests
 
         for (int i = 0; i < symbolCount; i++)
         {
-            var fastKind = table.DecodeAc(fastReader, out int fastRun, out int fastValue);
-            var (referenceKind, referenceRun, referenceValue) = DecodeAcReference(table, referenceReader);
+            // Random bytes aren't a real Huffman-encoded stream: for a table with any gaps in its code
+            // space, random noise can eventually produce a pattern neither implementation can resolve.
+            // Both share the same underlying Decode/DecodeSlow for exactly this case, so they must agree
+            // that it's invalid at the same point rather than the test assuming unbounded decodable symbols.
+            JpegDecodingException? fastException = null;
+            AcSymbolKind fastKind = default;
+            int fastRun = 0, fastValue = 0;
+            try
+            {
+                fastKind = table.DecodeAc(fastReader, out fastRun, out fastValue);
+            }
+            catch (JpegDecodingException ex)
+            {
+                fastException = ex;
+            }
+
+            JpegDecodingException? referenceException = null;
+            AcSymbolKind referenceKind = default;
+            int referenceRun = 0, referenceValue = 0;
+            try
+            {
+                (referenceKind, referenceRun, referenceValue) = DecodeAcReference(table, referenceReader);
+            }
+            catch (JpegDecodingException ex)
+            {
+                referenceException = ex;
+            }
+
+            if (fastException is not null || referenceException is not null)
+            {
+                Assert.NotNull(fastException);
+                Assert.NotNull(referenceException);
+                Assert.Equal(referenceException.Message, fastException.Message);
+                break;
+            }
 
             Assert.Equal(referenceKind, fastKind);
             if (fastKind == AcSymbolKind.Coefficient)
