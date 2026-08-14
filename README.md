@@ -49,3 +49,8 @@ dotnet run -c Release --project bench/PeachImage.Benchmarks
 Compares PeachImage's JPEG decode/encode throughput against real libjpeg-turbo (via
 `Quamotion.TurboJpegWrapper`, a dev-only dependency of the benchmark project only — never referenced by
 the shipped library).
+
+## License
+
+MIT — see [LICENSE](LICENSE). One algorithm's numerical structure (the AAN fast DCT/IDCT butterfly wiring)
+was referenced from libjpeg-turbo during implementation; see [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).

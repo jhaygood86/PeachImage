@@ -23,6 +23,7 @@ public class DctBenchmarks
     private static readonly IInverseDctKernel Vector128Inverse = new Vector128InverseDct();
     private static readonly IInverseDctKernel Vector256Inverse = new Vector256InverseDct();
     private static readonly IInverseDctKernel FastScalarInverse = new FastScalarInverseDct();
+    private static readonly IInverseDctKernel AanInverse = new AanScalarInverseDct();
 
     [SuppressMessage("Performance", "CA1859", Justification = "Deliberately held as the interface type: these fields exist to compare every IForwardDctKernel tier side by side.")]
     private static readonly IForwardDctKernel ScalarForward = new ScalarForwardDct();
@@ -36,11 +37,15 @@ public class DctBenchmarks
     [SuppressMessage("Performance", "CA1859", Justification = "Deliberately held as the interface type: these fields exist to compare every IForwardDctKernel tier side by side.")]
     private static readonly IForwardDctKernel FastScalarForward = new FastScalarForwardDct();
 
+    [SuppressMessage("Performance", "CA1859", Justification = "Deliberately held as the interface type: these fields exist to compare every IForwardDctKernel tier side by side.")]
+    private static readonly IForwardDctKernel AanForward = new AanScalarForwardDct();
+
     private short[] _coefficients = null!;
     private float[] _scalarDequant = null!;
     private float[] _vector128Dequant = null!;
     private float[] _vector256Dequant = null!;
     private float[] _fastScalarDequant = null!;
+    private float[] _aanDequant = null!;
     private byte[] _inverseOutput = null!;
 
     private byte[] _forwardInput = null!;
@@ -68,6 +73,7 @@ public class DctBenchmarks
         _vector128Dequant = Vector128Inverse.PrepareDequantTable(quant);
         _vector256Dequant = Vector256Inverse.PrepareDequantTable(quant);
         _fastScalarDequant = FastScalarInverse.PrepareDequantTable(quant);
+        _aanDequant = AanInverse.PrepareDequantTable(quant);
         _inverseOutput = new byte[64];
 
         _forwardInput = new byte[64];
@@ -90,6 +96,10 @@ public class DctBenchmarks
     [Benchmark]
     [BenchmarkCategory("Inverse-SingleBlock")]
     public void FastScalarInverse_SingleBlock() => FastScalarInverse.Transform(_coefficients, _fastScalarDequant, _inverseOutput, outputStride: 8);
+
+    [Benchmark]
+    [BenchmarkCategory("Inverse-SingleBlock")]
+    public void AanInverse_SingleBlock() => AanInverse.Transform(_coefficients, _aanDequant, _inverseOutput, outputStride: 8);
 
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("Inverse-ManyBlocks")]
@@ -131,6 +141,16 @@ public class DctBenchmarks
         }
     }
 
+    [Benchmark]
+    [BenchmarkCategory("Inverse-ManyBlocks")]
+    public void AanInverse_ManyBlocks()
+    {
+        for (int i = 0; i < ManyBlocksIterations; i++)
+        {
+            AanInverse.Transform(_coefficients, _aanDequant, _inverseOutput, outputStride: 8);
+        }
+    }
+
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("Forward-SingleBlock")]
     public void ScalarForward_SingleBlock() => ScalarForward.Transform(_forwardInput, inputStride: 8, _forwardOutput);
@@ -146,6 +166,10 @@ public class DctBenchmarks
     [Benchmark]
     [BenchmarkCategory("Forward-SingleBlock")]
     public void FastScalarForward_SingleBlock() => FastScalarForward.Transform(_forwardInput, inputStride: 8, _forwardOutput);
+
+    [Benchmark]
+    [BenchmarkCategory("Forward-SingleBlock")]
+    public void AanForward_SingleBlock() => AanForward.Transform(_forwardInput, inputStride: 8, _forwardOutput);
 
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("Forward-ManyBlocks")]
@@ -184,6 +208,16 @@ public class DctBenchmarks
         for (int i = 0; i < ManyBlocksIterations; i++)
         {
             FastScalarForward.Transform(_forwardInput, inputStride: 8, _forwardOutput);
+        }
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("Forward-ManyBlocks")]
+    public void AanForward_ManyBlocks()
+    {
+        for (int i = 0; i < ManyBlocksIterations; i++)
+        {
+            AanForward.Transform(_forwardInput, inputStride: 8, _forwardOutput);
         }
     }
 }

@@ -187,6 +187,56 @@ public class DctAccuracyTests
         AssertForwardDctKernelsAgree(new ScalarForwardDct(), new FastScalarForwardDct(), seed, tolerance: 1e-6);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    public void AanScalarInverseDct_MatchesScalarReference_ForRandomBlocks(int seed)
+    {
+        // AanScalarInverseDct's PrepareDequantTable folds S(u)*S(v) into the dequant table it hands back,
+        // so this reuses the same generic comparison as the other tiers: each kernel prepares its own
+        // dequant table from the same raw quant values, and the resulting pixels should still agree.
+        AssertInverseDctKernelsAgree(new ScalarInverseDct(), new AanScalarInverseDct(), seed);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void AanScalarForwardDct_MatchesScalarReference_ForRandomBlocks(int seed)
+    {
+        // Unlike the other IForwardDctKernel tiers, AanScalarForwardDct's raw Transform() output carries a
+        // per-frequency S(u)*S(v) scale (by design — see AanScaleFactors), so it isn't directly comparable
+        // to ScalarForwardDct's output. Dividing by its own PrepareQuantTable(allOnes) result — exactly how
+        // FrameEncoder actually consumes an IForwardDctKernel — removes that scale before comparing.
+        var random = new Random(seed);
+        Span<byte> input = stackalloc byte[64];
+        for (int i = 0; i < 64; i++)
+        {
+            input[i] = (byte)random.Next(0, 256);
+        }
+
+        Span<ushort> quant = stackalloc ushort[64];
+        quant.Fill(1);
+
+        var scalar = new ScalarForwardDct();
+        var aan = new AanScalarForwardDct();
+        var aanScale = aan.PrepareQuantTable(quant);
+
+        Span<double> scalarOutput = stackalloc double[64];
+        Span<double> aanRawOutput = stackalloc double[64];
+        scalar.Transform(input, inputStride: 8, scalarOutput);
+        aan.Transform(input, inputStride: 8, aanRawOutput);
+
+        for (int i = 0; i < 64; i++)
+        {
+            double aanOutput = aanRawOutput[i] / aanScale[i];
+            Assert.True(Math.Abs(scalarOutput[i] - aanOutput) <= 1e-6, $"Coefficient {i}: scalar={scalarOutput[i]:F6}, aan={aanOutput:F6}");
+        }
+    }
+
     private static void AssertInverseDctKernelsAgree(IInverseDctKernel scalar, IInverseDctKernel simd, int seed)
     {
         var random = new Random(seed);
