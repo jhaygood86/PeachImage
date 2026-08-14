@@ -39,6 +39,19 @@ internal sealed class Vector256ColorConverter : IColorConverter
     // worry about — the same bias-and-truncate trick used by the DCT kernels, replacing a MathF.Round call.
     private static readonly Vector256<float> RoundingBias = Vector256.Create(0.5f);
 
+    // Byte-shuffle indices for packing 8 lanes of separate R/G/B bytes (each vector's low 8 bytes hold the
+    // data, high 8 bytes are zero — see NarrowRounded) into 24 bytes of interleaved r,g,b,r,g,b,... output,
+    // avoiding a scalar per-byte store loop. Index 8 always selects a known-zero byte from the source
+    // vector's upper half, so out-of-channel positions contribute nothing to the OR below. Reg0 covers
+    // output bytes 0-15 (pixels 0-4 plus pixel 5's R byte); Reg1's low 8 bytes cover output bytes 16-23
+    // (pixel 5's G/B through pixel 7).
+    private static readonly Vector128<byte> RgbShuffleR0 = Vector128.Create((byte)0, 8, 8, 1, 8, 8, 2, 8, 8, 3, 8, 8, 4, 8, 8, 5);
+    private static readonly Vector128<byte> RgbShuffleG0 = Vector128.Create((byte)8, 0, 8, 8, 1, 8, 8, 2, 8, 8, 3, 8, 8, 4, 8, 8);
+    private static readonly Vector128<byte> RgbShuffleB0 = Vector128.Create((byte)8, 8, 0, 8, 8, 1, 8, 8, 2, 8, 8, 3, 8, 8, 4, 8);
+    private static readonly Vector128<byte> RgbShuffleR1 = Vector128.Create((byte)8, 8, 6, 8, 8, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8);
+    private static readonly Vector128<byte> RgbShuffleG1 = Vector128.Create((byte)5, 8, 8, 6, 8, 8, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8);
+    private static readonly Vector128<byte> RgbShuffleB1 = Vector128.Create((byte)8, 5, 8, 8, 6, 8, 8, 7, 8, 8, 8, 8, 8, 8, 8, 8);
+
     public void YCbCrToRgb(ReadOnlySpan<byte> y, ReadOnlySpan<byte> cb, ReadOnlySpan<byte> cr, Span<byte> rgb, int pixelCount)
     {
         int i = 0;
@@ -48,9 +61,11 @@ internal sealed class Vector256ColorConverter : IColorConverter
             var cbv = LoadWidened(cb, i) - V128;
             var crv = LoadWidened(cr, i) - V128;
 
-            StoreRounded(Clamp(yv + (V1_402 * crv)), rgb, (i * 3) + 0, 3);
-            StoreRounded(Clamp(yv - (V0_344136 * cbv) - (V0_714136 * crv)), rgb, (i * 3) + 1, 3);
-            StoreRounded(Clamp(yv + (V1_772 * cbv)), rgb, (i * 3) + 2, 3);
+            var rv = Clamp(yv + (V1_402 * crv));
+            var gv = Clamp(yv - (V0_344136 * cbv) - (V0_714136 * crv));
+            var bv = Clamp(yv + (V1_772 * cbv));
+
+            StoreInterleavedRgb(rv, gv, bv, rgb, i * 3);
         }
 
         for (; i < pixelCount; i++)
@@ -155,6 +170,35 @@ internal sealed class Vector256ColorConverter : IColorConverter
 
     private static Vector256<int> ToRoundedInt(Vector256<float> value) => Vector256.ConvertToInt32(value + RoundingBias);
 
+    /// <summary>Rounds <paramref name="value"/>'s <see cref="Lanes"/> lanes down to a <see cref="Vector64{Byte}"/> (int-&gt;uint-&gt;ushort-&gt;byte narrow, no scalar casts) — the same chain <see cref="StoreRounded"/>'s planar fast path uses.</summary>
+    private static Vector64<byte> NarrowRounded(Vector256<float> value)
+    {
+        var asUInt = ToRoundedInt(value).AsUInt32();
+        var narrowedToUShort = Vector128.Narrow(asUInt.GetLower(), asUInt.GetUpper());
+        return Vector128.Narrow(narrowedToUShort, Vector128<ushort>.Zero).GetLower();
+    }
+
+    /// <summary>
+    /// Rounds three per-channel <see cref="Lanes"/>-wide vectors and writes them directly as
+    /// <see cref="Lanes"/> * 3 interleaved r,g,b,r,g,b,... bytes — the common decode-to-RGB24 output shape.
+    /// Builds the 24-byte run via byte shuffles instead of <see cref="StoreRounded"/>'s scalar per-lane,
+    /// stride-3 store loop: measured (dotnet-trace CPU profile) as ~36% of total decode self-time before
+    /// this change, split roughly evenly between this method's old scalar store and <see cref="YCbCrToRgb"/>
+    /// itself — by far the largest single hotspot bucket, ahead of the IDCT and entropy decode.
+    /// </summary>
+    private static void StoreInterleavedRgb(Vector256<float> rv, Vector256<float> gv, Vector256<float> bv, Span<byte> destination, int firstOffset)
+    {
+        var r = Vector128.Create(NarrowRounded(rv), Vector64<byte>.Zero);
+        var g = Vector128.Create(NarrowRounded(gv), Vector64<byte>.Zero);
+        var b = Vector128.Create(NarrowRounded(bv), Vector64<byte>.Zero);
+
+        var lo = Vector128.Shuffle(r, RgbShuffleR0) | Vector128.Shuffle(g, RgbShuffleG0) | Vector128.Shuffle(b, RgbShuffleB0);
+        var hi = Vector128.Shuffle(r, RgbShuffleR1) | Vector128.Shuffle(g, RgbShuffleG1) | Vector128.Shuffle(b, RgbShuffleB1);
+
+        lo.CopyTo(destination.Slice(firstOffset, 16));
+        hi.GetLower().CopyTo(destination.Slice(firstOffset + 16, 8));
+    }
+
     /// <summary>
     /// Rounds <paramref name="value"/> and writes the <see cref="Lanes"/> resulting bytes into
     /// <paramref name="destination"/> at the given <paramref name="stride"/>.
@@ -176,10 +220,7 @@ internal sealed class Vector256ColorConverter : IColorConverter
     {
         if (stride == 1 && !invert)
         {
-            var asUInt = ToRoundedInt(value).AsUInt32();
-            var narrowedToUShort = Vector128.Narrow(asUInt.GetLower(), asUInt.GetUpper());
-            var bytes = Vector128.Narrow(narrowedToUShort, Vector128<ushort>.Zero).GetLower();
-            bytes.CopyTo(destination.Slice(firstOffset, Lanes));
+            NarrowRounded(value).CopyTo(destination.Slice(firstOffset, Lanes));
             return;
         }
 
