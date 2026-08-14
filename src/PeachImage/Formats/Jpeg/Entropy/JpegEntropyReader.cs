@@ -10,7 +10,7 @@ namespace PeachImage.Formats.Jpeg.Entropy;
 /// </summary>
 internal sealed class JpegEntropyReader(JpegByteSource source)
 {
-    private uint _buffer;
+    private ulong _buffer;
     private int _bitCount;
 
     /// <summary>True once a real marker (not byte-stuffed data) has been encountered and no more entropy-coded bits remain.</summary>
@@ -25,7 +25,7 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
         }
 
         EnsureBits(count);
-        int value = (int)(_buffer >> (32 - count));
+        int value = (int)(_buffer >> (64 - count));
         _buffer <<= count;
         _bitCount -= count;
         return value;
@@ -46,7 +46,7 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
         }
 
         EnsureBits(count);
-        return (int)(_buffer >> (32 - count));
+        return (int)(_buffer >> (64 - count));
     }
 
     /// <summary>
@@ -115,26 +115,26 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
 
     private void EnsureBits(int count)
     {
-        Span<byte> clean = stackalloc byte[4];
-        while (_bitCount < count && _bitCount <= 24)
+        Span<byte> clean = stackalloc byte[8];
+        while (_bitCount < count && _bitCount <= 56)
         {
             if (!AtMarkerBoundary)
             {
-                // Normally 1-4 (32-bit _buffer, entry guarantees 0 <= _bitCount <= 24 so at least 1 byte
-                // fits): the exact number of whole bytes that can be packed in without _bitCount exceeding 32.
+                // Normally 1-8 (64-bit _buffer, entry guarantees 0 <= _bitCount <= 56 so at least 1 byte
+                // fits): the exact number of whole bytes that can be packed in without _bitCount exceeding 64.
                 // Clamped defensively: GetBits doesn't validate its caller-supplied count against a malformed
                 // stream's Huffman-decoded "size" values before subtracting it from _bitCount, so a
                 // sufficiently adversarial file (see the corpus crashtest suite) can already have driven
                 // _bitCount negative by the time control reaches here — the same way the original byte-at-a-
                 // time EnsureBits tolerated it (via a wraparound shift amount, not a crash), this must not
                 // turn that into an out-of-range span slice.
-                int maxBulk = Math.Clamp((32 - _bitCount) / 8, 0, 4);
+                int maxBulk = Math.Clamp((64 - _bitCount) / 8, 0, 8);
                 int read = maxBulk == 0 ? 0 : source.ReadCleanRun(clean[..maxBulk]);
                 if (read > 0)
                 {
                     for (int i = 0; i < read; i++)
                     {
-                        _buffer |= (uint)clean[i] << (24 - _bitCount);
+                        _buffer |= (ulong)clean[i] << (56 - _bitCount);
                         _bitCount += 8;
                     }
 
@@ -148,7 +148,7 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
                 AtMarkerBoundary = true;
             }
 
-            _buffer |= (uint)b << (24 - _bitCount);
+            _buffer |= (ulong)b << (56 - _bitCount);
             _bitCount += 8;
         }
     }

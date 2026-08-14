@@ -7,7 +7,7 @@ namespace PeachImage.Formats.Jpeg.Markers;
 /// </summary>
 internal sealed class JpegByteSource(Stream stream)
 {
-    private readonly byte[] _buffer = new byte[8192];
+    private readonly byte[] _buffer = new byte[65536];
     private int _bufferStart;
     private int _bufferEnd;
     private readonly byte[] _pending = new byte[2];

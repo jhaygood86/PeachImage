@@ -205,6 +205,15 @@ internal static class FrameEncoder
         Span<double> fdctOutput = stackalloc double[64];
         var effectiveQuant = DctKernelSelector.Forward.PrepareQuantTable(quantTable);
 
+        // Precomputed once per component (like effectiveQuant itself), not per block: turns the 64
+        // divisions every block used to pay into 64 multiplications, division being meaningfully more
+        // expensive than multiplication for the same operation count.
+        Span<double> reciprocalQuant = stackalloc double[64];
+        for (int i = 0; i < 64; i++)
+        {
+            reciprocalQuant[i] = 1.0 / effectiveQuant[i];
+        }
+
         for (int by = 0; by < blocksHigh; by++)
         {
             for (int bx = 0; bx < blocksWide; bx++)
@@ -215,7 +224,7 @@ internal static class FrameEncoder
                 int blockOffset = ((by * blocksWide) + bx) * 64;
                 for (int i = 0; i < 64; i++)
                 {
-                    double quantized = fdctOutput[i] / effectiveQuant[i];
+                    double quantized = fdctOutput[i] * reciprocalQuant[i];
                     coefficients[blockOffset + i] = (short)((int)(quantized + RoundingBias) - RoundingShift);
                 }
             }
