@@ -107,18 +107,16 @@ internal static class BaselineScanDecoder
         int k = 1;
         while (k <= 63)
         {
-            int runSize = acTable.Decode(entropy);
-            int size = runSize & 0xF;
-            int run = runSize >> 4;
+            var kind = acTable.DecodeAc(entropy, out int run, out int value);
 
-            if (size == 0)
+            if (kind == AcSymbolKind.EndOfBlock)
             {
-                if (run != 15)
-                {
-                    break; // EOB
-                }
+                break;
+            }
 
-                k += 16; // ZRL: 16 zero coefficients
+            if (kind == AcSymbolKind.ZeroRun16)
+            {
+                k += 16;
                 continue;
             }
 
@@ -128,7 +126,6 @@ internal static class BaselineScanDecoder
                 throw new JpegDecodingException("Invalid JPEG AC coefficient run: index exceeds block size.");
             }
 
-            int value = entropy.ReceiveExtend(size);
             block[ZigZag.ToNaturalOrder[k]] = (short)value;
             k++;
         }

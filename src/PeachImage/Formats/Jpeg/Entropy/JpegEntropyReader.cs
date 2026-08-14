@@ -60,14 +60,21 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
             return 0;
         }
 
-        int value = GetBits(magnitudeBits);
-        int threshold = 1 << (magnitudeBits - 1);
-        if (value < threshold)
-        {
-            value += (-1 << magnitudeBits) + 1;
-        }
+        return ExtendSign(GetBits(magnitudeBits), magnitudeBits);
+    }
 
-        return value;
+    /// <summary>
+    /// The "EXTEND" half of ITU-T.81 F.2.2.1's "RECEIVE and EXTEND" procedure in isolation: sign-extends
+    /// <paramref name="rawMagnitudeBits"/> (the raw unsigned bits already read, via whatever means) as a
+    /// <paramref name="magnitudeBits"/>-bit-wide DC difference or AC coefficient value. Shared with
+    /// <see cref="HuffmanDecodingTable"/>'s combined Huffman+magnitude fast-decode table, which precomputes
+    /// this at table-build time for every possible magnitude-bit pattern rather than at decode time — pulled
+    /// out to one place specifically so the two call sites can't silently compute it differently.
+    /// </summary>
+    internal static int ExtendSign(int rawMagnitudeBits, int magnitudeBits)
+    {
+        int threshold = 1 << (magnitudeBits - 1);
+        return rawMagnitudeBits < threshold ? rawMagnitudeBits + (-1 << magnitudeBits) + 1 : rawMagnitudeBits;
     }
 
     /// <summary>Discards any partially-consumed bits so the next read starts byte-aligned, as required before a restart marker.</summary>
