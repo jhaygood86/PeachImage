@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/bench/">
+    <Project Path="bench/PeachImage.Benchmarks/PeachImage.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/PeachImage/PeachImage.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PeachImage.Tests/PeachImage.Tests.csproj" />
+  </Folder>
+</Solution>

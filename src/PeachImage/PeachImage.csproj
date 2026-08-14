@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>true</IsPackable>
+    <PackageId>PeachImage</PackageId>
+    <RootNamespace>PeachImage</RootNamespace>
+    <AssemblyName>PeachImage</AssemblyName>
+    <Description>Pure .NET image format readers and writers for commonly used image formats on the web.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="PeachImage.Tests" />
+    <InternalsVisibleTo Include="PeachImage.Benchmarks" />
+  </ItemGroup>
+
+</Project>
+
