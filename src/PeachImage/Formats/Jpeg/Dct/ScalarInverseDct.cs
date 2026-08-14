@@ -10,7 +10,7 @@ internal sealed class ScalarInverseDct : IInverseDctKernel
     private static readonly double[,] Cosines = BuildCosineTable();
     private static readonly double[] Normalization = [1.0 / 1.4142135623730951, 1, 1, 1, 1, 1, 1, 1];
 
-    public void Transform(ReadOnlySpan<short> coefficients, ReadOnlySpan<ushort> dequantTable, Span<byte> output, int outputStride)
+    public void Transform(ReadOnlySpan<short> coefficients, ReadOnlySpan<float> dequantTable, Span<byte> output, int outputStride)
     {
         Span<double> dequantized = stackalloc double[64];
         for (int i = 0; i < 64; i++)

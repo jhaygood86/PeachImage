@@ -13,7 +13,8 @@ public class DctAccuracyTests
         quant.Fill(1);
 
         Span<byte> output = stackalloc byte[64];
-        new ScalarInverseDct().Transform(coefficients, quant, output, outputStride: 8);
+        IInverseDctKernel kernel = new ScalarInverseDct();
+        kernel.Transform(coefficients, kernel.PrepareDequantTable(quant), output, outputStride: 8);
 
         foreach (byte b in output)
         {
@@ -30,7 +31,8 @@ public class DctAccuracyTests
         quant.Fill(1);
 
         Span<byte> output = stackalloc byte[64];
-        new ScalarInverseDct().Transform(coefficients, quant, output, outputStride: 8);
+        IInverseDctKernel kernel = new ScalarInverseDct();
+        kernel.Transform(coefficients, kernel.PrepareDequantTable(quant), output, outputStride: 8);
 
         // DC-only IDCT of value V: C(0)=1/sqrt(2), so the shift is C(0)^2 * (1/4) * V = V/8.
         byte expected = (byte)(128 + (8 / 8));
@@ -59,7 +61,8 @@ public class DctAccuracyTests
         quant.Fill(1);
 
         Span<byte> output = stackalloc byte[64];
-        new ScalarInverseDct().Transform(rounded, quant, output, outputStride: 8);
+        IInverseDctKernel kernel = new ScalarInverseDct();
+        kernel.Transform(rounded, kernel.PrepareDequantTable(quant), output, outputStride: 8);
 
         foreach (byte b in output)
         {
@@ -93,7 +96,8 @@ public class DctAccuracyTests
         quant.Fill(1);
 
         Span<byte> output = stackalloc byte[64];
-        new ScalarInverseDct().Transform(rounded, quant, output, outputStride: 8);
+        IInverseDctKernel kernel = new ScalarInverseDct();
+        kernel.Transform(rounded, kernel.PrepareDequantTable(quant), output, outputStride: 8);
 
         for (int i = 0; i < 64; i++)
         {
@@ -161,6 +165,28 @@ public class DctAccuracyTests
         AssertForwardDctKernelsAgree(new ScalarForwardDct(), new Vector256ForwardDct(), seed);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    public void FastScalarInverseDct_MatchesScalarReference_ForRandomBlocks(int seed)
+    {
+        // FastScalarInverseDct is exact (same double-precision math, just reordered), so it should agree
+        // with the direct-definition reference far more tightly than the float32 SIMD kernels do.
+        AssertInverseDctKernelsAgree(new ScalarInverseDct(), new FastScalarInverseDct(), seed);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void FastScalarForwardDct_MatchesScalarReference_ForRandomBlocks(int seed)
+    {
+        AssertForwardDctKernelsAgree(new ScalarForwardDct(), new FastScalarForwardDct(), seed, tolerance: 1e-6);
+    }
+
     private static void AssertInverseDctKernelsAgree(IInverseDctKernel scalar, IInverseDctKernel simd, int seed)
     {
         var random = new Random(seed);
@@ -178,8 +204,8 @@ public class DctAccuracyTests
 
         Span<byte> scalarOutput = stackalloc byte[64];
         Span<byte> simdOutput = stackalloc byte[64];
-        scalar.Transform(coefficients, quant, scalarOutput, outputStride: 8);
-        simd.Transform(coefficients, quant, simdOutput, outputStride: 8);
+        scalar.Transform(coefficients, scalar.PrepareDequantTable(quant), scalarOutput, outputStride: 8);
+        simd.Transform(coefficients, simd.PrepareDequantTable(quant), simdOutput, outputStride: 8);
 
         for (int i = 0; i < 64; i++)
         {
@@ -187,7 +213,7 @@ public class DctAccuracyTests
         }
     }
 
-    private static void AssertForwardDctKernelsAgree(IForwardDctKernel scalar, IForwardDctKernel simd, int seed)
+    private static void AssertForwardDctKernelsAgree(IForwardDctKernel scalar, IForwardDctKernel simd, int seed, double tolerance = 1.0)
     {
         var random = new Random(seed);
         Span<byte> input = stackalloc byte[64];
@@ -203,7 +229,7 @@ public class DctAccuracyTests
 
         for (int i = 0; i < 64; i++)
         {
-            Assert.True(Math.Abs(scalarOutput[i] - simdOutput[i]) <= 1.0, $"Coefficient {i}: scalar={scalarOutput[i]:F2}, simd={simdOutput[i]:F2}");
+            Assert.True(Math.Abs(scalarOutput[i] - simdOutput[i]) <= tolerance, $"Coefficient {i}: scalar={scalarOutput[i]:F2}, simd={simdOutput[i]:F2}");
         }
     }
 }

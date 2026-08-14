@@ -70,7 +70,7 @@ internal static class FrameReconstructor
         int planeRows = component.Coefficients.BlocksHigh * 8;
         var raw = Rent(planeStride * planeRows, rented);
 
-        var dequant = component.QuantizationTable.Values;
+        var dequant = DctKernelSelector.Inverse.PrepareDequantTable(component.QuantizationTable.Values);
         for (int by = 0; by < component.Coefficients.BlocksHigh; by++)
         {
             for (int bx = 0; bx < component.Coefficients.BlocksWide; bx++)

@@ -14,12 +14,12 @@ internal sealed class Vector256InverseDct : IInverseDctKernel
 {
     private static readonly Vector256<float>[] WeightedCosineRows = BuildRows();
 
-    public void Transform(ReadOnlySpan<short> coefficients, ReadOnlySpan<ushort> dequantTable, Span<byte> output, int outputStride)
+    public void Transform(ReadOnlySpan<short> coefficients, ReadOnlySpan<float> dequantTable, Span<byte> output, int outputStride)
     {
         Span<float> dequantized = stackalloc float[64];
         for (int i = 0; i < 64; i++)
         {
-            dequantized[i] = coefficients[i] * (float)dequantTable[i];
+            dequantized[i] = coefficients[i] * dequantTable[i];
         }
 
         Span<float> rowPass = stackalloc float[64];

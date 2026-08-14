@@ -146,6 +146,7 @@ internal static class FrameEncoder
         int stride = blocksWide * 8;
         var coefficients = new short[blocksWide * blocksHigh * 64];
         Span<double> fdctOutput = stackalloc double[64];
+        var effectiveQuant = DctKernelSelector.Forward.PrepareQuantTable(quantTable);
 
         for (int by = 0; by < blocksHigh; by++)
         {
@@ -157,7 +158,7 @@ internal static class FrameEncoder
                 int blockOffset = ((by * blocksWide) + bx) * 64;
                 for (int i = 0; i < 64; i++)
                 {
-                    double quantized = fdctOutput[i] / quantTable[i];
+                    double quantized = fdctOutput[i] / effectiveQuant[i];
                     coefficients[blockOffset + i] = (short)Math.Round(quantized, MidpointRounding.AwayFromZero);
                 }
             }

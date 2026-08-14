@@ -1,12 +1,22 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Jpeg.Dct;
 
 /// <summary>
-/// Selects the fastest available inverse/forward DCT kernel for the current hardware at startup:
-/// <see cref="Vector256{T}"/> generic intrinsics (effectively AVX/AVX2) when hardware-accelerated, else
-/// <see cref="Vector128{T}"/> generic intrinsics (SSE2 on x86, AdvSimd on Arm — one source file covers
-/// both), else the scalar double-precision reference kernel.
+/// Selects the inverse/forward DCT kernel to use for this process. Currently always selects
+/// <see cref="FastScalarInverseDct"/>/<see cref="FastScalarForwardDct"/> — an exact even/odd fast-DCT
+/// factorization (21 multiplies/1D pass vs. the direct definition's 64) that carries no scale-factor risk.
+/// Measured (see <c>bench/PeachImage.Benchmarks/DctBenchmarks.cs</c>) to beat every dot-product SIMD tier
+/// below despite being scalar: ~19-36% faster per-block than <see cref="Vector256{T}"/> (this selector's
+/// previous default on AVX2 hardware), on top of that tier's own multi-x win over the plain scalar
+/// reference. The <see cref="Vector256{T}"/>/<see cref="Vector128{T}"/>/scalar dot-product kernels
+/// (effectively AVX/AVX2, SSE2/AdvSimd, and a plain double-precision reference) are kept as correctness
+/// oracles for <see cref="ScalarInverseDct"/>/<see cref="ScalarForwardDct"/>-relative testing and
+/// benchmarking, not reachable from here. TODO: a verified true-AAN kernel (fewer multiplies still, at the
+/// cost of needing per-frequency scale factors folded into the quant table — see
+/// <see cref="AanScaleFactors"/>, which is ready but not yet consumed by a kernel) may close more of the
+/// remaining gap to libjpeg-turbo; point here at that once its butterfly wiring is sourced and verified.
 /// </summary>
 internal static class DctKernelSelector
 {
@@ -16,33 +26,9 @@ internal static class DctKernelSelector
     /// <summary>The forward DCT kernel to use for this process.</summary>
     public static IForwardDctKernel Forward { get; } = SelectForward();
 
-    private static IInverseDctKernel SelectInverse()
-    {
-        if (Vector256.IsHardwareAccelerated)
-        {
-            return new Vector256InverseDct();
-        }
+    [SuppressMessage("Performance", "CA1859", Justification = "Returns IInverseDctKernel by design: the selected concrete kernel is expected to change (SIMD-batched AAN tiers, hardware branches) as this evolves.")]
+    private static IInverseDctKernel SelectInverse() => new FastScalarInverseDct();
 
-        if (Vector128.IsHardwareAccelerated)
-        {
-            return new Vector128InverseDct();
-        }
-
-        return new ScalarInverseDct();
-    }
-
-    private static IForwardDctKernel SelectForward()
-    {
-        if (Vector256.IsHardwareAccelerated)
-        {
-            return new Vector256ForwardDct();
-        }
-
-        if (Vector128.IsHardwareAccelerated)
-        {
-            return new Vector128ForwardDct();
-        }
-
-        return new ScalarForwardDct();
-    }
+    [SuppressMessage("Performance", "CA1859", Justification = "Returns IForwardDctKernel by design: the selected concrete kernel is expected to change (SIMD-batched AAN tiers, hardware branches) as this evolves.")]
+    private static IForwardDctKernel SelectForward() => new FastScalarForwardDct();
 }
