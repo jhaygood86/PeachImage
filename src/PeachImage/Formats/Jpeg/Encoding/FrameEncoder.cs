@@ -141,6 +141,14 @@ internal static class FrameEncoder
         return padded;
     }
 
+    // Larger than any legal quantized coefficient magnitude (|quantized| <= ~1448, since the AAN S(u)*S(v)
+    // scale cancels between fdctOutput and effectiveQuant, leaving |trueDct[i] / quantTable[i]| with
+    // quantTable[i] >= 1), so adding this bias makes the quotient unconditionally positive and a truncating
+    // cast rounds to nearest — libjpeg-turbo's jcdctmgr.c trick, replacing a non-inlined Math.Round call on
+    // every one of the 64 coefficients per block.
+    private const double RoundingBias = 16384.5;
+    private const int RoundingShift = 16384;
+
     private static short[] QuantizeComponent(byte[] padded, int blocksWide, int blocksHigh, ushort[] quantTable)
     {
         int stride = blocksWide * 8;
@@ -159,7 +167,7 @@ internal static class FrameEncoder
                 for (int i = 0; i < 64; i++)
                 {
                     double quantized = fdctOutput[i] / effectiveQuant[i];
-                    coefficients[blockOffset + i] = (short)Math.Round(quantized, MidpointRounding.AwayFromZero);
+                    coefficients[blockOffset + i] = (short)((int)(quantized + RoundingBias) - RoundingShift);
                 }
             }
         }

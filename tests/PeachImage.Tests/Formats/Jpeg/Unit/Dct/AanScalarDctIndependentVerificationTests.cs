@@ -1,3 +1,4 @@
+using System.Runtime.Intrinsics.X86;
 using PeachImage.Formats.Jpeg.Dct;
 
 namespace PeachImage.Tests.Formats.Jpeg.Unit.Dct;
@@ -58,14 +59,50 @@ public class AanScalarDctIndependentVerificationTests
         AssertImpulseResponseMatchesClosedForm(u, v, value: 100);
     }
 
-    private static void AssertImpulseResponseMatchesClosedForm(int u, int v, short value)
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    public void Vector256AanInverseDct_SingleRowFrequencyImpulse_MatchesClosedFormBasisFunction(int u)
     {
+        if (!Avx.IsSupported)
+        {
+            Assert.Skip("No AVX hardware acceleration available on this machine.");
+        }
+
+        AssertImpulseResponseMatchesClosedForm(u, v: 0, value: 100, new Vector256AanInverseDct());
+    }
+
+    [Theory]
+    [InlineData(1, 0)]
+    [InlineData(0, 1)]
+    [InlineData(4, 4)]
+    [InlineData(3, 5)]
+    [InlineData(7, 7)]
+    public void Vector256AanInverseDct_DiagonalFrequencyImpulse_MatchesClosedFormBasisFunction(int u, int v)
+    {
+        if (!Avx.IsSupported)
+        {
+            Assert.Skip("No AVX hardware acceleration available on this machine.");
+        }
+
+        AssertImpulseResponseMatchesClosedForm(u, v, value: 100, new Vector256AanInverseDct());
+    }
+
+    private static void AssertImpulseResponseMatchesClosedForm(int u, int v, short value, IInverseDctKernel? kernel = null)
+    {
+        kernel ??= new AanScalarInverseDct();
+
         Span<short> coefficients = stackalloc short[64];
         coefficients[(v * 8) + u] = value;
         Span<ushort> quant = stackalloc ushort[64];
         quant.Fill(1);
 
-        var kernel = new AanScalarInverseDct();
         var dequant = kernel.PrepareDequantTable(quant);
 
         Span<byte> output = stackalloc byte[64];
@@ -95,6 +132,25 @@ public class AanScalarDctIndependentVerificationTests
     [InlineData(3)]
     public void AanScalarForwardDct_MatchesClosedFormDefinition_ForRandomBlocks(int seed)
     {
+        AssertForwardMatchesClosedForm(new AanScalarForwardDct(), seed, tolerance: 1e-6);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void Vector256AanForwardDct_MatchesClosedFormDefinition_ForRandomBlocks(int seed)
+    {
+        if (!Avx.IsSupported)
+        {
+            Assert.Skip("No AVX hardware acceleration available on this machine.");
+        }
+
+        AssertForwardMatchesClosedForm(new Vector256AanForwardDct(), seed, tolerance: 1.0);
+    }
+
+    private static void AssertForwardMatchesClosedForm(IForwardDctKernel kernel, int seed, double tolerance)
+    {
         var random = new Random(seed);
         Span<byte> input = stackalloc byte[64];
         for (int i = 0; i < 64; i++)
@@ -103,7 +159,7 @@ public class AanScalarDctIndependentVerificationTests
         }
 
         Span<double> rawOutput = stackalloc double[64];
-        new AanScalarForwardDct().Transform(input, inputStride: 8, rawOutput);
+        kernel.Transform(input, inputStride: 8, rawOutput);
 
         for (int v = 0; v < 8; v++)
         {
@@ -112,7 +168,7 @@ public class AanScalarDctIndependentVerificationTests
                 double expected = TrueForwardCoefficient(input, inputStride: 8, u, v);
                 double scale = OneDimensionalScaleFactor(u) * OneDimensionalScaleFactor(v);
                 double actual = rawOutput[(v * 8) + u] / scale;
-                Assert.True(Math.Abs(expected - actual) <= 1e-6, $"(u={u},v={v}): expected {expected:F6}, got {actual:F6}");
+                Assert.True(Math.Abs(expected - actual) <= tolerance, $"(u={u},v={v}): expected {expected:F6}, got {actual:F6}");
             }
         }
     }

@@ -9,8 +9,8 @@ namespace PeachImage.Benchmarks;
 /// directly against the others. <c>SingleBlock</c> benchmarks measure one 8x8 <c>Transform</c> call in
 /// isolation; <c>ManyBlocks</c> benchmarks loop 10,000 calls per invocation, closer to the call volume a
 /// real decode/encode actually drives through these kernels (e.g. a 1080p 4:2:0 frame is ~4,000 blocks).
-/// This is the data that should decide whether <see cref="FastScalarInverseDct"/>/<see cref="FastScalarForwardDct"/>
-/// (the current <c>DctKernelSelector</c> default) needs a SIMD-batched successor tier.
+/// <c>DctKernelSelector</c> currently selects <see cref="Vector256AanInverseDct"/>/<see cref="Vector256AanForwardDct"/>
+/// when AVX is available, falling back to <see cref="AanScalarInverseDct"/>/<see cref="AanScalarForwardDct"/> otherwise.
 /// </summary>
 [MemoryDiagnoser]
 [GroupBenchmarksBy(BenchmarkDotNet.Configs.BenchmarkLogicalGroupRule.ByCategory)]
@@ -24,6 +24,7 @@ public class DctBenchmarks
     private static readonly IInverseDctKernel Vector256Inverse = new Vector256InverseDct();
     private static readonly IInverseDctKernel FastScalarInverse = new FastScalarInverseDct();
     private static readonly IInverseDctKernel AanInverse = new AanScalarInverseDct();
+    private static readonly IInverseDctKernel Vector256AanInverse = new Vector256AanInverseDct();
 
     [SuppressMessage("Performance", "CA1859", Justification = "Deliberately held as the interface type: these fields exist to compare every IForwardDctKernel tier side by side.")]
     private static readonly IForwardDctKernel ScalarForward = new ScalarForwardDct();
@@ -40,12 +41,16 @@ public class DctBenchmarks
     [SuppressMessage("Performance", "CA1859", Justification = "Deliberately held as the interface type: these fields exist to compare every IForwardDctKernel tier side by side.")]
     private static readonly IForwardDctKernel AanForward = new AanScalarForwardDct();
 
+    [SuppressMessage("Performance", "CA1859", Justification = "Deliberately held as the interface type: these fields exist to compare every IForwardDctKernel tier side by side.")]
+    private static readonly IForwardDctKernel Vector256AanForward = new Vector256AanForwardDct();
+
     private short[] _coefficients = null!;
     private float[] _scalarDequant = null!;
     private float[] _vector128Dequant = null!;
     private float[] _vector256Dequant = null!;
     private float[] _fastScalarDequant = null!;
     private float[] _aanDequant = null!;
+    private float[] _vector256AanDequant = null!;
     private byte[] _inverseOutput = null!;
 
     private byte[] _forwardInput = null!;
@@ -74,6 +79,7 @@ public class DctBenchmarks
         _vector256Dequant = Vector256Inverse.PrepareDequantTable(quant);
         _fastScalarDequant = FastScalarInverse.PrepareDequantTable(quant);
         _aanDequant = AanInverse.PrepareDequantTable(quant);
+        _vector256AanDequant = Vector256AanInverse.PrepareDequantTable(quant);
         _inverseOutput = new byte[64];
 
         _forwardInput = new byte[64];
@@ -100,6 +106,10 @@ public class DctBenchmarks
     [Benchmark]
     [BenchmarkCategory("Inverse-SingleBlock")]
     public void AanInverse_SingleBlock() => AanInverse.Transform(_coefficients, _aanDequant, _inverseOutput, outputStride: 8);
+
+    [Benchmark]
+    [BenchmarkCategory("Inverse-SingleBlock")]
+    public void Vector256AanInverse_SingleBlock() => Vector256AanInverse.Transform(_coefficients, _vector256AanDequant, _inverseOutput, outputStride: 8);
 
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("Inverse-ManyBlocks")]
@@ -151,6 +161,16 @@ public class DctBenchmarks
         }
     }
 
+    [Benchmark]
+    [BenchmarkCategory("Inverse-ManyBlocks")]
+    public void Vector256AanInverse_ManyBlocks()
+    {
+        for (int i = 0; i < ManyBlocksIterations; i++)
+        {
+            Vector256AanInverse.Transform(_coefficients, _vector256AanDequant, _inverseOutput, outputStride: 8);
+        }
+    }
+
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("Forward-SingleBlock")]
     public void ScalarForward_SingleBlock() => ScalarForward.Transform(_forwardInput, inputStride: 8, _forwardOutput);
@@ -170,6 +190,10 @@ public class DctBenchmarks
     [Benchmark]
     [BenchmarkCategory("Forward-SingleBlock")]
     public void AanForward_SingleBlock() => AanForward.Transform(_forwardInput, inputStride: 8, _forwardOutput);
+
+    [Benchmark]
+    [BenchmarkCategory("Forward-SingleBlock")]
+    public void Vector256AanForward_SingleBlock() => Vector256AanForward.Transform(_forwardInput, inputStride: 8, _forwardOutput);
 
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("Forward-ManyBlocks")]
@@ -218,6 +242,16 @@ public class DctBenchmarks
         for (int i = 0; i < ManyBlocksIterations; i++)
         {
             AanForward.Transform(_forwardInput, inputStride: 8, _forwardOutput);
+        }
+    }
+
+    [Benchmark]
+    [BenchmarkCategory("Forward-ManyBlocks")]
+    public void Vector256AanForward_ManyBlocks()
+    {
+        for (int i = 0; i < ManyBlocksIterations; i++)
+        {
+            Vector256AanForward.Transform(_forwardInput, inputStride: 8, _forwardOutput);
         }
     }
 }

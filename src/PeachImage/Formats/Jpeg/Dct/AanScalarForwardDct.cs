@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace PeachImage.Formats.Jpeg.Dct;
 
 /// <summary>
@@ -26,6 +28,7 @@ internal sealed class AanScalarForwardDct : IForwardDctKernel
 
     public double[] PrepareQuantTable(ReadOnlySpan<ushort> quantTable) => AanScaleFactors.BuildForwardQuantTable(quantTable);
 
+    [SkipLocalsInit]
     public void Transform(ReadOnlySpan<byte> input, int inputStride, Span<double> output)
     {
         Span<double> shifted = stackalloc double[64];
