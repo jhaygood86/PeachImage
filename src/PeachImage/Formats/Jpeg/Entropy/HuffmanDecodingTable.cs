@@ -6,13 +6,17 @@ namespace PeachImage.Formats.Jpeg.Entropy;
 /// A JPEG Huffman decoding table, built per ITU-T.81 Annex C/F.2.2.3 from a bit-length-count array plus the
 /// symbol values in code order. Most real-world Huffman codes are short (the whole point of Huffman coding
 /// is that common symbols get short codes), so decoding first tries an O(1) lookup against every code of
-/// length &lt;= 8 via an 8-bit-lookahead table (the standard "fast Huffman" technique used by essentially every
-/// performance-oriented JPEG decoder); only codes longer than 8 bits fall back to the bit-by-bit walk that
-/// exactly follows the spec's reference decode procedure.
+/// length &lt;= <see cref="FastTableBits"/> via a lookahead table (the standard "fast Huffman" technique used
+/// by essentially every performance-oriented JPEG decoder); only longer codes fall back to the bit-by-bit
+/// walk that exactly follows the spec's reference decode procedure. <see cref="FastTableBits"/> is 10, not
+/// the more commonly-cited 8: benchmarked against real decode workloads, 10 measurably beat 8 (fewer codes
+/// fall through to the slow path) while 12 measured no further improvement over 10 — codes needing more
+/// than 10 bits of lookahead are rare enough in practice that widening past that point mostly just grows
+/// the table (and its one-time per-scan build cost) without resolving any more symbols in the fast path.
 /// </summary>
 internal sealed class HuffmanDecodingTable
 {
-    private const int FastTableBits = 8;
+    private const int FastTableBits = 10;
     private const int FastTableSize = 1 << FastTableBits;
 
     private readonly int[] _minCode = new int[17];

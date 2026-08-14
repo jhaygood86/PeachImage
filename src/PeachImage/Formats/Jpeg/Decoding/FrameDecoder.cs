@@ -262,6 +262,12 @@ internal static class FrameDecoder
         bool needsDc = !frameHeader.IsProgressive || scanHeader.SpectralStart == 0;
         bool needsAc = !frameHeader.IsProgressive || scanHeader.SpectralStart > 0;
 
+        // Cb and Cr (almost always) share one DC and one AC table selector, so without caching, a
+        // 3-component scan builds each of those tables twice for no reason — real waste now that the
+        // fast-lookahead table each Build() populates is 1024 entries, not the 256 it used to be.
+        var dcTableCache = new Dictionary<byte, HuffmanDecodingTable>();
+        var acTableCache = new Dictionary<byte, HuffmanDecodingTable>();
+
         for (int i = 0; i < scanHeader.Components.Length; i++)
         {
             var scanComponent = scanHeader.Components[i];
@@ -270,22 +276,34 @@ internal static class FrameDecoder
 
             if (needsDc)
             {
-                if (!dcHuffmanSpecs.TryGetValue(scanComponent.DcTableSelector, out var dcSpec))
+                if (!dcTableCache.TryGetValue(scanComponent.DcTableSelector, out var dcTable))
                 {
-                    throw new JpegDecodingException($"Scan references undefined DC Huffman table {scanComponent.DcTableSelector}.");
+                    if (!dcHuffmanSpecs.TryGetValue(scanComponent.DcTableSelector, out var dcSpec))
+                    {
+                        throw new JpegDecodingException($"Scan references undefined DC Huffman table {scanComponent.DcTableSelector}.");
+                    }
+
+                    dcTable = HuffmanDecodingTable.Build(dcSpec);
+                    dcTableCache[scanComponent.DcTableSelector] = dcTable;
                 }
 
-                dcTables[i] = HuffmanDecodingTable.Build(dcSpec);
+                dcTables[i] = dcTable;
             }
 
             if (needsAc)
             {
-                if (!acHuffmanSpecs.TryGetValue(scanComponent.AcTableSelector, out var acSpec))
+                if (!acTableCache.TryGetValue(scanComponent.AcTableSelector, out var acTable))
                 {
-                    throw new JpegDecodingException($"Scan references undefined AC Huffman table {scanComponent.AcTableSelector}.");
+                    if (!acHuffmanSpecs.TryGetValue(scanComponent.AcTableSelector, out var acSpec))
+                    {
+                        throw new JpegDecodingException($"Scan references undefined AC Huffman table {scanComponent.AcTableSelector}.");
+                    }
+
+                    acTable = HuffmanDecodingTable.Build(acSpec);
+                    acTableCache[scanComponent.AcTableSelector] = acTable;
                 }
 
-                acTables[i] = HuffmanDecodingTable.Build(acSpec);
+                acTables[i] = acTable;
             }
         }
 

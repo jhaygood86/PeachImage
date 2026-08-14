@@ -93,8 +93,11 @@ internal static class BaselineScanDecoder
         int blockX,
         int blockY)
     {
+        // Not cleared here: JpegCoefficientBuffer's constructor already zeroes the entire component
+        // buffer once up front (see its remarks), and baseline decode visits each block exactly once —
+        // so every position this pass doesn't explicitly write is already zero from construction.
+        // ProgressiveScanDecoder relies on the same guarantee without ever clearing per-block either.
         var block = component.Coefficients.Block(blockX, blockY);
-        block.Clear();
 
         int dcSize = dcTable.Decode(entropy);
         int diff = entropy.ReceiveExtend(dcSize);
