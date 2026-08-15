@@ -210,14 +210,37 @@ internal static class PngAncillaryChunkReader
     private static byte[] BuildTextData(PngTextEntry entry) =>
         System.Text.Encoding.UTF8.GetBytes(string.Concat(entry.Keyword, "\0", entry.LanguageTag, "\0", entry.TranslatedKeyword, "\0", entry.Text));
 
-    private static byte[]? TryInflate(byte[] zlibCompressed)
+    /// <summary>
+    /// Inflates a zlib-compressed ancillary chunk payload (iCCP/zTXt/iTXt), rejecting the decode outright if
+    /// the decompressed output exceeds <paramref name="maxOutputBytes"/>. Unlike IDAT — whose decompressed
+    /// size is bounded by image geometry validated up front — an ancillary chunk's inflated size has no
+    /// geometry-derived bound, so without this cap a small, highly-compressible chunk (already limited to
+    /// <see cref="PngDecodingLimits.MaxAncillaryChunkBytes"/> on disk) could inflate to a deflate-bomb-scale
+    /// allocation. <paramref name="maxOutputBytes"/> is exposed (rather than hardcoded) so tests can exercise
+    /// the cap without needing to materialize tens of megabytes of data.
+    /// </summary>
+    internal static byte[]? TryInflate(byte[] zlibCompressed, long maxOutputBytes = PngDecodingLimits.MaxInflatedAncillaryBytes)
     {
         try
         {
             using var source = new MemoryStream(zlibCompressed);
             using var zlib = new ZLibStream(source, CompressionMode.Decompress);
             using var result = new MemoryStream();
-            zlib.CopyTo(result);
+
+            Span<byte> buffer = new byte[81920];
+            long totalRead = 0;
+            int read;
+            while ((read = zlib.Read(buffer)) > 0)
+            {
+                totalRead += read;
+                if (totalRead > maxOutputBytes)
+                {
+                    throw new PngDecodingException($"PNG ancillary chunk decompressed to more than {maxOutputBytes} bytes; rejecting as a likely decompression bomb.");
+                }
+
+                result.Write(buffer[..read]);
+            }
+
             return result.ToArray();
         }
         catch (InvalidDataException)
