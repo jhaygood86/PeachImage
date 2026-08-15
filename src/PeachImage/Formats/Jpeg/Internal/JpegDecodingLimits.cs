@@ -13,4 +13,13 @@ internal static class JpegDecodingLimits
     /// buffer allocations bounded to a safe, predictable size.
     /// </summary>
     public const long MaxPixelCount = 268_435_456;
+
+    /// <summary>
+    /// The most SOS (scan) segments a single frame will decode before giving up. Legitimate progressive
+    /// JPEGs — even elaborate custom scan scripts — rarely exceed a few dozen scans; without a cap, a
+    /// crafted file can repeat a trivial SOS segment (progressive AC-first scans can cover tens of thousands
+    /// of blocks via a single short EOB-run Huffman code) thousands of times, multiplying decode cost by the
+    /// repetition count for almost no growth in file size — a "scan bomb" CPU-exhaustion DoS.
+    /// </summary>
+    public const int MaxScanCount = 128;
 }

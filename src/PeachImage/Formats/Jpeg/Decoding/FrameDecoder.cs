@@ -61,8 +61,12 @@ internal static class FrameDecoder
         }
     }
 
-    /// <summary>Parses <paramref name="stream"/> as a JPEG bitstream.</summary>
-    public static DecodedFrame Decode(Stream stream)
+    /// <summary>
+    /// Parses <paramref name="stream"/> as a JPEG bitstream. <paramref name="maxScanCount"/> defaults to the
+    /// production <see cref="JpegDecodingLimits.MaxScanCount"/> cap and is exposed as a parameter only so
+    /// tests can exercise the cap without needing to construct a file with hundreds of scans.
+    /// </summary>
+    public static DecodedFrame Decode(Stream stream, int maxScanCount = JpegDecodingLimits.MaxScanCount)
     {
         var source = new JpegByteSource(stream);
         var markerReader = new JpegMarkerReader(source);
@@ -75,6 +79,14 @@ internal static class FrameDecoder
         var quantTables = new Dictionary<byte, JpegQuantizationTable>();
         var dcHuffmanSpecs = new Dictionary<byte, JpegHuffmanTableSpec>();
         var acHuffmanSpecs = new Dictionary<byte, JpegHuffmanTableSpec>();
+
+        // Built tables are cached across every scan in the frame, not just within one — Cb/Cr (almost always)
+        // share table selectors both within a scan and across scans, so without this a multi-scan progressive
+        // file rebuilds the same 1024-entry fast-lookahead table over and over for no reason. A DHT segment
+        // that redefines a table id invalidates any cached entry for that id (see the Dht case below).
+        var dcTableCache = new Dictionary<byte, HuffmanDecodingTable>();
+        var acTableCache = new Dictionary<byte, HuffmanDecodingTable>();
+
         var metadata = new List<RawMetadataProfile>();
         var iccChunks = new SortedDictionary<byte, byte[]>();
         int iccChunkCount = 0;
@@ -85,6 +97,7 @@ internal static class FrameDecoder
         int mcusAcross = 0;
         int mcusDown = 0;
         int restartInterval = 0;
+        int scanCount = 0;
 
         while (true)
         {
@@ -110,6 +123,9 @@ internal static class FrameDecoder
                     foreach (var spec in JpegHuffmanTableSpec.ParseAll(ReadSegment(markerReader)))
                     {
                         (spec.TableClass == 0 ? dcHuffmanSpecs : acHuffmanSpecs)[spec.Id] = spec;
+
+                        // A redefined table id invalidates whatever was already built and cached for it.
+                        (spec.TableClass == 0 ? dcTableCache : acTableCache).Remove(spec.Id);
                     }
 
                     break;
@@ -188,7 +204,13 @@ internal static class FrameDecoder
                         throw new JpegDecodingException("SOS marker encountered before a frame header (SOF).");
                     }
 
-                    DecodeScan(markerReader, source, frameHeader, components, dcHuffmanSpecs, acHuffmanSpecs, restartInterval, mcusAcross, mcusDown);
+                    scanCount++;
+                    if (scanCount > maxScanCount)
+                    {
+                        throw new JpegDecodingException($"JPEG frame contains more than {maxScanCount} scans, exceeding the maximum supported scan count.");
+                    }
+
+                    DecodeScan(markerReader, source, frameHeader, components, dcHuffmanSpecs, acHuffmanSpecs, dcTableCache, acTableCache, restartInterval, mcusAcross, mcusDown);
                     break;
                 }
 
@@ -249,6 +271,8 @@ internal static class FrameDecoder
         ComponentDecodeState[] components,
         Dictionary<byte, JpegHuffmanTableSpec> dcHuffmanSpecs,
         Dictionary<byte, JpegHuffmanTableSpec> acHuffmanSpecs,
+        Dictionary<byte, HuffmanDecodingTable> dcTableCache,
+        Dictionary<byte, HuffmanDecodingTable> acTableCache,
         int restartInterval,
         int mcusAcross,
         int mcusDown)
@@ -261,12 +285,6 @@ internal static class FrameDecoder
 
         bool needsDc = !frameHeader.IsProgressive || scanHeader.SpectralStart == 0;
         bool needsAc = !frameHeader.IsProgressive || scanHeader.SpectralStart > 0;
-
-        // Cb and Cr (almost always) share one DC and one AC table selector, so without caching, a
-        // 3-component scan builds each of those tables twice for no reason — real waste now that the
-        // fast-lookahead table each Build() populates is 1024 entries, not the 256 it used to be.
-        var dcTableCache = new Dictionary<byte, HuffmanDecodingTable>();
-        var acTableCache = new Dictionary<byte, HuffmanDecodingTable>();
 
         for (int i = 0; i < scanHeader.Components.Length; i++)
         {

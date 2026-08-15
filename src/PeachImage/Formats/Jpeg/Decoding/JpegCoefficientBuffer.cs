@@ -25,9 +25,18 @@ internal sealed class JpegCoefficientBuffer
         BlocksWide = blocksWide;
         BlocksHigh = blocksHigh;
 
-        int length = blocksWide * blocksHigh * 64;
-        _coefficients = ArrayPool<short>.Shared.Rent(length);
-        Array.Clear(_coefficients, 0, length);
+        // Computed in `long` and bounds-checked explicitly here rather than trusting the frame-header-level
+        // pixel-count check alone — that check and this allocation are two separate call sites, and relying
+        // on an invariant that only holds because of how they currently happen to combine is fragile to a
+        // future change in either one.
+        long length = (long)blocksWide * blocksHigh * 64;
+        if (length > int.MaxValue)
+        {
+            throw new JpegDecodingException($"JPEG component block grid ({blocksWide}x{blocksHigh}) is too large to decode.");
+        }
+
+        _coefficients = ArrayPool<short>.Shared.Rent((int)length);
+        Array.Clear(_coefficients, 0, (int)length);
     }
 
     /// <summary>The block grid width, padded up to a whole number of MCUs.</summary>
