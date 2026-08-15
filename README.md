@@ -16,7 +16,14 @@ Targets .NET 10. No native interop — every codec is managed code, using modern
   masks) and encode (24bpp truecolor, 8bpp indexed grayscale with optional RLE8, 32bpp with an explicit
   alpha channel via BITMAPV4HEADER + BI_BITFIELDS) are implemented, including explicit alpha-channel
   support on both sides.
-- Other formats (PNG, WebP, GIF, ...) are not yet implemented. The public API
+- **PNG**: decode and encode for all 5 color types (grayscale, truecolor, palette, grayscale+alpha,
+  truecolor+alpha) at every valid bit depth (1/2/4/8/16 — including via new `Gray16`/`Rgb48`/`Rgba64`
+  pixel formats), Adam7 interlacing, palette + `tRNS` transparency (both per-entry and single-color-key),
+  optional opt-in gamma correction (`PngDecoderOptions.ScreenGamma`, mirroring libpng's
+  `png_set_gamma`), and the common ancillary chunks (`gAMA`/`cHRM`/`sRGB`/`iCCP`/`pHYs`/`tEXt`/`zTXt`/`iTXt`/`tIME`/`bKGD`).
+  Encoding doesn't yet build an indexed palette from an arbitrary truecolor source (no automatic
+  quantization) — non-palette sources always encode as grayscale/truecolor(+alpha).
+- Other formats (WebP, GIF, ...) are not yet implemented. The public API
   (`Image`, `IImageDecoder`/`IImageEncoder`, `ImageFormatManager`) is designed to support them without
   breaking changes when they're added.
 
@@ -40,11 +47,13 @@ dotnet build PeachImage.slnx
 dotnet test PeachImage.slnx
 ```
 
-The first `dotnet test` run automatically fetches JPEG and BMP test corpora (the Imazen `codec-corpus`
+The first `dotnet test` run automatically fetches JPEG, BMP, and PNG test corpora (the Imazen `codec-corpus`
 conformance sets, image-rs/jpeg-decoder's test assets, and — for BMP — the `bmp-conformance` subset of
-`codec-corpus`, itself generated from Jason Summers' [bmpsuite](https://github.com/jsummers/bmpsuite)) into
-the gitignored `tests/corpus/` directory — no separate script needed. Set `PEACHIMAGE_SKIP_CORPUS_FETCH=1` to
-skip network access; corpus-driven tests report as skipped rather than failing.
+`codec-corpus`, itself generated from Jason Summers' [bmpsuite](https://github.com/jsummers/bmpsuite); for
+PNG — the `pngsuite` subset of `codec-corpus`, a mirror of Willem van Schaik's classic PngSuite conformance
+set) into the gitignored `tests/corpus/` directory — no separate script needed. Set
+`PEACHIMAGE_SKIP_CORPUS_FETCH=1` to skip network access; corpus-driven tests report as skipped rather than
+failing.
 
 ## Benchmarking
 
