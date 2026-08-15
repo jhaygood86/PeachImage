@@ -153,12 +153,7 @@ internal static class BmpHeaderReader
 
         ValidatePlanes(planes);
 
-        bool topDown = rawHeight < 0;
-        int height = topDown ? -rawHeight : rawHeight;
-        if (height == 0)
-        {
-            throw new BmpDecodingException("BMP height cannot be zero.");
-        }
+        (bool topDown, int height) = ResolveHeight(rawHeight);
 
         return new BmpHeader
         {
@@ -202,12 +197,7 @@ internal static class BmpHeaderReader
 
         ValidatePlanes(planes);
 
-        bool topDown = rawHeight < 0;
-        int height = topDown ? -rawHeight : rawHeight;
-        if (height == 0)
-        {
-            throw new BmpDecodingException("BMP height cannot be zero.");
-        }
+        (bool topDown, int height) = ResolveHeight(rawHeight);
 
         return new BmpHeader
         {
@@ -221,6 +211,30 @@ internal static class BmpHeaderReader
             DeclaredImageSize = declaredImageSize,
             PaletteEntrySize = 4,
         };
+    }
+
+    /// <summary>
+    /// Resolves a raw signed DIB-header height field into (topDown, positive height). Negating
+    /// <see cref="int.MinValue"/> overflows back to <see cref="int.MinValue"/> (still negative) in unchecked
+    /// arithmetic, which would otherwise silently bypass the width*height-vs-<see cref="BmpDecodingLimits.MaxPixelCount"/>
+    /// guard in <see cref="Read"/> (a positive width times a negative height is never greater than a positive
+    /// limit) — so that exact value is rejected explicitly, up front, rather than relying on downstream checks.
+    /// </summary>
+    private static (bool TopDown, int Height) ResolveHeight(int rawHeight)
+    {
+        if (rawHeight == int.MinValue)
+        {
+            throw new BmpDecodingException("Invalid BMP height: int.MinValue.");
+        }
+
+        bool topDown = rawHeight < 0;
+        int height = topDown ? -rawHeight : rawHeight;
+        if (height == 0)
+        {
+            throw new BmpDecodingException("BMP height cannot be zero.");
+        }
+
+        return (topDown, height);
     }
 
     private static void ValidatePlanes(int planes)
