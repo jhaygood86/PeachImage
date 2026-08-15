@@ -123,15 +123,15 @@ resolve them. Every figure here has a StdDev under 1.2%.
 
 | Scenario | PeachImage | SkiaSharp | Ratio | Was | Allocated (PeachImage) |
 |---|---:|---:|---:|---:|---:|
-| Lossless, Photographic | 44.52 ms | 23.84 ms | **1.87×** | 2.58× | 10.9 MB |
-| Lossy, Photographic | 36.10 ms | 13.95 ms | **2.59×** | 4.11× | 6.9 MB |
-| Lossless, Graphic (flat color) | 0.72 ms | 0.35 ms | 2.07× | 2.08× | 2.2 MB |
-| Lossy, Alpha | 41.15 ms | 19.48 ms | **2.11×** | 3.34× | 17.3 MB |
-| Lossless, Alpha | 45.26 ms | 24.82 ms | **1.82×** | 2.63× | 13.0 MB |
-| Small image (32×24) | 13.17 µs | 12.26 µs | **1.07×** | 1.30× | 44 KB |
+| Lossless, Photographic | 44.07 ms | 23.82 ms | **1.85×** | 2.58× | 10.9 MB |
+| Lossy, Photographic | 32.63 ms | 13.92 ms | **2.34×** | 4.11× | 6.9 MB |
+| Lossless, Graphic (flat color) | 0.71 ms | 0.35 ms | 2.06× | 2.08× | 2.2 MB |
+| Lossy, Alpha | 36.40 ms | 19.61 ms | **1.86×** | 3.34× | 17.3 MB |
+| Lossless, Alpha | 45.39 ms | 24.81 ms | **1.83×** | 2.63× | 13.0 MB |
+| Small image (32×24) | 12.96 µs | 12.25 µs | **1.06×** | 1.30× | 44 KB |
 
 The "Was" column is the same benchmark on the same job before the optimization pass described below,
-not the `ShortRun` figures previously published here. Decode time fell 28–39% on the four large-image
+not the `ShortRun` figures previously published here. Decode time fell 29–45% on the four large-image
 scenarios, and **Small image now meets the 10% target**. The rest do not, and the remaining gap is
 characterized honestly at the end of this section.
 
@@ -151,7 +151,8 @@ benchmarks executable that decodes one asset in a tight loop, traced with `dotne
 seven findings contradicted the standing hypotheses:
 
 - **The in-loop deblocking filter was the largest single bucket in lossy decode at 32%**, not the
-  3–6% assumed. It had been treated as a secondary target behind entropy decode.
+  3–6% assumed. It had been treated as a secondary target behind entropy decode. Both of its edge
+  orientations are now vectorized, which took it to 25%.
 - **VP8L's predictor transform was 37% of lossless decode**, and instrumenting which of its 14 modes
   actually run showed that mode 11 (`Select`) accounted for **100%** of that work on the photographic
   asset. Sampling alone had hidden this, attributing most of it to the caller it partly inlines into.
@@ -172,7 +173,7 @@ commit history carries the per-change numbers.
 
 #### Remaining gap
 
-The post-change profile puts lossy decode at 33% coefficient/entropy decode, 32% loop filter, 17%
+The post-change profile puts lossy decode at 37% coefficient/entropy decode, 25% loop filter, 18%
 upsample+convert, 6% inverse DCT; and lossless at 69% pixel stream (Huffman/LZ77/colour cache), 24%
 predictor transform. Three distinct reasons remain, in decreasing size:
 
@@ -190,10 +191,12 @@ predictor transform. Three distinct reasons remain, in decreasing size:
    all three happen while the band is still in L2. Converting is a much larger restructuring, and it
    would cost the "filters the whole frame in raster order, exactly reproducing the reference
    ordering" property that makes the current shape verifiable.
-3. **Kernel coverage.** The loop filter's strided ("left") edge orientation is still scalar — it needs
-   a 16×8 transpose in and out, and it is the largest single named item left at ~15% of lossy. So are
-   the inverse DCT's remaining full-butterfly path (6%), VP8 intra prediction, and
-   `Vp8LColorTransform`.
+3. **Kernel coverage.** Both loop-filter orientations are vectorized now, but only for 16-lane edges;
+   the 8-wide chroma edges are still scalar in both, which is what most of the remaining ~25% loop-filter
+   share is. Also still scalar: the inverse DCT's full-butterfly path (6%), VP8 intra prediction, and
+   `Vp8LColorTransform`. The strided orientation's transpose is x86-only — an
+   `AdvSimd.Arm64.ZipLow`/`ZipHigh` path would be the direct Arm equivalent, and until it exists Arm
+   falls back to the scalar filter for that orientation.
 
    Separately, `Lossless-Graphic` and `Small image` are not kernel-bound at all: profiling the
    640×480 flat-colour case shows ~82% of it in buffer management (`Buffer.MemmoveInternal` alone is
@@ -214,13 +217,14 @@ at 1.27× too.
 | JPEG | 1.13×–1.30× | 1.20×–1.43× |
 | BMP | 0.40×–1.05× | no baseline (PeachImage-only) |
 | PNG | 1.08×–1.63× | 0.65×–1.27× |
-| WebP | 1.07×–2.59× | not yet implemented |
+| WebP | 1.06×–2.34× | not yet implemented |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
 and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the
 16-bit decode path. JPEG has the largest gap on both sides among the mature formats and is the best
 next target for further optimization work there (entropy coding is the most likely place to start).
 WebP is newest and still furthest from target on large images, but a profile-guided pass has closed
-roughly a third of the gap on every one of them (lossy 4.11× → 2.59×, lossless 2.58× → 1.87×) and
+close to half the gap on the lossy ones and roughly a third on the lossless (lossy 4.11× → 2.34×,
+lossy+alpha 3.34× → 1.86×, lossless 2.58× → 1.85×) and
 brought the small-image case inside it; what is left is concentrated in entropy decode, which is
 inherently sequential.
