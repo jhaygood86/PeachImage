@@ -53,7 +53,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         Vp8QuantMatrix[] quantMatrices = Vp8Dequantizer.Resolve(quantIndices, segmentHeader);
 
         partition0.GetFlag(); // refresh_entropy_probs - irrelevant, a WebP `VP8 ` chunk is always a single lone keyframe.
-        byte[,,,] coeffProbabilities = Vp8CoefficientDecoder.ParseProbabilityUpdates(partition0);
+        byte[] coeffProbabilities = Vp8CoefficientDecoder.ParseProbabilityUpdates(partition0);
         bool useSkipProbability = partition0.GetFlag();
         int skipFalseProbability = useSkipProbability ? (int)partition0.GetValue(8) : 0;
 
@@ -238,7 +238,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
 
     private static bool DecodeMacroblockCoefficients(
         Vp8BoolDecoder tokenBr,
-        byte[,,,] probabilities,
+        byte[] probabilities,
         Vp8QuantMatrix quant,
         Vp8MacroblockModes modes,
         int mbX,
@@ -315,7 +315,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
 
     private static bool DecodeChromaPlane(
         Vp8BoolDecoder tokenBr,
-        byte[,,,] probabilities,
+        byte[] probabilities,
         Vp8QuantMatrix quant,
         int mbX,
         bool[] above,

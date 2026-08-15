@@ -1,4 +1,6 @@
-﻿namespace PeachImage.Formats.Webp.Decoding.Vp8;
+﻿using System.Runtime.CompilerServices;
+
+namespace PeachImage.Formats.Webp.Decoding.Vp8;
 
 /// <summary>
 /// VP8's default and update-gating coefficient-token probability tables (RFC 6386 section 13.5), indexed
@@ -15,6 +17,17 @@ internal static class Vp8CoefficientProbabilities
     public const int NumBands = 8;
     public const int NumContexts = 3;
     public const int NumProbabilities = 11;
+
+    /// <summary>Total entries in a flattened table — one <see cref="NumProbabilities"/>-long run per (plane type, band, context).</summary>
+    public const int FlatLength = NumTypes * NumBands * NumContexts * NumProbabilities;
+
+    /// <summary>
+    /// Flat index of <c>[<paramref name="planeType"/>, <paramref name="band"/>, <paramref name="context"/>, 0]</c>,
+    /// i.e. the start of that triple's 11-probability run.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int FlatOffset(int planeType, int band, int context) =>
+        (((planeType * NumBands) + band) * NumContexts + context) * NumProbabilities;
 
     public static readonly byte[,,,] Default = new byte[NumTypes, NumBands, NumContexts, NumProbabilities]
     {
@@ -359,4 +372,41 @@ internal static class Vp8CoefficientProbabilities
             },
         },
     };
+    /// <summary>
+    /// <see cref="Default"/> laid out flat, so the coefficient decoder can take a <see cref="Span{T}"/> over one
+    /// (plane type, band, context) run instead of indexing a four-dimensional array.
+    /// </summary>
+    /// <remarks>
+    /// CLR multidimensional arrays cannot be spanned and cost an address-computation multiply chain with a
+    /// bounds check per rank on every access — and <see cref="Vp8CoefficientDecoder"/> performs two or three
+    /// such accesses per decoded coefficient bit, several million times per 1080p frame. Computed from the
+    /// literals above at type initialization rather than transcribed a second time: the literals stay the
+    /// single reviewable source of truth, and there is no opportunity for the two copies to disagree.
+    /// </remarks>
+    public static readonly byte[] DefaultFlat = Flatten(Default);
+
+    /// <summary><see cref="UpdateProbability"/> laid out flat, in the same order — see <see cref="DefaultFlat"/>.</summary>
+    public static readonly byte[] UpdateProbabilityFlat = Flatten(UpdateProbability);
+
+    private static byte[] Flatten(byte[,,,] source)
+    {
+        var flat = new byte[FlatLength];
+        int i = 0;
+
+        for (int t = 0; t < NumTypes; t++)
+        {
+            for (int b = 0; b < NumBands; b++)
+            {
+                for (int c = 0; c < NumContexts; c++)
+                {
+                    for (int p = 0; p < NumProbabilities; p++)
+                    {
+                        flat[i++] = source[t, b, c, p];
+                    }
+                }
+            }
+        }
+
+        return flat;
+    }
 }

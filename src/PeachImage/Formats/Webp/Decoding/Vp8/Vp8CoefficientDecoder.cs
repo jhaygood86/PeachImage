@@ -1,4 +1,6 @@
-﻿namespace PeachImage.Formats.Webp.Decoding.Vp8;
+﻿using System.Runtime.CompilerServices;
+
+namespace PeachImage.Formats.Webp.Decoding.Vp8;
 
 /// <summary>
 /// Tracks the above/left nonzero-coefficient context (RFC 6386 section 13.4) that feeds each 4x4 block's
@@ -50,24 +52,24 @@ internal sealed class Vp8CoefficientContext
 internal static class Vp8CoefficientDecoder
 {
     /// <summary>Reads the per-frame coefficient probability table: the default table patched by any bits partition 0 flags as updated (RFC 6386 section 13.4/9.7).</summary>
-    public static byte[,,,] ParseProbabilityUpdates(Vp8BoolDecoder br)
+    /// <remarks>
+    /// Returns the flat <c>[planeType][band][context][probability]</c> layout described on
+    /// <see cref="Vp8CoefficientProbabilities.DefaultFlat"/>. Because that layout's index is monotonic in
+    /// exactly the nesting order the RFC specifies these updates in, the four nested loops this replaced
+    /// collapse to one flat walk that is provably the same sequence of <c>GetBit</c>/<c>GetValue</c> calls
+    /// against the same probabilities — the bitstream is read identically, byte for byte.
+    /// </remarks>
+    public static byte[] ParseProbabilityUpdates(Vp8BoolDecoder br)
     {
-        var probabilities = (byte[,,,])Vp8CoefficientProbabilities.Default.Clone();
+        var probabilities = new byte[Vp8CoefficientProbabilities.FlatLength];
+        Vp8CoefficientProbabilities.DefaultFlat.CopyTo(probabilities, 0);
+        var updateProbabilities = Vp8CoefficientProbabilities.UpdateProbabilityFlat;
 
-        for (int t = 0; t < Vp8CoefficientProbabilities.NumTypes; t++)
+        for (int i = 0; i < Vp8CoefficientProbabilities.FlatLength; i++)
         {
-            for (int b = 0; b < Vp8CoefficientProbabilities.NumBands; b++)
+            if (br.GetBit(updateProbabilities[i]) != 0)
             {
-                for (int c = 0; c < Vp8CoefficientProbabilities.NumContexts; c++)
-                {
-                    for (int p = 0; p < Vp8CoefficientProbabilities.NumProbabilities; p++)
-                    {
-                        if (br.GetBit(Vp8CoefficientProbabilities.UpdateProbability[t, b, c, p]) != 0)
-                        {
-                            probabilities[t, b, c, p] = (byte)br.GetValue(8);
-                        }
-                    }
-                }
+                probabilities[i] = (byte)br.GetValue(8);
             }
         }
 
@@ -80,9 +82,16 @@ internal static class Vp8CoefficientDecoder
     /// the end-of-block position, or 16); the caller derives "this block had any nonzero coefficient" as
     /// <c>result &gt; first</c>.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="probabilities"/> is the flat layout produced by <see cref="ParseProbabilityUpdates"/>.
+    /// Each (plane type, band, context) triple is resolved to an 11-element <see cref="ReadOnlySpan{T}"/> once,
+    /// after which every probability read is a constant index into it that RyuJIT can prove in range — the
+    /// shape libwebp uses (<c>const uint8_t* p = prob[n]-&gt;probas_[ctx];</c>) and the reason the flat layout
+    /// exists at all.
+    /// </remarks>
     public static int DecodeBlock(
         Vp8BoolDecoder br,
-        byte[,,,] probabilities,
+        byte[] probabilities,
         int planeType,
         int firstContext,
         int first,
@@ -96,12 +105,13 @@ internal static class Vp8CoefficientDecoder
         while (n < 16)
         {
             int band = Vp8CoefficientTrees.PositionToBand[n];
-            if (br.GetBit(probabilities[planeType, band, ctx, 0]) == 0)
+            var p = ProbabilitiesFor(probabilities, planeType, band, ctx);
+            if (br.GetBit(p[0]) == 0)
             {
                 return n;
             }
 
-            while (br.GetBit(probabilities[planeType, band, ctx, 1]) == 0)
+            while (br.GetBit(p[1]) == 0)
             {
                 n++;
                 if (n == 16)
@@ -111,18 +121,19 @@ internal static class Vp8CoefficientDecoder
 
                 ctx = 0;
                 band = Vp8CoefficientTrees.PositionToBand[n];
+                p = ProbabilitiesFor(probabilities, planeType, band, ctx);
             }
 
             int magnitude;
             int nextCtx;
-            if (br.GetBit(probabilities[planeType, band, ctx, 2]) == 0)
+            if (br.GetBit(p[2]) == 0)
             {
                 magnitude = 1;
                 nextCtx = 1;
             }
             else
             {
-                magnitude = DecodeLargeValue(br, probabilities, planeType, band, ctx);
+                magnitude = DecodeLargeValue(br, p);
                 nextCtx = 2;
             }
 
@@ -137,18 +148,23 @@ internal static class Vp8CoefficientDecoder
         return 16;
     }
 
-    private static int DecodeLargeValue(Vp8BoolDecoder br, byte[,,,] probabilities, int planeType, int band, int ctx)
-    {
-        byte P(int k) => probabilities[planeType, band, ctx, k];
+    /// <summary>The 11 token-tree node probabilities for one (plane type, band, context) triple.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ReadOnlySpan<byte> ProbabilitiesFor(byte[] probabilities, int planeType, int band, int ctx) =>
+        probabilities.AsSpan(
+            Vp8CoefficientProbabilities.FlatOffset(planeType, band, ctx),
+            Vp8CoefficientProbabilities.NumProbabilities);
 
+    private static int DecodeLargeValue(Vp8BoolDecoder br, ReadOnlySpan<byte> p)
+    {
         int v;
-        if (br.GetBit(P(3)) == 0)
+        if (br.GetBit(p[3]) == 0)
         {
-            v = br.GetBit(P(4)) == 0 ? 2 : 3 + br.GetBit(P(5));
+            v = br.GetBit(p[4]) == 0 ? 2 : 3 + br.GetBit(p[5]);
         }
-        else if (br.GetBit(P(6)) == 0)
+        else if (br.GetBit(p[6]) == 0)
         {
-            if (br.GetBit(P(7)) == 0)
+            if (br.GetBit(p[7]) == 0)
             {
                 v = 5 + br.GetBit(159);
             }
@@ -160,8 +176,8 @@ internal static class Vp8CoefficientDecoder
         }
         else
         {
-            int bit1 = br.GetBit(P(8));
-            int bit0 = br.GetBit(P(9 + bit1));
+            int bit1 = br.GetBit(p[8]);
+            int bit0 = br.GetBit(p[9 + bit1]);
             int cat = (2 * bit1) + bit0;
             byte[] table = cat switch
             {
