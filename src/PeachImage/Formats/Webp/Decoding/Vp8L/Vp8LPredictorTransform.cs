@@ -1,4 +1,6 @@
+﻿using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using PeachImage.Formats.Webp.Kernels;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8L;
@@ -74,15 +76,159 @@ internal static class Vp8LPredictorTransform
             return;
         }
 
-        for (int i = 0; i < runLength; i++)
+        // `mode` is constant for the whole run, so it is resolved to a concrete predictor here, once, rather
+        // than re-tested per pixel. Each Run<T> instantiation is a separate specialization whose Predict call
+        // the JIT devirtualizes and inlines, leaving a loop that does only that mode's arithmetic.
+        switch (mode)
         {
-            int index = rowBase + xStart + i;
-            uint predicted = Predict(mode, pixels, index, width);
-            pixels[index] = Vp8LPixelMath.AddWrapping(pixels[index], predicted);
+            case 1: Run<LeftPredictor>(pixels, width, rowBase, xStart, runLength); return;
+            case 3: Run<TopRightPredictor>(pixels, width, rowBase, xStart, runLength); return;
+            case 4: Run<TopLeftPredictor>(pixels, width, rowBase, xStart, runLength); return;
+            case 5: Run<Average3LeftTopTopRightPredictor>(pixels, width, rowBase, xStart, runLength); return;
+            case 6: Run<Average2LeftTopLeftPredictor>(pixels, width, rowBase, xStart, runLength); return;
+            case 7: Run<Average2LeftTopPredictor>(pixels, width, rowBase, xStart, runLength); return;
+            case 8: Run<Average2TopLeftTopPredictor>(pixels, width, rowBase, xStart, runLength); return;
+            case 9: Run<Average2TopTopRightPredictor>(pixels, width, rowBase, xStart, runLength); return;
+            case 10: Run<Average4Predictor>(pixels, width, rowBase, xStart, runLength); return;
+            case 11: Run<SelectPredictor>(pixels, width, rowBase, xStart, runLength); return;
+            case 12: Run<ClampedAddSubtractFullPredictor>(pixels, width, rowBase, xStart, runLength); return;
+            case 13: Run<ClampedAddSubtractHalfPredictor>(pixels, width, rowBase, xStart, runLength); return;
+
+            // Mode 0, plus modes 14/15, which the spec assigns no meaning -- see Predict's remarks.
+            default: Run<OpaqueBlackPredictor>(pixels, width, rowBase, xStart, runLength); return;
         }
     }
 
-    private static uint Predict(int mode, ReadOnlySpan<uint> pixels, int index, int width)
+    /// <summary>
+    /// Applies one predictor mode across a run of pixels within a single row.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Carries the neighborhood forward in registers instead of re-reading it. Every neighbor of pixel
+    /// <c>i+1</c> is already in hand after pixel <c>i</c>: its "left" is the value just written, its "top-left"
+    /// is pixel <c>i</c>'s "top", and its "top" is pixel <c>i</c>'s "top-right". So the loop performs exactly
+    /// one load per pixel (the incoming top-right) rather than the four the shared
+    /// <see cref="Predict(int, ReadOnlySpan{uint}, int, int)"/> performed — which loaded top-right for every
+    /// mode from 3 up, including the many that never use it.
+    /// </para>
+    /// <para>
+    /// Sliding the window this way also preserves the last-column top-right quirk described in this type's
+    /// remarks for free: the neighbor row simply advances through contiguous memory, so at the last column it
+    /// arrives at the current row's own first pixel exactly as an unclamped <c>index - width + 1</c> read
+    /// would. That pixel is written before any run in the row begins and is never rewritten by one, so its
+    /// value is the same whether it is read early or late.
+    /// </para>
+    /// </remarks>
+    private static void Run<TPredictor>(Span<uint> pixels, int width, int rowBase, int xStart, int runLength)
+        where TPredictor : struct, IPredictorMode
+    {
+        // The caller only ever produces runs inside a row, at or past column 1, on a row at or past 1. That is
+        // what puts every index below -- from `start - width - 1` up to `start + runLength - 1` -- in bounds,
+        // and so what makes the unchecked ref arithmetic safe. Checked once here rather than per pixel.
+        int start = rowBase + xStart;
+        if (xStart < 1 || runLength < 1 || rowBase < width || start + runLength > pixels.Length || xStart + runLength > width)
+        {
+            throw new WebpDecodingException("Internal error: VP8L predictor run is out of bounds.");
+        }
+
+        ref uint origin = ref MemoryMarshal.GetReference(pixels);
+        uint left = Unsafe.Add(ref origin, start - 1);
+        uint topLeft = Unsafe.Add(ref origin, start - width - 1);
+        uint top = Unsafe.Add(ref origin, start - width);
+
+        for (int i = 0; i < runLength; i++)
+        {
+            ref uint current = ref Unsafe.Add(ref origin, start + i);
+            uint topRight = Unsafe.Add(ref origin, start + i - width + 1);
+
+            left = Vp8LPixelMath.AddWrapping(current, TPredictor.Predict(left, top, topLeft, topRight));
+            current = left;
+
+            topLeft = top;
+            top = topRight;
+        }
+    }
+
+    /// <summary>
+    /// One of VP8L's predictor modes, as a static-abstract member so a <see langword="struct"/> implementation
+    /// can be passed as a type argument to <see cref="Run{TPredictor}"/> and inlined into it.
+    /// </summary>
+    private interface IPredictorMode
+    {
+        /// <summary>Predicts a pixel from its already-reconstructed neighbors.</summary>
+        static abstract uint Predict(uint left, uint top, uint topLeft, uint topRight);
+    }
+
+    private readonly struct OpaqueBlackPredictor : IPredictorMode
+    {
+        public static uint Predict(uint left, uint top, uint topLeft, uint topRight) => 0xFF000000u;
+    }
+
+    private readonly struct LeftPredictor : IPredictorMode
+    {
+        public static uint Predict(uint left, uint top, uint topLeft, uint topRight) => left;
+    }
+
+    private readonly struct TopRightPredictor : IPredictorMode
+    {
+        public static uint Predict(uint left, uint top, uint topLeft, uint topRight) => topRight;
+    }
+
+    private readonly struct TopLeftPredictor : IPredictorMode
+    {
+        public static uint Predict(uint left, uint top, uint topLeft, uint topRight) => topLeft;
+    }
+
+    private readonly struct Average3LeftTopTopRightPredictor : IPredictorMode
+    {
+        public static uint Predict(uint left, uint top, uint topLeft, uint topRight) => Average3(left, top, topRight);
+    }
+
+    private readonly struct Average2LeftTopLeftPredictor : IPredictorMode
+    {
+        public static uint Predict(uint left, uint top, uint topLeft, uint topRight) => Average2(left, topLeft);
+    }
+
+    private readonly struct Average2LeftTopPredictor : IPredictorMode
+    {
+        public static uint Predict(uint left, uint top, uint topLeft, uint topRight) => Average2(left, top);
+    }
+
+    private readonly struct Average2TopLeftTopPredictor : IPredictorMode
+    {
+        public static uint Predict(uint left, uint top, uint topLeft, uint topRight) => Average2(topLeft, top);
+    }
+
+    private readonly struct Average2TopTopRightPredictor : IPredictorMode
+    {
+        public static uint Predict(uint left, uint top, uint topLeft, uint topRight) => Average2(top, topRight);
+    }
+
+    private readonly struct Average4Predictor : IPredictorMode
+    {
+        public static uint Predict(uint left, uint top, uint topLeft, uint topRight) => Average4(left, topLeft, top, topRight);
+    }
+
+    private readonly struct SelectPredictor : IPredictorMode
+    {
+        public static uint Predict(uint left, uint top, uint topLeft, uint topRight) => Select(top, left, topLeft);
+    }
+
+    private readonly struct ClampedAddSubtractFullPredictor : IPredictorMode
+    {
+        public static uint Predict(uint left, uint top, uint topLeft, uint topRight) => ClampedAddSubtractFull(left, top, topLeft);
+    }
+
+    private readonly struct ClampedAddSubtractHalfPredictor : IPredictorMode
+    {
+        public static uint Predict(uint left, uint top, uint topLeft, uint topRight) => ClampedAddSubtractHalf(left, top, topLeft);
+    }
+
+    /// <summary>
+    /// The mode-dispatched reference form of the predictors, kept as the readable statement of what each mode
+    /// computes and as the oracle the per-mode specializations above are tested against. Not used by decode.
+    /// </summary>
+    internal static uint Predict(int mode, ReadOnlySpan<uint> pixels, int index, int width)
     {
         uint left = pixels[index - 1];
         uint top = pixels[index - width];
@@ -124,7 +270,45 @@ internal static class Vp8LPredictorTransform
 
     private static uint Average4(uint a0, uint a1, uint a2, uint a3) => Average2(Average2(a0, a1), Average2(a2, a3));
 
+    /// <summary>
+    /// Picks whichever of <paramref name="a"/> and <paramref name="b"/> is closer to <paramref name="c"/>,
+    /// measured as the sum of per-channel absolute differences (libwebp's <c>Select</c>).
+    /// </summary>
+    /// <remarks>
+    /// This is the entire cost of predictor mode 11, which the profile showed is the <em>only</em> mode used
+    /// across the whole photographic lossless benchmark asset — and the predictor inverse is ~37% of that
+    /// decode. Two sums of four absolute byte differences is a natural byte-lane vector operation, and doing
+    /// it that way replaces twelve shift/mask extractions and eight <see cref="Math.Abs(int)"/> calls with one
+    /// max, one min and one subtract. Both operand pairs are packed into a single vector — <c>b</c> and
+    /// <c>a</c> in the low two 32-bit lanes against <c>c</c> duplicated — so one comparison covers both sums.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint Select(uint a, uint b, uint c)
+    {
+        if (!Vector128.IsHardwareAccelerated)
+        {
+            return SelectScalar(a, b, c);
+        }
+
+        var operands = Vector128.Create(b, a, 0u, 0u).AsByte();
+        var reference = Vector128.Create(c, c, 0u, 0u).AsByte();
+        ulong differences = (Vector128.Max(operands, reference) - Vector128.Min(operands, reference))
+            .AsUInt64()
+            .ToScalar();
+
+        // Fold the eight |difference| bytes into four 16-bit slots -- no slot can overflow, since each holds
+        // at most 255 + 255 -- then add the pairs: slots 0/1 are |b-c|'s four channels, slots 2/3 are |a-c|'s.
+        const ulong ByteLanes = 0x00FF00FF00FF00FFu;
+        ulong pairSums = (differences & ByteLanes) + ((differences >> 8) & ByteLanes);
+
+        uint distanceToB = (uint)((pairSums & 0xFFFF) + ((pairSums >> 16) & 0xFFFF));
+        uint distanceToA = (uint)(((pairSums >> 32) & 0xFFFF) + ((pairSums >> 48) & 0xFFFF));
+
+        return distanceToB <= distanceToA ? a : b;
+    }
+
+    /// <summary>Fallback for hardware with no usable vector width, and the reference this file's tests pin <see cref="Select"/> against.</summary>
+    internal static uint SelectScalar(uint a, uint b, uint c)
     {
         int paMinusPb =
             Sub3((int)(a >> 24), (int)(b >> 24), (int)(c >> 24)) +
