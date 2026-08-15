@@ -116,44 +116,73 @@ files and diffs pixel output (including an *unpremultiplied* alpha comparison) a
 
 ### Decode
 
-| Scenario | PeachImage | SkiaSharp | Ratio | Allocated (PeachImage) |
-|---|---:|---:|---:|---:|
-| Lossless, Photographic | 65.25 ms | 25.52 ms | 2.56× | 10.9 MB |
-| Lossy, Photographic | 65.24 ms | 14.26 ms | 4.58× | 6.9 MB |
-| Lossless, Graphic (flat color) | 0.83 ms | 0.35 ms | 2.36× | 2.2 MB |
-| Lossy, Alpha | 70.18 ms | 19.33 ms | 3.63× | 17.3 MB |
-| Lossless, Alpha | 70.13 ms | 26.07 ms | 2.69× | 13.0 MB |
-| Small image (32×24) | 15.46 µs | 12.63 µs | 1.22× | 44 KB |
+Unlike the sections above, these numbers come from a **5 warmup + 20 measured iteration** job rather
+than `ShortRun`, with the benchmark process pinned to P-cores. `ShortRun`'s Error bars on these
+scenarios reached ±25 ms — wider than several of the individual improvements below — so it cannot
+resolve them. Every figure here has a StdDev under 1.2%.
 
-**WebP decode does not meet the 10% target** — it is the furthest from it of any format in this
-repo, by a wide margin. Two contributing factors were investigated, in likely order of impact:
+| Scenario | PeachImage | SkiaSharp | Ratio | Was | Allocated (PeachImage) |
+|---|---:|---:|---:|---:|---:|
+| Lossless, Photographic | 44.95 ms | 23.97 ms | **1.88×** | 2.58× | 10.9 MB |
+| Lossy, Photographic | 42.18 ms | 14.04 ms | **3.00×** | 4.11× | 6.9 MB |
+| Lossless, Graphic (flat color) | 0.74 ms | 0.35 ms | 2.09× | 2.08× | 2.2 MB |
+| Lossy, Alpha | 46.58 ms | 19.69 ms | **2.37×** | 3.34× | 17.3 MB |
+| Lossless, Alpha | 45.73 ms | 25.14 ms | **1.82×** | 2.63× | 13.0 MB |
+| Small image (32×24) | 17.41 µs | 14.29 µs | 1.27× | 1.30× | 44 KB |
 
-1. **Allocation/GC pressure** — addressed, partially. The VP8L ARGB working buffer (the dominant
-   large-object-heap allocation: ~8 MB for a 1080p image) is now rented from a dedicated
-   `WebpBufferPool.SharedUInt32` pool instead of freshly allocated on every decode, for both the main
-   image path and the `ALPH` chunk's lossless-alpha substream path; a redundant defensive copy of the
-   whole VP8 chunk was also removed. This measurably cut allocation by 30–45% and Gen2 collections by
-   roughly half across every scenario (e.g. Lossless-Photographic: 19.2 MB → 10.9 MB allocated, 500 →
-   0 Gen2 collections per 1000 ops) — but **wall-clock time barely moved** (Ratio changes are within
-   run-to-run noise on the `ShortRun` job used here). This confirms allocation wasn't actually the
-   dominant cost; it was a real, worthwhile fix (less GC pressure is good on its own merits, and a
-   longer/production benchmark run would likely show a small but real time improvement from it), but
-   it was not the lever that closes this gap.
-2. **Scalar-only hot loops** — not yet addressed, and now confirmed (by elimination) to be the actual
-   dominant cost. The VP8 boolean-arithmetic decoder and VP8L's Huffman/LZ77 decode are both
-   implemented as straightforward scalar loops (matching this codebase's existing precedent — GIF's
-   LZW decoder and JPEG's Huffman decode are similarly scalar, since bit-level entropy decode is
-   inherently sequential). SkiaSharp's libwebp backend runs the equivalent loops through decades of
-   hand-tuned, SIMD-assisted C. Only a few of VP8L's transform steps (subtract-green, the predictor's
-   pure-Top mode) are currently vectorized; VP8's loop filter (a genuinely SIMD-friendly, non-bit-level
-   pass) is also still scalar.
+The "Was" column is the same benchmark on the same job before the optimization pass described below,
+not the `ShortRun` figures previously published here. Decode time fell ~30% on all four large-image
+scenarios. **WebP still does not meet the 10% target**, and the remaining gap is characterized honestly
+at the end of this section.
 
-Closing the remaining gap needs `dotnet-trace`/sampling-profiler evidence of exactly which loop
-dominates (the bool decoder and the coefficient/Huffman token-tree walks are the leading suspects) before
-investing in either a wider bit-reader refill (libwebp's own technique) or hand-vectorizing the loop
-filter — the same measure-before-optimizing discipline already applied to JPEG's/GIF's entropy coding
-in this codebase. This is substantially more involved than the allocation pass above and hasn't been
-started.
+#### What the profile actually showed
+
+The previous round of work had established, by elimination, that allocation was not the dominant cost
+(pooling the VP8L ARGB buffer cut allocation 30–45% and moved wall-clock barely at all). This round
+started by producing the sampling-profiler evidence that note called for — a `profile` mode on the
+benchmarks executable that decodes one asset in a tight loop, traced with `dotnet-trace`. Two of the
+five findings contradicted the standing hypotheses:
+
+- **The in-loop deblocking filter was the largest single bucket in lossy decode at 32%**, not the
+  3–6% assumed. It had been treated as a secondary target behind entropy decode.
+- **VP8L's predictor transform was 37% of lossless decode**, and instrumenting which of its 14 modes
+  actually run showed that mode 11 (`Select`) accounted for **100%** of that work on the photographic
+  asset. Sampling alone had hidden this, attributing most of it to the caller it partly inlines into.
+- The VP8L bit reader's bulk-refill fast path was gated on `_bitCount == 0` *exactly*, a condition
+  that essentially never holds after a Huffman code of arbitrary length is skipped — so it was close
+  to dead code and nearly every refill ran a byte-at-a-time loop.
+- `ProduceRgbFrame` was 23%, spending it on ~2 million interface dispatches and ~4 million per-pixel
+  upsampler calls per frame.
+- The coefficient probability table was a `byte[4,8,3,11]`, indexed two or three times per decoded
+  coefficient bit — a CLR multidimensional array cannot be spanned and costs a bounds check per rank.
+
+Each of those was fixed, in that order of measured cost, re-measuring after each change. The
+commit history carries the per-change numbers.
+
+#### Remaining gap
+
+The post-change profile puts lossy decode at 36% coefficient/entropy decode, 27% loop filter, 14%
+upsample+convert, 9% inverse DCT; and lossless at 69% pixel stream (Huffman/LZ77/colour cache), 24%
+predictor transform. Three distinct reasons remain, in decreasing size:
+
+1. **Entropy decode is inherently sequential**, and it is now the dominant cost on both codecs. The
+   VP8 boolean decoder and VP8L's Huffman/LZ77 walk cannot be vectorized — libwebp does not vectorize
+   them either. What libwebp gets there is C's freedom from bounds checks on every table lookup and
+   better register allocation across the refill boundary.
+2. **Pipeline architecture, not kernel quality.** `Vp8FrameDecoder` makes three full-frame passes
+   (reconstruct → loop filter → upsample+convert). libwebp runs a macroblock-row-band pipeline where
+   all three happen while the band is still in L2. Converting is a much larger restructuring, and it
+   would cost the "filters the whole frame in raster order, exactly reproducing the reference
+   ordering" property that makes the current shape verifiable.
+3. **Kernel coverage.** The loop filter's strided ("left") edge orientation is still scalar — it needs
+   a 16×8 transpose in and out, which is the obvious next single-digit-percent item at ~15% of lossy.
+   So are the inverse DCT (9%), VP8 intra prediction, and `Vp8LColorTransform`.
+
+**Lossless-Graphic is the one scenario that did not move**, and that is expected: at 640×480 from a
+370-byte file, its decode is dominated by fixed per-decode overhead (Huffman table construction,
+buffer setup, pixel packing) rather than by any of the per-pixel loops this pass targeted. It needs a
+different kind of work — reducing per-decode setup — and is the reason the `Small image` scenario sits
+at 1.27× too.
 
 ## Summary
 
@@ -162,11 +191,12 @@ started.
 | JPEG | 1.13×–1.30× | 1.20×–1.43× |
 | BMP | 0.40×–1.05× | no baseline (PeachImage-only) |
 | PNG | 1.08×–1.63× | 0.65×–1.27× |
-| WebP | 1.22×–4.58× | not yet implemented |
+| WebP | 1.27×–3.00× | not yet implemented |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
 and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the
-16-bit decode path. JPEG has the largest gap on both sides and is the best next target for further
-optimization work among the mature formats (entropy coding is the most likely place to start). WebP
-is newest and furthest from target overall — correctness is solid (see `WebpCorpusTests`), but
-performance work (allocation reduction first, then targeted SIMD) hasn't started yet.
+16-bit decode path. JPEG has the largest gap on both sides among the mature formats and is the best
+next target for further optimization work there (entropy coding is the most likely place to start).
+WebP is newest and still furthest from target, but a profile-guided pass has closed roughly a third of
+the gap on every large-image scenario (lossy 4.11× → 3.00×, lossless 2.58× → 1.88×); what is left is
+concentrated in entropy decode, which is inherently sequential.
