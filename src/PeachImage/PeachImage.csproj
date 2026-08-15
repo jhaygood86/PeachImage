@@ -4,10 +4,20 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsPackable>true</IsPackable>
     <PackageId>PeachImage</PackageId>
+    <Version>0.1.0</Version>
     <RootNamespace>PeachImage</RootNamespace>
     <AssemblyName>PeachImage</AssemblyName>
     <Description>Pure .NET image format readers and writers for commonly used image formats on the web.</Description>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PackageTags>image;jpeg;png;bmp;codec;imaging</PackageTags>
+    <PackageProjectUrl>https://github.com/jhaygood86/PeachImage</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/jhaygood86/PeachImage</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,7 +26,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="System.IO.Hashing" Version="9.0.0" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
   </ItemGroup>
 
 </Project>
