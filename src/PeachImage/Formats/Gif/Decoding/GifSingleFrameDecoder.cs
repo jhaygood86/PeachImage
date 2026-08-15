@@ -16,9 +16,26 @@ internal static class GifSingleFrameDecoder
     private const byte ImageSeparator = 0x2C;
     private const byte Trailer = 0x3B;
 
-    public static Image Decode(Stream stream)
+    /// <summary>
+    /// <paramref name="maxInitialCanvasBytes"/> defaults to the production
+    /// <see cref="GifDecodingLimits.MaxInitialCanvasBytes"/> cap and is exposed as a parameter only so tests
+    /// can exercise it without needing to construct a file whose declared canvas is hundreds of megabytes.
+    /// </summary>
+    public static Image Decode(Stream stream, long maxInitialCanvasBytes = GifDecodingLimits.MaxInitialCanvasBytes)
     {
         var header = GifHeaderReader.Read(stream);
+
+        // Checked immediately, before any frame data is even read: Image.Create below allocates at the
+        // logical screen's declared size regardless of how small the actual first frame turns out to be, so
+        // a tiny file can otherwise force an allocation up to MaxPixelCount x 4 bytes (~1GB). Worst-case (4
+        // bytes/pixel, RGBA32) since whether the frame ends up needing alpha isn't known until its GCE (if
+        // any) is parsed, below.
+        long worstCaseCanvasBytes = (long)header.Width * header.Height * 4;
+        if (worstCaseCanvasBytes > maxInitialCanvasBytes)
+        {
+            throw new GifDecodingException($"GIF logical screen {header.Width}x{header.Height} would require up to {worstCaseCanvasBytes:N0} bytes, exceeding the {maxInitialCanvasBytes:N0}-byte single-frame-decode limit.");
+        }
+
         GifGraphicControlExtension? pendingGce = null;
 
         while (true)

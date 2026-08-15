@@ -25,4 +25,14 @@ internal static class GifDecodingLimits
     /// enormous total allocation from a tiny file.
     /// </summary>
     public const long MaxCumulativeCanvasBytes = 1_073_741_824;
+
+    /// <summary>
+    /// The largest logical-screen canvas <see cref="GifDecoder.Decode"/> (single-frame decode) will allocate,
+    /// in bytes, worst-case (RGBA32, 4 bytes/pixel). GifSingleFrameDecoder allocates at the logical-screen's
+    /// declared dimensions regardless of the actual first frame's (possibly tiny) size or the stream's actual
+    /// compressed data length, so a file of only a few dozen bytes can otherwise force an allocation up to
+    /// <see cref="MaxPixelCount"/> x 4 bytes (~1GB). Deliberately lower than that general per-canvas ceiling —
+    /// a single-frame decode has no legitimate need for a canvas anywhere near the multi-frame-animation limit.
+    /// </summary>
+    public const long MaxInitialCanvasBytes = 268_435_456;
 }
