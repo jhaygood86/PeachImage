@@ -1,4 +1,5 @@
 using PeachImage.Formats.Bmp;
+using PeachImage.Formats.Gif;
 using PeachImage.Formats.Jpeg;
 using PeachImage.Formats.Png;
 
@@ -22,6 +23,7 @@ public static class ImageFormatManager
         Register(JpegCodec.Instance);
         Register(BmpCodec.Instance);
         Register(PngCodec.Instance);
+        Register(GifCodec.Instance);
     }
 
     /// <summary>The codecs currently registered, in registration order.</summary>
