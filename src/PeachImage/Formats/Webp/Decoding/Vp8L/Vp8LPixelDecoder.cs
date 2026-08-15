@@ -1,4 +1,4 @@
-using PeachImage.Formats.Webp.Internal;
+﻿using PeachImage.Formats.Webp.Internal;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8L;
 
@@ -64,8 +64,8 @@ internal static class Vp8LPixelDecoder
         {
             if (reader.IsOverBudget)
             {
-                // Truncated stream: stop decoding, leaving the remainder of the buffer default (transparent
-                // black), mirroring GifLzwDecoder's "stop early on truncation rather than throw" convention.
+                // Truncated stream: stop decoding, mirroring GifLzwDecoder's "stop early on truncation rather
+                // than throw" convention. The undecoded remainder is zeroed after the loop.
                 break;
             }
 
@@ -146,6 +146,15 @@ internal static class Vp8LPixelDecoder
                 // Code outside every valid range for this stream's configuration -- corrupt data.
                 break;
             }
+        }
+
+        // Every `break` above leaves pixels [pos, pixelCount) never written. That region has to be zeroed
+        // explicitly, because `pixels` may be a pool-rented array still holding the *previous* decode's image:
+        // without this, a truncated or corrupt file would surface another image's pixels as its own. Only
+        // reached on malformed input -- a stream that decodes fully leaves nothing to clear.
+        if (pos < pixelCount)
+        {
+            pixels.AsSpan((int)pos, (int)(pixelCount - pos)).Clear();
         }
 
         return pixels;
