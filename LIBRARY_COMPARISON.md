@@ -123,24 +123,30 @@ resolve them. Every figure here has a StdDev under 1.2%.
 
 | Scenario | PeachImage | SkiaSharp | Ratio | Was | Allocated (PeachImage) |
 |---|---:|---:|---:|---:|---:|
-| Lossless, Photographic | 44.02 ms | 23.82 ms | **1.85×** | 2.58× | 10.9 MB |
-| Lossy, Photographic | 29.66 ms | 13.98 ms | **2.12×** | 4.11× | 6.9 MB |
-| Lossless, Graphic (flat color) | 0.72 ms | 0.35 ms | 2.05× | 2.08× | 2.2 MB |
-| Lossy, Alpha | 33.30 ms | 19.34 ms | **1.72×** | 3.34× | 17.3 MB |
-| Lossless, Alpha | 45.37 ms | 24.73 ms | **1.83×** | 2.63× | 13.0 MB |
-| Small image (32×24) | 13.05 µs | 12.30 µs | **1.06×** | 1.30× | 44 KB |
+| Lossless, Photographic | 42.81 ms | 23.86 ms | **1.79×** | 2.58× | 10.9 MB |
+| Lossy, Photographic | 29.86 ms | 13.93 ms | **2.14×** | 4.11× | 6.9 MB |
+| Lossless, Graphic (flat color) | 0.70 ms | 0.35 ms | 2.02× | 2.08× | 2.2 MB |
+| Lossy, Alpha | 33.56 ms | 19.25 ms | **1.74×** | 3.34× | 17.3 MB |
+| Lossless, Alpha | 43.75 ms | 24.68 ms | **1.77×** | 2.63× | 13.0 MB |
+| Small image (32×24) | 13.71 µs | 12.27 µs | **1.12×** | 1.30× | 44 KB |
 
-The "Was" column is the same benchmark on the same job before the optimization pass described below,
-not the `ShortRun` figures previously published here. Decode time fell 29–50% on the four large-image
-scenarios, and **Small image now meets the 10% target**. The rest do not, and the remaining gap is
-characterized honestly at the end of this section.
+The "Was" column is the same benchmark on the same job before the whole optimization pass described
+below, not the `ShortRun` figures previously published here. Decode time fell 32–50% on the four
+large-image scenarios. `Small image` briefly met the 10% target (1.06×) after the loop-filter work but
+slipped back out to 1.12× with the most recent commit (specializing `Vp8LHuffmanTable`'s per-pixel
+decode) — plausibly a fixed-cost effect rather than the per-pixel win the other lossless scenarios
+saw from the same change, since this image is only 32×24 pixels and dominated by setup cost rather
+than symbol decode. Not investigated further; noted rather than quietly dropped. None of the six
+scenarios meet the target today, and the remaining gap is characterized honestly at the end of this
+section.
 
 A measurement caveat worth recording: `Lossless-Photographic` is the one scenario that occasionally
 reports 15% high with a 8–10% StdDev instead of its usual ~1%. It allocates 10.9 MB per operation and
 runs Gen2 collections throughout, so it is the most sensitive to whatever else the machine is doing.
-The figures above are from a run where every scenario's StdDev was ≤1.2%, cross-checked against two
-further benchmark runs and against a separate decode-loop harness that reports it at 46.6–47.5 ms with
-sub-1% spread. Discard any single run where that scenario's error bar blows out.
+The figures above are from a run where every scenario's StdDev was ≤1.2%, cross-checked against a
+separate decode-loop harness (43.7–45.3 ms across 5 repeats as of the current code, moving down
+commit to commit alongside the BenchmarkDotNet numbers as expected). Discard any single run where
+that scenario's error bar blows out.
 
 #### What the profile actually showed
 
@@ -181,12 +187,14 @@ including libwebp, vectorizes. Three distinct reasons remain, in decreasing size
 1. **Entropy decode is inherently sequential**, and it is now the dominant cost on both codecs. The
    VP8 boolean decoder and VP8L's Huffman/LZ77 walk cannot be vectorized — libwebp does not vectorize
    them either, and the VP8 side now runs libwebp's own algorithm. What remains is that C gets bounds
-   checks off every table lookup for free and keeps the bit-reader registers in registers. The managed
-   equivalents are real but each has to be earned: making `Vp8LHuffmanTable`'s root size a
-   compile-time constant so RyuJIT can prove the root-table index in range; shrinking
-   `Vp8LBitReader`'s state (its `_bitsConsumed`/`_totalBits` pair is derivable from the byte position
-   and bit count) so the JIT can promote it; and flattening a `Vp8LHuffmanGroup`'s five tables into one
-   array so a symbol decode is not three dependent pointer loads deep before it starts.
+   checks off every table lookup for free and keeps the bit-reader registers in registers. Two of the
+   three managed equivalents identified for this are done: `Vp8LHuffmanTable`'s per-pixel decode now
+   hardcodes its root width as a compile-time constant instead of reading an instance field, letting
+   RyuJIT prove the root-table index stays in range; and `Vp8LBitReader.SkipBits` — the single hottest
+   call in VP8L decode — no longer writes a running counter on every call, deriving the same
+   truncation check from state `Refill` already updates roughly 8× less often. Together these cut
+   2.7–3.6% off all three lossless scenarios. Still open: flattening a `Vp8LHuffmanGroup`'s five
+   tables into one array so a symbol decode is not three dependent pointer loads deep before it starts.
 2. **Pipeline architecture, not kernel quality.** `Vp8FrameDecoder` makes three full-frame passes
    (reconstruct → loop filter → upsample+convert). libwebp runs a macroblock-row-band pipeline where
    all three happen while the band is still in L2. Converting is a much larger restructuring, and it
@@ -198,17 +206,12 @@ including libwebp, vectorizes. Three distinct reasons remain, in decreasing size
    `AdvSimd.Arm64.ZipLow`/`ZipHigh` path would be the direct Arm equivalent, and until it exists Arm
    falls back to the scalar filter for that orientation and width.
 
-   Separately, `Lossless-Graphic` and `Small image` are not kernel-bound at all: profiling the
-   640×480 flat-colour case shows ~82% of it in buffer management (`Buffer.MemmoveInternal` alone is
-   13%) against ~15% actually decoding pixels — it allocates 2.2 MB for an image encoded in 370
-   bytes. That is a different problem (the un-pooled `Vp8LColorIndexingTransform` expansion array and
-   `PackPixels` output) and is why those two scenarios barely moved.
-
-**Lossless-Graphic is the one scenario that did not move**, and that is expected: at 640×480 from a
-370-byte file, its decode is dominated by fixed per-decode overhead (Huffman table construction,
-buffer setup, pixel packing) rather than by any of the per-pixel loops this pass targeted. It needs a
-different kind of work — reducing per-decode setup — and is the reason the `Small image` scenario sits
-at 1.27× too.
+`Lossless-Graphic` and `Small image` are not kernel-bound at all, which is why neither has moved much
+across this whole pass: profiling the 640×480 flat-colour case shows ~82% of it in buffer management
+(`Buffer.MemmoveInternal` alone is 13%) against ~15% actually decoding pixels — it allocates 2.2 MB
+for an image encoded in 370 bytes. That is a different problem (the un-pooled
+`Vp8LColorIndexingTransform` expansion array and `PackPixels` output), and every technique above
+targets a per-pixel loop that a 640×480-or-smaller image barely spends time in.
 
 ## Summary
 
@@ -217,14 +220,14 @@ at 1.27× too.
 | JPEG | 1.13×–1.30× | 1.20×–1.43× |
 | BMP | 0.40×–1.05× | no baseline (PeachImage-only) |
 | PNG | 1.08×–1.63× | 0.65×–1.27× |
-| WebP | 1.06×–2.12× | not yet implemented |
+| WebP | 1.12×–2.14× | not yet implemented |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
 and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the
 16-bit decode path. JPEG has the largest gap on both sides among the mature formats and is the best
 next target for further optimization work there (entropy coding is the most likely place to start).
 WebP is newest and still furthest from target on large images, but a profile-guided pass has closed
-roughly half the gap on the lossy ones and a third on the lossless (lossy 4.11× → 2.12×,
-lossy+alpha 3.34× → 1.72×, lossless 2.58× → 1.85×) and
+roughly half the gap on the lossy ones and closer to half on the lossless (lossy 4.11× → 2.14×,
+lossy+alpha 3.34× → 1.74×, lossless 2.58× → 1.79×) and
 brought the small-image case inside it; what is left is concentrated in entropy decode, which is
 inherently sequential.
