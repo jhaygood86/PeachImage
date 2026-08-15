@@ -101,6 +101,61 @@ public class Vp8LHuffmanTableBuilderTests
         Assert.Throws<WebpDecodingException>(() => Vp8LHuffmanTableBuilder.Build(codeLengths, rootBits: 3));
     }
 
+    /// <summary>Every code fits directly in the root table, so <see cref="Vp8LHuffmanTable.DecodeMain"/> never exercises its second-level pointer branch here — the companion test below covers that.</summary>
+    [Fact]
+    public void DecodeMain_MatchesDecode_WhenEveryCodeFitsInTheRoot()
+    {
+        AssertDecodeMainMatchesDecode([1, 2, 3, 3]);
+    }
+
+    /// <summary>
+    /// Length 1..8 plus two length-9 symbols: Kraft sum is
+    /// <c>sum(1/2^k, k=1..8) + 2*(1/512) = 255/256 + 1/256 = 1</c>, exact. The max length (9) exceeds
+    /// <see cref="Vp8LHuffmanTableBuilder.MainRootBits"/> (8), which is what forces a genuine second-level
+    /// lookup — the one branch <see cref="Vp8LHuffmanTable.DecodeMain"/> could get wrong by hardcoding the
+    /// root width, since the pointer-vs-leaf test and the second-level index arithmetic both depend on it.
+    /// </summary>
+    [Fact]
+    public void DecodeMain_MatchesDecode_WhenACodeNeedsASecondLevelTable()
+    {
+        AssertDecodeMainMatchesDecode([1, 2, 3, 4, 5, 6, 7, 8, 9, 9]);
+    }
+
+    /// <summary>
+    /// Builds a table with <see cref="Vp8LHuffmanTableBuilder.MainRootBits"/> and, for every possible input
+    /// window, checks that <see cref="Vp8LHuffmanTable.DecodeMain"/> agrees with <see cref="Vp8LHuffmanTable.Decode"/>
+    /// on both the decoded symbol and the resulting reader position (via a post-decode <c>PeekBits</c> of the
+    /// remaining window) — the same exhaustive-window technique <see cref="AssertDecodesCorrectly"/> uses,
+    /// aimed at the specific place <c>DecodeMain</c> differs from <c>Decode</c>: a compile-time-constant root
+    /// width instead of the instance field.
+    /// </summary>
+    private static void AssertDecodeMainMatchesDecode(int[] codeLengths)
+    {
+        var table = Vp8LHuffmanTableBuilder.Build(codeLengths, Vp8LHuffmanTableBuilder.MainRootBits);
+        var reference = ComputeReferenceCodes(codeLengths);
+        int maxLength = codeLengths.Where(l => l > 0).Max();
+
+        for (uint window = 0; window < (1u << maxLength); window++)
+        {
+            int expectedSymbol = FindMatch(reference, window, maxLength);
+
+            byte[] bytesForDecode = ToLittleEndianBytes(window, maxLength);
+            var readerDecode = new Vp8LBitReader(bytesForDecode, 0, bytesForDecode.Length);
+            int viaDecode = table.Decode(readerDecode);
+
+            byte[] bytesForDecodeMain = ToLittleEndianBytes(window, maxLength);
+            var readerDecodeMain = new Vp8LBitReader(bytesForDecodeMain, 0, bytesForDecodeMain.Length);
+            int viaDecodeMain = table.DecodeMain(readerDecodeMain);
+
+            Assert.Equal(expectedSymbol, viaDecode);
+            Assert.Equal(expectedSymbol, viaDecodeMain);
+
+            // Confirms DecodeMain consumed exactly as many bits as Decode did -- an equal symbol alone
+            // wouldn't catch a wrong bit count if a code's leaf value happened to coincide with another's.
+            Assert.Equal(readerDecode.PeekBits(maxLength), readerDecodeMain.PeekBits(maxLength));
+        }
+    }
+
     /// <summary>
     /// Builds a table for <paramref name="codeLengths"/>, computes an independent reference mapping of
     /// symbol -&gt; (LSB-first bit-reversed code, length), then brute-force enumerates every possible

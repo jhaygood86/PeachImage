@@ -74,13 +74,13 @@ internal static class Vp8LPixelDecoder
                 activeGroup = groups[metaImage.GetGroupIndex(col, row)];
             }
 
-            int code = activeGroup.Green.Decode(reader);
+            int code = activeGroup.Green.DecodeMain(reader);
 
             if (code < NumLiteralCodes)
             {
-                int red = activeGroup.Red.Decode(reader);
-                int blue = activeGroup.Blue.Decode(reader);
-                int alpha = activeGroup.Alpha.Decode(reader);
+                int red = activeGroup.Red.DecodeMain(reader);
+                int blue = activeGroup.Blue.DecodeMain(reader);
+                int alpha = activeGroup.Alpha.DecodeMain(reader);
                 uint argb = ((uint)alpha << 24) | ((uint)red << 16) | ((uint)code << 8) | (uint)blue;
 
                 pixels[pos] = argb;
@@ -98,7 +98,7 @@ internal static class Vp8LPixelDecoder
             {
                 int lengthSymbol = code - NumLiteralCodes;
                 int length = Vp8LBackwardReferenceTables.DecodePrefixCodeValue(lengthSymbol, reader);
-                int distanceSymbol = activeGroup.Distance.Decode(reader);
+                int distanceSymbol = activeGroup.Distance.DecodeMain(reader);
                 int distanceCode = Vp8LBackwardReferenceTables.DecodePrefixCodeValue(distanceSymbol, reader);
                 int distance = Vp8LBackwardReferenceTables.PlaneCodeToDistance(width, distanceCode);
 

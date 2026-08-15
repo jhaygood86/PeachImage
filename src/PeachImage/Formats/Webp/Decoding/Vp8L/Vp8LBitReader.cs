@@ -28,7 +28,22 @@ internal sealed class Vp8LBitReader
     private int _bytePos;
     private ulong _bitBuffer;
     private int _bitCount;
-    private long _bitsConsumed;
+
+    /// <summary>
+    /// Total bits ever loaded into <see cref="_bitBuffer"/> (real bytes and, once the buffer is exhausted,
+    /// synthesized zero bytes alike), updated only in <see cref="Refill"/>.
+    /// </summary>
+    /// <remarks>
+    /// This is what <see cref="IsOverBudget"/> is built from, in place of a running "bits consumed" counter
+    /// updated on every <see cref="SkipBits"/> call. The two are equal at all times — <see cref="_bitPosition"/>
+    /// only ever grows by exactly what <see cref="_bitCount"/> gains in <see cref="Refill"/>, and
+    /// <see cref="SkipBits"/> only ever shrinks <see cref="_bitCount"/> — so <c>_bitPosition - _bitCount</c> is
+    /// precisely the running total of every bit <see cref="SkipBits"/> has ever consumed, without a field write
+    /// on that path at all. <see cref="SkipBits"/> is the single hottest call in VP8L decode (multiple times
+    /// per pixel); <see cref="Refill"/> runs roughly once per 32 bits. Moving the write there is a pure win.
+    /// </remarks>
+    private long _bitPosition;
+
     private readonly long _totalBits;
 
     /// <param name="data">The backing buffer (may be array-pool-rented and therefore longer than the real data).</param>
@@ -47,7 +62,7 @@ internal sealed class Vp8LBitReader
     /// stream is truncated and any symbols decoded from this point on are reading synthesized zero padding,
     /// not real data.
     /// </summary>
-    public bool IsOverBudget => _bitsConsumed > _totalBits;
+    public bool IsOverBudget => _bitPosition - _bitCount > _totalBits;
 
     /// <summary>Returns the next <paramref name="bitCount"/> bits (0-32) without consuming them.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -68,7 +83,6 @@ internal sealed class Vp8LBitReader
     {
         _bitBuffer >>= bitCount;
         _bitCount -= bitCount;
-        _bitsConsumed += bitCount;
     }
 
     /// <summary>Reads and consumes the next <paramref name="bitCount"/> bits (0-32), least-significant-bit-first.</summary>
@@ -123,6 +137,7 @@ internal sealed class Vp8LBitReader
             _bitBuffer |= (ulong)BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_bytePos, 4)) << _bitCount;
             _bytePos += 4;
             _bitCount += 32;
+            _bitPosition += 32;
             return;
         }
 
@@ -133,6 +148,7 @@ internal sealed class Vp8LBitReader
             byte next = _bytePos < _length ? _data[_bytePos++] : (byte)0;
             _bitBuffer |= (ulong)next << _bitCount;
             _bitCount += 8;
+            _bitPosition += 8;
         }
     }
 }

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace PeachImage.Formats.Webp.Decoding.Vp8L;
 
 /// <summary>One entry of a built <see cref="Vp8LHuffmanTable"/>: either a leaf (<see cref="Bits"/> is the code's length and <see cref="Value"/> its symbol) or, only within the root level, a pointer to a second-level table (see the remarks on <see cref="Vp8LHuffmanTable"/>).</summary>
@@ -44,6 +46,48 @@ internal sealed class Vp8LHuffmanTable
     public int Decode(Vp8LBitReader reader)
     {
         int rootBits = RootBits;
+        uint window = reader.PeekBits(MaxCodeLength);
+        uint low = window & ((1u << rootBits) - 1);
+        var entries = Entries;
+        var root = entries[low];
+
+        if (root.Bits <= rootBits)
+        {
+            reader.SkipBits(root.Bits);
+            return root.Value;
+        }
+
+        int extraBits = root.Bits - rootBits;
+        uint secondaryOffset = (window >> rootBits) & ((1u << extraBits) - 1);
+        var second = entries[(int)low + root.Value + (int)secondaryOffset];
+
+        reader.SkipBits(rootBits + second.Bits);
+        return second.Value;
+    }
+
+    /// <summary>
+    /// Identical to <see cref="Decode"/>, specialized for the case every one of a
+    /// <see cref="Vp8LHuffmanGroup"/>'s five tables is always built with:
+    /// <see cref="Vp8LHuffmanTableBuilder.MainRootBits"/>. This is the table this decoder's per-pixel loop
+    /// actually calls, several times per pixel — <see cref="Vp8LPixelDecoder.DecodeImageStream"/>'s only other
+    /// <c>Decode</c> caller is <c>Vp8LCodeLengthReader</c>'s one-off, once-per-group-definition lengths table,
+    /// which is built at <see cref="Vp8LHuffmanTableBuilder.LengthsRootBits"/> and calls <see cref="Decode"/>
+    /// directly instead.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="RootBits"/> is an instance field, read from the table object at every call — necessarily so,
+    /// since the same type also serves the 7-bit lengths table. But the value itself is never actually anything
+    /// but 8 here: every table this method is called on came from a build with <c>MainRootBits</c>. Reading it
+    /// as the literal <see cref="Vp8LHuffmanTableBuilder.MainRootBits"/> instead lets the JIT fold
+    /// <c>1u &lt;&lt; rootBits</c> to the constant 256 and prove <c>low</c> stays in <c>[0,255]</c>, rather than
+    /// reasoning about a value it can only ever see as a field read. The <c>Debug.Assert</c> below is what
+    /// keeps this from silently becoming wrong if that construction invariant ever changes.
+    /// </remarks>
+    public int DecodeMain(Vp8LBitReader reader)
+    {
+        const int rootBits = Vp8LHuffmanTableBuilder.MainRootBits;
+        Debug.Assert(RootBits == rootBits, "DecodeMain assumes every table it is called on was built with MainRootBits.");
+
         uint window = reader.PeekBits(MaxCodeLength);
         uint low = window & ((1u << rootBits) - 1);
         var entries = Entries;
