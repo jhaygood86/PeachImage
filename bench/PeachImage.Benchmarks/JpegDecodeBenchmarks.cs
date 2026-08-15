@@ -1,13 +1,14 @@
 using BenchmarkDotNet.Attributes;
 using PeachImage.Formats.Jpeg;
-using TurboJpegWrapper;
+using SkiaSharp;
 
 namespace PeachImage.Benchmarks;
 
 /// <summary>
-/// Decode throughput: PeachImage vs. real libjpeg-turbo (via Quamotion.TurboJpegWrapper, a dev-only
-/// benchmark dependency never referenced by the shipped library). The acceptance bar (see the project plan)
-/// is PeachImage's Mean within 10% of TurboJpegWrapper's Mean for every scenario below.
+/// Decode throughput: PeachImage vs. SkiaSharp (a mature, real-world JPEG decoder — the same library used
+/// as the Bmp/Png benchmarks' baseline and the corpus tests' differential oracle, so all three formats
+/// compare against a single consistent library). The acceptance bar (see the project plan) is
+/// PeachImage's Mean within 10% of SkiaSharp's Mean for every scenario below.
 /// </summary>
 [MemoryDiagnoser]
 [GroupBenchmarksBy(BenchmarkDotNet.Configs.BenchmarkLogicalGroupRule.ByCategory)]
@@ -18,7 +19,6 @@ public class JpegDecodeBenchmarks
     private byte[] _photo1080p444 = null!;
     private byte[] _photo12Mp420 = null!;
     private byte[] _grayscale1080p = null!;
-    private TJDecompressor _turboJpeg = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -28,11 +28,7 @@ public class JpegDecodeBenchmarks
         _photo1080p444 = File.ReadAllBytes(Path.Combine(assetsDir, "photo_1920x1080_444.jpg"));
         _photo12Mp420 = File.ReadAllBytes(Path.Combine(assetsDir, "photo_4032x3024_420.jpg"));
         _grayscale1080p = File.ReadAllBytes(Path.Combine(assetsDir, "gray_1920x1080.jpg"));
-        _turboJpeg = new TJDecompressor();
     }
-
-    [GlobalCleanup]
-    public void Cleanup() => _turboJpeg.Dispose();
 
     [Benchmark]
     [BenchmarkCategory("1080p-4:2:0")]
@@ -44,7 +40,7 @@ public class JpegDecodeBenchmarks
 
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("1080p-4:2:0")]
-    public byte[] TurboJpegTurbo_Decode_1080p_420() => DecodeWithTurboJpeg(_photo1080p420);
+    public SKBitmap SkiaSharp_Decode_1080p_420() => SKBitmap.Decode(_photo1080p420)!;
 
     [Benchmark]
     [BenchmarkCategory("1080p-4:4:4")]
@@ -56,7 +52,7 @@ public class JpegDecodeBenchmarks
 
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("1080p-4:4:4")]
-    public byte[] TurboJpegTurbo_Decode_1080p_444() => DecodeWithTurboJpeg(_photo1080p444);
+    public SKBitmap SkiaSharp_Decode_1080p_444() => SKBitmap.Decode(_photo1080p444)!;
 
     [Benchmark]
     [BenchmarkCategory("12MP-4:2:0")]
@@ -68,7 +64,7 @@ public class JpegDecodeBenchmarks
 
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("12MP-4:2:0")]
-    public byte[] TurboJpegTurbo_Decode_12Mp_420() => DecodeWithTurboJpeg(_photo12Mp420);
+    public SKBitmap SkiaSharp_Decode_12Mp_420() => SKBitmap.Decode(_photo12Mp420)!;
 
     [Benchmark]
     [BenchmarkCategory("1080p-Grayscale")]
@@ -80,13 +76,5 @@ public class JpegDecodeBenchmarks
 
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("1080p-Grayscale")]
-    public byte[] TurboJpegTurbo_Decode_Grayscale() => DecodeWithTurboJpeg(_grayscale1080p);
-
-    private byte[] DecodeWithTurboJpeg(byte[] data)
-    {
-        _turboJpeg.GetImageInfo(data, TJPixelFormat.RGB, out _, out _, out _, out int bufferSize);
-        var output = new byte[bufferSize];
-        _turboJpeg.Decompress(data, output, TJPixelFormat.RGB, TJFlags.None, out _, out _, out _);
-        return output;
-    }
+    public SKBitmap SkiaSharp_Decode_Grayscale() => SKBitmap.Decode(_grayscale1080p)!;
 }

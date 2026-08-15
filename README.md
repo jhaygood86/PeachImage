@@ -61,11 +61,11 @@ failing.
 dotnet run -c Release --project bench/PeachImage.Benchmarks
 ```
 
-Compares PeachImage's JPEG decode/encode throughput against real libjpeg-turbo (via
-`Quamotion.TurboJpegWrapper`, a dev-only dependency of the benchmark project only — never referenced by
-the shipped library) and PeachImage's BMP decode throughput against SkiaSharp (also a dev-only dependency).
-BMP encode has no real-world baseline here — SkiaSharp's encoder doesn't support BMP output — so
-`BmpEncodeBenchmarks` tracks PeachImage's own throughput only.
+Compares PeachImage's JPEG/BMP/PNG decode and encode throughput against SkiaSharp (a dev-only dependency
+of the benchmark project only — never referenced by the shipped library), a single consistent baseline
+across all three formats. BMP encode has no real-world baseline here — SkiaSharp's encoder doesn't support
+BMP output — so `BmpEncodeBenchmarks` tracks PeachImage's own throughput only. See
+[LIBRARY_COMPARISON.md](LIBRARY_COMPARISON.md) for a summary of the latest results.
 
 ## License
 

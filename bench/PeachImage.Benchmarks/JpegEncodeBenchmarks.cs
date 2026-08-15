@@ -1,41 +1,39 @@
 using BenchmarkDotNet.Attributes;
 using PeachImage.Formats.Jpeg;
-using TurboJpegWrapper;
+using SkiaSharp;
 
 namespace PeachImage.Benchmarks;
 
 /// <summary>
-/// Encode throughput: PeachImage vs. real libjpeg-turbo (via Quamotion.TurboJpegWrapper). Both sides use
-/// each library's default (non-optimized-Huffman) settings for an apples-to-apples v1 comparison.
+/// Encode throughput: PeachImage vs. SkiaSharp, both at explicit 4:2:0/4:4:4 chroma subsampling via
+/// <see cref="SKJpegEncoderOptions"/> for an apples-to-apples comparison.
 /// </summary>
 [MemoryDiagnoser]
 [GroupBenchmarksBy(BenchmarkDotNet.Configs.BenchmarkLogicalGroupRule.ByCategory)]
 [CategoriesColumn]
 public class JpegEncodeBenchmarks
 {
-    private const int Width = 1920;
-    private const int Height = 1080;
     private const int Quality = 85;
 
     private Image _sourceImage = null!;
-    private byte[] _sourceRgb = null!;
-    private TJCompressor _turboJpeg = null!;
+    private SKBitmap _skiaSource = null!;
 
     [GlobalSetup]
     public void Setup()
     {
         string assetsDir = Path.Combine(AppContext.BaseDirectory, "Assets");
-        using var stream = File.OpenRead(Path.Combine(assetsDir, "photo_1920x1080_444.jpg"));
+        string sourcePath = Path.Combine(assetsDir, "photo_1920x1080_444.jpg");
+
+        using var stream = File.OpenRead(sourcePath);
         _sourceImage = new JpegDecoder().Decode(stream);
-        _sourceRgb = _sourceImage.GetPixelSpan().ToArray();
-        _turboJpeg = new TJCompressor();
+        _skiaSource = SKBitmap.Decode(sourcePath);
     }
 
     [GlobalCleanup]
     public void Cleanup()
     {
         _sourceImage.Dispose();
-        _turboJpeg.Dispose();
+        _skiaSource.Dispose();
     }
 
     [Benchmark]
@@ -49,7 +47,7 @@ public class JpegEncodeBenchmarks
 
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("1080p-4:2:0")]
-    public byte[] TurboJpegTurbo_Encode_1080p_420() => EncodeWithTurboJpeg(TJSubsamplingOption.Chrominance420);
+    public SKData SkiaSharp_Encode_1080p_420() => EncodeWithSkia(SKJpegEncoderDownsample.Downsample420);
 
     [Benchmark]
     [BenchmarkCategory("1080p-4:4:4")]
@@ -62,13 +60,11 @@ public class JpegEncodeBenchmarks
 
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("1080p-4:4:4")]
-    public byte[] TurboJpegTurbo_Encode_1080p_444() => EncodeWithTurboJpeg(TJSubsamplingOption.Chrominance444);
+    public SKData SkiaSharp_Encode_1080p_444() => EncodeWithSkia(SKJpegEncoderDownsample.Downsample444);
 
-    private byte[] EncodeWithTurboJpeg(TJSubsamplingOption subsampling)
+    private SKData EncodeWithSkia(SKJpegEncoderDownsample downsample)
     {
-        int bufferSize = _turboJpeg.GetBufferSize(Width, Height, subsampling);
-        var target = new byte[bufferSize];
-        _turboJpeg.Compress(_sourceRgb, target, Width * 3, Width, Height, TJPixelFormat.RGB, subsampling, Quality, TJFlags.None);
-        return target;
+        using var pixmap = _skiaSource.PeekPixels();
+        return pixmap.Encode(new SKJpegEncoderOptions(Quality, downsample, SKJpegEncoderAlphaOption.Ignore))!;
     }
 }
