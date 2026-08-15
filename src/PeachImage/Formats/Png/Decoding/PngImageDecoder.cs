@@ -52,7 +52,19 @@ internal static class PngImageDecoder
         bool gammaCorrectionActive = fileGamma is not null && options?.ScreenGamma is > 0;
         var sampleLut = PngSampleLut.Build(header.BitDepth, fileGamma, options?.ScreenGamma);
 
-        var image = Image.Create(header.Width, header.Height, outputFormat);
+        Image image;
+        try
+        {
+            image = Image.Create(header.Width, header.Height, outputFormat);
+        }
+        catch (OverflowException ex)
+        {
+            // Reachable even though width*height is already bounded by MaxPixelCount: that check doesn't
+            // account for pixel format byte size, and an 8-bytes/pixel format (Rgba64, from a 16-bit image
+            // with a tRNS chunk) can overflow Image.Create's byte-count math at the pixel-count ceiling.
+            throw new PngDecodingException($"PNG dimensions {header.Width}x{header.Height} at pixel format {outputFormat} require too large an allocation to decode.", ex);
+        }
+
         foreach (var profile in metadata.Profiles)
         {
             image.Metadata.Profiles.Add(profile);

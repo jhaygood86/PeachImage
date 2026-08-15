@@ -25,8 +25,16 @@ internal static class PngHeaderReader
 
         byte[] data = PngChunkReader.ReadDataAndValidateCrc(stream, chunkHeader);
 
-        int width = checked((int)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(0, 4)));
-        int height = checked((int)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(4, 4)));
+        int width, height;
+        try
+        {
+            width = checked((int)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(0, 4)));
+            height = checked((int)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(4, 4)));
+        }
+        catch (OverflowException ex)
+        {
+            throw new PngDecodingException("IHDR declares a width or height too large to represent.", ex);
+        }
         byte bitDepth = data[8];
         var colorType = (PngColorType)data[9];
         byte compressionMethod = data[10];
