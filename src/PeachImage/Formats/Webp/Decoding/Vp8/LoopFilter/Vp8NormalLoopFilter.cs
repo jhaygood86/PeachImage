@@ -60,13 +60,13 @@ internal static class Vp8NormalLoopFilter
         {
             if (Vp8VectorLoopFilter.CanFilter(size, origin, acrossStep, plane.Length))
             {
-                Vp8VectorLoopFilter.FilterContiguousEdge(plane, origin, acrossStep, thresh, interiorLimit, hevThresh, macroblockEdge: true);
+                Vp8VectorLoopFilter.FilterContiguousEdge(plane, origin, acrossStep, size, thresh, interiorLimit, hevThresh, macroblockEdge: true);
                 return;
             }
         }
         else if (acrossStep == 1 && Vp8VectorLoopFilter.CanFilterStrided(size, origin, alongStep, plane.Length))
         {
-            Vp8VectorLoopFilter.FilterStridedEdge(plane, origin, alongStep, thresh, interiorLimit, hevThresh, macroblockEdge: true);
+            Vp8VectorLoopFilter.FilterStridedEdge(plane, origin, alongStep, size, thresh, interiorLimit, hevThresh, macroblockEdge: true);
             return;
         }
 
@@ -94,13 +94,13 @@ internal static class Vp8NormalLoopFilter
         {
             if (Vp8VectorLoopFilter.CanFilter(size, origin, acrossStep, plane.Length))
             {
-                Vp8VectorLoopFilter.FilterContiguousEdge(plane, origin, acrossStep, thresh, interiorLimit, hevThresh, macroblockEdge: false);
+                Vp8VectorLoopFilter.FilterContiguousEdge(plane, origin, acrossStep, size, thresh, interiorLimit, hevThresh, macroblockEdge: false);
                 return;
             }
         }
         else if (acrossStep == 1 && Vp8VectorLoopFilter.CanFilterStrided(size, origin, alongStep, plane.Length))
         {
-            Vp8VectorLoopFilter.FilterStridedEdge(plane, origin, alongStep, thresh, interiorLimit, hevThresh, macroblockEdge: false);
+            Vp8VectorLoopFilter.FilterStridedEdge(plane, origin, alongStep, size, thresh, interiorLimit, hevThresh, macroblockEdge: false);
             return;
         }
 

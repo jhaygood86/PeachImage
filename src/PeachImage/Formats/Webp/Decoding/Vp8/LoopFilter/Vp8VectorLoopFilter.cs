@@ -34,6 +34,9 @@ internal static class Vp8VectorLoopFilter
     /// <summary>Taps each lane reads and writes: p3..p0, q0..q3.</summary>
     private const int Taps = 8;
 
+    /// <summary>Lanes in a chroma edge. Half a vector's worth, so these run one <see cref="FilterHalf"/> instead of two.</summary>
+    private const int ChromaLanes = 8;
+
     /// <summary>
     /// Whether <see cref="FilterStridedEdge"/> can handle an edge with these dimensions and this hardware.
     /// </summary>
@@ -48,16 +51,16 @@ internal static class Vp8VectorLoopFilter
     /// </remarks>
     public static bool CanFilterStrided(int size, int origin, int stride, int planeLength) =>
         Sse2.IsSupported
-        && size == Vector128<byte>.Count
-        && origin - Taps / 2 >= 0
+        && (size == Vector128<byte>.Count || size == ChromaLanes)
+        && origin - (Taps / 2) >= 0
         && origin + ((size - 1) * stride) + (Taps / 2) <= planeLength;
 
     /// <summary>Whether <see cref="FilterContiguousEdge"/> can handle an edge with these dimensions and this hardware.</summary>
     public static bool CanFilter(int size, int origin, int stride, int planeLength) =>
         Vector128.IsHardwareAccelerated
-        && size == Vector128<byte>.Count
+        && (size == Vector128<byte>.Count || size == ChromaLanes)
         && origin - (4 * stride) >= 0
-        && origin + (3 * stride) + Vector128<byte>.Count <= planeLength;
+        && origin + (3 * stride) + size <= planeLength;
 
     /// <summary>
     /// Filters one horizontal edge whose <see cref="Vector128{T}.Count"/> lanes start at
@@ -74,11 +77,18 @@ internal static class Vp8VectorLoopFilter
         Span<byte> plane,
         int origin,
         int stride,
+        int size,
         int thresh,
         int interiorLimit,
         int hevThreshold,
         bool macroblockEdge)
     {
+        if (size == ChromaLanes)
+        {
+            FilterContiguousChromaEdge(plane, origin, stride, thresh, interiorLimit, hevThreshold, macroblockEdge);
+            return;
+        }
+
         var p3 = Load(plane, origin - (4 * stride));
         var p2 = Load(plane, origin - (3 * stride));
         var p1 = Load(plane, origin - (2 * stride));
@@ -114,6 +124,46 @@ internal static class Vp8VectorLoopFilter
     }
 
     /// <summary>
+    /// The <see cref="ChromaLanes"/>-lane form of <see cref="FilterContiguousEdge"/>. Chroma edges are half a
+    /// vector wide, so each tap row is a single 8-byte load and one <see cref="FilterHalf"/> covers the whole
+    /// edge.
+    /// </summary>
+    private static void FilterContiguousChromaEdge(
+        Span<byte> plane,
+        int origin,
+        int stride,
+        int thresh,
+        int interiorLimit,
+        int hevThreshold,
+        bool macroblockEdge)
+    {
+        var (p2, p1, p0, q0, q1, q2) = FilterHalf(
+            LoadChromaRow(plane, origin - (4 * stride)),
+            LoadChromaRow(plane, origin - (3 * stride)),
+            LoadChromaRow(plane, origin - (2 * stride)),
+            LoadChromaRow(plane, origin - stride),
+            LoadChromaRow(plane, origin),
+            LoadChromaRow(plane, origin + stride),
+            LoadChromaRow(plane, origin + (2 * stride)),
+            LoadChromaRow(plane, origin + (3 * stride)),
+            Vector128.Create((short)((2 * thresh) + 1)),
+            Vector128.Create((short)interiorLimit),
+            Vector128.Create((short)hevThreshold),
+            macroblockEdge);
+
+        if (macroblockEdge)
+        {
+            StoreChromaRow(plane, origin - (3 * stride), p2);
+            StoreChromaRow(plane, origin + (2 * stride), q2);
+        }
+
+        StoreChromaRow(plane, origin - (2 * stride), p1);
+        StoreChromaRow(plane, origin - stride, p0);
+        StoreChromaRow(plane, origin, q0);
+        StoreChromaRow(plane, origin + stride, q1);
+    }
+
+    /// <summary>
     /// Filters one vertical edge, whose <see cref="Vector128{T}.Count"/> lanes are a <paramref name="stride"/>
     /// apart. Each lane's eight taps are contiguous, so the lanes are gathered by transposing a 16x8 block in,
     /// filtering it exactly as the contiguous orientation does, and transposing back out.
@@ -127,11 +177,18 @@ internal static class Vp8VectorLoopFilter
         Span<byte> plane,
         int origin,
         int stride,
+        int size,
         int thresh,
         int interiorLimit,
         int hevThreshold,
         bool macroblockEdge)
     {
+        if (size == ChromaLanes)
+        {
+            FilterStridedChromaEdge(plane, origin, stride, thresh, interiorLimit, hevThreshold, macroblockEdge);
+            return;
+        }
+
         int first = origin - (Taps / 2);
         Span<Vector128<byte>> taps = stackalloc Vector128<byte>[Taps];
         Transpose16x8(plane, first, stride, taps);
@@ -158,6 +215,53 @@ internal static class Vp8VectorLoopFilter
         taps[6] = Vector128.Narrow(q2Lo, q2Hi).AsByte();
 
         Transpose8x16(taps, plane, first, stride);
+    }
+
+    /// <summary>
+    /// The <see cref="ChromaLanes"/>-lane form of <see cref="FilterStridedEdge"/>. A chroma edge is exactly the
+    /// 8x8 block <see cref="TransposeEightRows"/> already produces, so the transpose in and out needs no extra
+    /// machinery — each tap column lands in one half of a returned vector.
+    /// </summary>
+    private static void FilterStridedChromaEdge(
+        Span<byte> plane,
+        int origin,
+        int stride,
+        int thresh,
+        int interiorLimit,
+        int hevThreshold,
+        bool macroblockEdge)
+    {
+        int first = origin - (Taps / 2);
+        var (c01, c23, c45, c67) = TransposeEightRows(plane, first, stride);
+
+        var (p2, p1, p0, q0, q1, q2) = FilterHalf(
+            WidenLane(c01.GetLower()), WidenLane(c01.GetUpper()),
+            WidenLane(c23.GetLower()), WidenLane(c23.GetUpper()),
+            WidenLane(c45.GetLower()), WidenLane(c45.GetUpper()),
+            WidenLane(c67.GetLower()), WidenLane(c67.GetUpper()),
+            Vector128.Create((short)((2 * thresh) + 1)),
+            Vector128.Create((short)interiorLimit),
+            Vector128.Create((short)hevThreshold),
+            macroblockEdge);
+
+        // p3 and q3 are unmodified by every filter, so they go back exactly as they were read.
+        var t0 = Vector128.Create(c01.GetLower(), c01.GetLower());
+        var t1 = NarrowLane(p2);
+        var t2 = NarrowLane(p1);
+        var t3 = NarrowLane(p0);
+        var t4 = NarrowLane(q0);
+        var t5 = NarrowLane(q1);
+        var t6 = NarrowLane(q2);
+        var t7 = Vector128.Create(c67.GetUpper(), c67.GetUpper());
+
+        StoreEightRows(
+            Sse2.UnpackLow(t0, t1),
+            Sse2.UnpackLow(t2, t3),
+            Sse2.UnpackLow(t4, t5),
+            Sse2.UnpackLow(t6, t7),
+            plane,
+            first,
+            stride);
     }
 
     /// <summary>
@@ -363,6 +467,20 @@ internal static class Vp8VectorLoopFilter
         Vector128.Create<byte>(plane.Slice(offset, Vector128<byte>.Count));
 
     private static Vector128<short> Lower(Vector128<byte> v) => Vector128.WidenLower(v).AsInt16();
+
+    /// <summary>Reads one chroma tap row — <see cref="ChromaLanes"/> contiguous bytes — widened to 16-bit lanes.</summary>
+    private static Vector128<short> LoadChromaRow(Span<byte> plane, int offset) =>
+        Lower(Vector128.CreateScalar(BinaryPrimitives.ReadUInt64LittleEndian(plane.Slice(offset, ChromaLanes))).AsByte());
+
+    /// <summary>Widens <see cref="ChromaLanes"/> bytes held in a half-vector to 16-bit lanes.</summary>
+    private static Vector128<short> WidenLane(Vector64<byte> lane) => Lower(Vector128.Create(lane, lane));
+
+    /// <summary>Narrows a filtered chroma lane back to bytes; only the low <see cref="ChromaLanes"/> are meaningful, which is all the interleaves that follow consume.</summary>
+    private static Vector128<byte> NarrowLane(Vector128<short> lane) => Vector128.Narrow(lane, lane).AsByte();
+
+    /// <summary>Writes one filtered chroma tap row back as <see cref="ChromaLanes"/> contiguous bytes.</summary>
+    private static void StoreChromaRow(Span<byte> plane, int offset, Vector128<short> lane) =>
+        BinaryPrimitives.WriteUInt64LittleEndian(plane.Slice(offset, ChromaLanes), NarrowLane(lane).AsUInt64().ToScalar());
 
     private static Vector128<short> Upper(Vector128<byte> v) => Vector128.WidenUpper(v).AsInt16();
 
