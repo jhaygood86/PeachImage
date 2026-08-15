@@ -93,33 +93,28 @@ public sealed class WebpDecoder : IImageDecoder
         return Decoding.PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
     }
 
+    /// <summary>
+    /// Decodes the alpha plane (if any) at the bitstream's own dimensions first, then hands it into the VP8
+    /// frame decoder so pixel conversion can emit RGBA32 directly instead of building an RGB24 image and
+    /// widening it afterward -- see <see cref="Vp8FrameDecoder.ProduceRgbFrame"/>'s remarks for why that
+    /// matters. Dimensions are read via a cheap peek rather than waiting on the frame decoder's own parse,
+    /// since alpha decode needs them first; both read the identical bytes, so they can't disagree.
+    /// </summary>
     private static Image DecodeLossy(WebpContainerInfo container)
     {
-        var frame = Vp8FrameDecoder.Instance.Decode(container.BitstreamData);
+        byte[]? alphaPlane = null;
 
-        if (container.AlphaData is null)
+        if (container.AlphaData is { } alphaData)
         {
-            return Image.FromBuffer(frame.Width, frame.Height, PixelFormat.Rgb24, frame.Rgb24Pixels);
+            if (!WebpBitstreamHeaderPeek.TryPeekVp8(container.BitstreamData, out int width, out int height))
+            {
+                throw new WebpDecodingException("Malformed VP8 chunk: missing or invalid keyframe start code.");
+            }
+
+            alphaPlane = WebpAlphaDecoder.Decode(alphaData, width, height);
         }
 
-        byte[] alphaPlane = WebpAlphaDecoder.Decode(container.AlphaData, frame.Width, frame.Height);
-        byte[] rgba = InterleaveRgba(frame.Rgb24Pixels, alphaPlane, frame.Width, frame.Height);
-        return Image.FromBuffer(frame.Width, frame.Height, PixelFormat.Rgba32, rgba);
-    }
-
-    private static byte[] InterleaveRgba(byte[] rgb, byte[] alpha, int width, int height)
-    {
-        int pixelCount = width * height;
-        var rgba = new byte[pixelCount * 4];
-
-        for (int i = 0; i < pixelCount; i++)
-        {
-            rgba[(i * 4) + 0] = rgb[(i * 3) + 0];
-            rgba[(i * 4) + 1] = rgb[(i * 3) + 1];
-            rgba[(i * 4) + 2] = rgb[(i * 3) + 2];
-            rgba[(i * 4) + 3] = alpha[i];
-        }
-
-        return rgba;
+        var frame = Vp8FrameDecoder.Instance.Decode(container.BitstreamData, alphaPlane);
+        return Image.FromBuffer(frame.Width, frame.Height, frame.PixelFormat, frame.Pixels);
     }
 }

@@ -25,7 +25,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
 {
     public static IWebpLossyBitstreamDecoder Instance { get; } = new Vp8FrameDecoder();
 
-    public Vp8DecodedFrame Decode(ReadOnlyMemory<byte> vp8Bytes)
+    public Vp8DecodedFrame Decode(ReadOnlyMemory<byte> vp8Bytes, byte[]? alphaPlane)
     {
         // Vp8BoolDecoder/Vp8Partitions need a real byte[] (a ref struct can't be an array element, so the
         // partitions need a persistent array reference, not a Span) -- but vp8Bytes is already array-backed
@@ -209,7 +209,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                 yPlane, yStride, uPlane, vPlane, uvStride, mbCols, mbRows,
                 loopFilterHeader, filterStrengths, segmentAtMb, isI4x4AtMb, innerFilterAtMb, YOff, UOff);
 
-            return ProduceRgbFrame(yPlane, yStride, uPlane, vPlane, uvStride, mbCols, mbRows, frameHeader.Width, frameHeader.Height, YOff, UOff);
+            return ProduceRgbFrame(yPlane, yStride, uPlane, vPlane, uvStride, mbCols, mbRows, frameHeader.Width, frameHeader.Height, YOff, UOff, alphaPlane);
         }
         finally
         {
@@ -569,6 +569,18 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         }
     }
 
+    /// <remarks>
+    /// When <paramref name="alphaPlane"/> is supplied, this writes RGBA32 directly rather than producing an
+    /// RGB24 buffer for a caller to widen afterward. The two used to be separate steps:
+    /// <see cref="Vp8ScalarInverseDct"/>'s row loop here built a full RGB24 image, and
+    /// <c>WebpDecoder.InterleaveRgba</c> then made a second full-image pass copying it plus the alpha plane
+    /// into a freshly allocated RGBA32 buffer -- so a whole extra image-sized array (6.2 MB at 1080p) existed
+    /// only to be immediately copied from and discarded. Instead, each row is converted into a small
+    /// pool-rented RGB scratch row (not image-sized) and spliced with that row's alpha byte straight into the
+    /// final buffer as it is produced. <see cref="IVp8ColorConverter.ConvertRow"/> itself is untouched either
+    /// way -- it always writes plain 3-byte-stride RGB, whether that goes straight to the final buffer (no
+    /// alpha) or through the scratch row (alpha present).
+    /// </remarks>
     private static Vp8DecodedFrame ProduceRgbFrame(
         byte[] yPlane,
         int yStride,
@@ -580,10 +592,12 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         int width,
         int height,
         Func<int, int, int> yOff,
-        Func<int, int, int> uOff)
+        Func<int, int, int> uOff,
+        byte[]? alphaPlane)
     {
         IVp8ColorConverter converter = Vp8ColorConverterSelector.Instance;
-        byte[] rgb = new byte[width * height * 3];
+        int bytesPerPixel = alphaPlane is null ? 3 : 4;
+        byte[] output = new byte[(long)width * height * bytesPerPixel];
 
         int chromaWidth = mbCols * 8;
         int chromaHeight = mbRows * 8;
@@ -593,6 +607,10 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         // bytes each, so they stay resident in L1 across the whole frame.
         byte[] uRow = WebpBufferPool.Shared.Rent(width);
         byte[] vRow = WebpBufferPool.Shared.Rent(width);
+
+        // Only rented when alpha is present -- see the type's remarks. Empty/unused in the common opaque case,
+        // so that path allocates and touches nothing beyond what it always has.
+        byte[]? rgbRow = alphaPlane is null ? null : WebpBufferPool.Shared.Rent(width * 3);
 
         try
         {
@@ -613,26 +631,49 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                 Vp8ChromaUpsampler.UpsampleRow(uNear, uFar, uRow, width, chromaWidth);
                 Vp8ChromaUpsampler.UpsampleRow(vNear, vFar, vRow, width, chromaWidth);
 
-                converter.ConvertRow(
-                    yPlane.AsSpan(yOff(0, y), width),
-                    uRow,
-                    vRow,
-                    rgb.AsSpan(y * width * 3, width * 3),
-                    width);
+                var yRow = yPlane.AsSpan(yOff(0, y), width);
+
+                if (alphaPlane is null)
+                {
+                    converter.ConvertRow(yRow, uRow, vRow, output.AsSpan(y * width * 3, width * 3), width);
+                }
+                else
+                {
+                    converter.ConvertRow(yRow, uRow, vRow, rgbRow.AsSpan(0, width * 3), width);
+                    SpliceAlphaRow(rgbRow, alphaPlane.AsSpan(y * width, width), output.AsSpan(y * width * 4, width * 4), width);
+                }
             }
         }
         finally
         {
             WebpBufferPool.Shared.Return(uRow);
             WebpBufferPool.Shared.Return(vRow);
+
+            if (rgbRow is not null)
+            {
+                WebpBufferPool.Shared.Return(rgbRow);
+            }
         }
 
         return new Vp8DecodedFrame
         {
             Width = width,
             Height = height,
-            Rgb24Pixels = rgb,
+            PixelFormat = alphaPlane is null ? PixelFormat.Rgb24 : PixelFormat.Rgba32,
+            Pixels = output,
         };
+    }
+
+    /// <summary>Interleaves one already-converted RGB24 row with one alpha row into an RGBA32 row -- the per-row equivalent of what <c>WebpDecoder.InterleaveRgba</c> used to do over the whole image at once.</summary>
+    private static void SpliceAlphaRow(ReadOnlySpan<byte> rgbRow, ReadOnlySpan<byte> alphaRow, Span<byte> rgbaRow, int width)
+    {
+        for (int x = 0; x < width; x++)
+        {
+            rgbaRow[(x * 4) + 0] = rgbRow[(x * 3) + 0];
+            rgbaRow[(x * 4) + 1] = rgbRow[(x * 3) + 1];
+            rgbaRow[(x * 4) + 2] = rgbRow[(x * 3) + 2];
+            rgbaRow[(x * 4) + 3] = alphaRow[x];
+        }
     }
 
     private static int Clamp(int value, int max) => value < 0 ? 0 : value > max ? max : value;

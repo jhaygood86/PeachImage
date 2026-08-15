@@ -82,11 +82,12 @@ internal static class Vp8LDecoder
     /// bit reader already positioned at the transform-presence bit, by both <see cref="Decode"/> and
     /// <see cref="DecodeAlphaSubstream"/> alike — the ALPH lossless substream has full parity with a
     /// top-level VP8L image stream (transforms, color cache, and meta-Huffman are all still allowed), it
-    /// just skips the outer 5-byte width/height/alpha header. Returns whether the result is still the
-    /// originally-rented pooled array — false whenever a <see cref="Vp8LTransformType.ColorIndexing"/>
-    /// transform is present, since its inverse always replaces the buffer with a freshly allocated,
-    /// full-width one (the original rented buffer is returned to the pool immediately at that point, not
-    /// left for the caller to deal with).
+    /// just skips the outer 5-byte width/height/alpha header. Returns whether the result is pooled. A
+    /// <see cref="Vp8LTransformType.ColorIndexing"/> transform always replaces the buffer with a new,
+    /// full-width one (the original rented buffer is returned to the pool immediately at that point, not left
+    /// for the caller to deal with) — but the replacement is rented from the same pool under the same
+    /// <paramref name="rentFromPool"/> flag the original was, so a color-indexed image doesn't fall back to an
+    /// unpooled allocation just because its buffer changed size partway through.
     /// </summary>
     private static (uint[] Pixels, int PixelCount, bool IsPooled) DecodeCore(Vp8LBitReader reader, int width, int height, bool rentFromPool)
     {
@@ -115,14 +116,17 @@ internal static class Vp8LDecoder
                     break;
 
                 case Vp8LTransformType.ColorIndexing:
-                    uint[] expanded = Vp8LColorIndexingTransform.ApplyInverse(pixels.AsSpan(0, pixelCount), transform);
+                    // The expansion always replaces the buffer with a new, full-width one -- rented from the
+                    // same pool under the same rentFromPool flag the original buffer was, so this doesn't
+                    // regress to an unpooled allocation on the one path that used to be exactly that.
+                    uint[] expanded = Vp8LColorIndexingTransform.ApplyInverse(pixels.AsSpan(0, pixelCount), transform, rentFromPool);
                     if (isPooled)
                     {
                         WebpBufferPool.SharedUInt32.Return(pixels);
-                        isPooled = false;
                     }
 
                     pixels = expanded;
+                    isPooled = rentFromPool;
                     pixelCount = transform.Xsize * transform.Ysize;
                     break;
             }

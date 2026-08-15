@@ -1,9 +1,59 @@
 using PeachImage.Formats.Webp.Decoding.Vp8L;
+using PeachImage.Formats.Webp.Internal;
 
 namespace PeachImage.Tests.Formats.Webp.Unit.Vp8L;
 
 public class Vp8LColorIndexingTransformTests
 {
+    /// <summary>
+    /// <c>rentFromPool: true</c> must produce exactly the same pixels as the unpooled path, and this is also
+    /// the fixture most likely to catch a bounds mistake: 3 pixels is far smaller than any real
+    /// <see cref="WebpBufferPool.SharedUInt32"/> bucket, so the returned array is guaranteed to come back
+    /// larger than requested here — precisely the case a loop mistakenly bounded by the array's own
+    /// <c>.Length</c> instead of the real pixel count would either read garbage from or throw on.
+    /// </summary>
+    [Fact]
+    public void ApplyInverse_RentFromPool_MatchesTheUnpooledResult_Unpacked()
+    {
+        uint[] palette = [Pack(255, 10, 10, 10), Pack(255, 20, 20, 20), Pack(255, 30, 30, 30)];
+        var transform = MakeTransform(width: 3, height: 1, bits: 0, palette);
+        uint[] src = [GreenOnly(2), GreenOnly(0), GreenOnly(1)];
+
+        uint[] expected = Vp8LColorIndexingTransform.ApplyInverse(src, transform);
+        uint[] pooled = Vp8LColorIndexingTransform.ApplyInverse(src, transform, rentFromPool: true);
+
+        try
+        {
+            Assert.Equal(expected, pooled.AsSpan(0, expected.Length).ToArray());
+        }
+        finally
+        {
+            WebpBufferPool.SharedUInt32.Return(pooled);
+        }
+    }
+
+    /// <summary>Same equivalence check on the sub-byte-packed path, which was already dimension-bounded rather than <c>.Length</c>-bounded but is worth confirming end to end with a real pooled buffer.</summary>
+    [Fact]
+    public void ApplyInverse_RentFromPool_MatchesTheUnpooledResult_Packed()
+    {
+        uint[] palette = [Pack(1, 0, 0, 0), Pack(2, 0, 0, 0), Pack(3, 0, 0, 0), Pack(4, 0, 0, 0), Pack(5, 0, 0, 0)];
+        var transform = MakeTransform(width: 4, height: 1, bits: 1, palette);
+        uint[] src = [GreenOnly(19), GreenOnly(4)];
+
+        uint[] expected = Vp8LColorIndexingTransform.ApplyInverse(src, transform);
+        uint[] pooled = Vp8LColorIndexingTransform.ApplyInverse(src, transform, rentFromPool: true);
+
+        try
+        {
+            Assert.Equal(expected, pooled.AsSpan(0, expected.Length).ToArray());
+        }
+        finally
+        {
+            WebpBufferPool.SharedUInt32.Return(pooled);
+        }
+    }
+
+
     [Fact]
     public void ExpandPalette_AccumulatesDeltasPerChannel_WithWraparound()
     {

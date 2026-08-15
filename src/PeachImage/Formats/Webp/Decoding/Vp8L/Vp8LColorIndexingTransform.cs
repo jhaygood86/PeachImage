@@ -1,3 +1,5 @@
+using PeachImage.Formats.Webp.Internal;
+
 namespace PeachImage.Formats.Webp.Decoding.Vp8L;
 
 /// <summary>
@@ -34,8 +36,23 @@ internal static class Vp8LColorIndexingTransform
         return palette;
     }
 
-    /// <summary>Expands <paramref name="src"/> (the decoded, possibly index-packed pixel stream, <c>transform</c>'s reduced width) into a fresh full-<c>transform.Xsize</c>-wide ARGB buffer.</summary>
-    public static uint[] ApplyInverse(ReadOnlySpan<uint> src, Vp8LTransform transform)
+    /// <summary>
+    /// Expands <paramref name="src"/> (the decoded, possibly index-packed pixel stream, <c>transform</c>'s
+    /// reduced width) into a full-<c>transform.Xsize</c>-wide ARGB buffer.
+    /// </summary>
+    /// <param name="src">The decoded pixel stream at the transform's (possibly index-packed, possibly narrower) width.</param>
+    /// <param name="transform">The color-indexing transform declaration: palette, packing width, and full output dimensions.</param>
+    /// <param name="rentFromPool">
+    /// When <see langword="true"/>, the returned array is rented from <see cref="WebpBufferPool.SharedUInt32"/>
+    /// rather than freshly allocated -- this transform necessarily produces a full-resolution buffer distinct
+    /// from the (possibly pooled, possibly narrower) source, so without this the color-indexing/palette path
+    /// was the one place in VP8L decode that still allocated a fresh, un-pooled, potentially multi-megabyte
+    /// array on every decode regardless of how many prior decodes had already warmed the pool. As with every
+    /// other pooled VP8L buffer, the array may come back larger than <c>width*height</c> (an
+    /// <see cref="System.Buffers.ArrayPool{T}"/> contract); callers must bound every use to exactly
+    /// <c>transform.Xsize * transform.Ysize</c> elements and are responsible for returning it.
+    /// </param>
+    public static uint[] ApplyInverse(ReadOnlySpan<uint> src, Vp8LTransform transform, bool rentFromPool = false)
     {
         int fullWidth = transform.Xsize;
         int height = transform.Ysize;
@@ -43,12 +60,15 @@ internal static class Vp8LColorIndexingTransform
         var palette = transform.Data!;
         int bitsPerPixel = 8 >> bits;
 
-        var dst = new uint[(long)fullWidth * height];
+        long pixelCount = (long)fullWidth * height;
+        var dst = rentFromPool ? WebpBufferPool.SharedUInt32.Rent((int)pixelCount) : new uint[pixelCount];
 
         if (bitsPerPixel == 8)
         {
-            // No packing: exactly one index per pixel, same width as the destination.
-            for (int i = 0; i < dst.Length; i++)
+            // No packing: exactly one index per pixel, same width as the destination. Bounded by pixelCount,
+            // not dst.Length -- a pool-rented dst may come back larger than pixelCount (an ArrayPool
+            // contract), and src (always exactly pixelCount long) would throw past that bound anyway.
+            for (int i = 0; i < pixelCount; i++)
             {
                 int index = (int)((src[i] >> 8) & 0xFF);
                 dst[i] = palette[index];
