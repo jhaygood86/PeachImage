@@ -1,3 +1,5 @@
+using PeachImage.Formats.Bmp.Internal;
+
 namespace PeachImage.Formats.Bmp.Decoding;
 
 /// <summary>Orchestrates a full BMP decode: header → palette → pixel data → <see cref="Image"/>.</summary>
@@ -84,6 +86,20 @@ internal static class BmpImageDecoder
     {
         if (declaredSize > 0)
         {
+            if (declaredSize > BmpDecodingLimits.MaxDeclaredImageSizeBytes)
+            {
+                throw new BmpDecodingException($"BMP declared RLE image data size ({declaredSize} bytes) exceeds the maximum supported size.");
+            }
+
+            if (stream.CanSeek)
+            {
+                long remaining = stream.Length - stream.Position;
+                if (declaredSize > remaining)
+                {
+                    throw new BmpDecodingException($"BMP declared RLE image data size ({declaredSize} bytes) exceeds the {remaining} bytes remaining in the stream.");
+                }
+            }
+
             var buffer = new byte[declaredSize];
             BmpStreamHelpers.ReadExactlyOrThrow(stream, buffer);
             return buffer;
