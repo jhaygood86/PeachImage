@@ -123,19 +123,19 @@ resolve them. Every figure here has a StdDev under 1.2%.
 
 | Scenario | PeachImage | SkiaSharp | Ratio | Was | Allocated (PeachImage) |
 |---|---:|---:|---:|---:|---:|
-| Lossless, Photographic | 42.84 ms | 24.05 ms | **1.78×** | 2.58× | 10.9 MB |
-| Lossy, Photographic | 29.90 ms | 14.00 ms | **2.14×** | 4.11× | 6.9 MB |
-| Lossless, Graphic (flat color) | 0.68 ms | 0.35 ms | 1.93× | 2.08× | **0.96 MB** (was 2.2 MB) |
-| Lossy, Alpha | 32.89 ms | 19.42 ms | **1.69×** | 3.34× | **11.1 MB** (was 17.3 MB) |
-| Lossless, Alpha | 43.91 ms | 25.12 ms | **1.75×** | 2.63× | 13.0 MB |
-| Small image (32×24) | 13.66 µs | 12.36 µs | **1.10×** | 1.30× | 44 KB |
+| Lossless, Photographic | 42.76 ms | 24.89 ms | **1.72×** | 2.58× | 10.9 MB |
+| Lossy, Photographic | 29.15 ms | 13.71 ms | **2.13×** | 4.11× | 6.9 MB |
+| Lossless, Graphic (flat color) | 0.66 ms | 0.35 ms | 1.87× | 2.08× | 0.96 MB |
+| Lossy, Alpha | 32.48 ms | 19.13 ms | **1.70×** | 3.34× | 11.1 MB |
+| Lossless, Alpha | 44.03 ms | 24.86 ms | **1.77×** | 2.63× | 13.0 MB |
+| Small image (32×24) | 14.21 µs | 12.34 µs | **1.15×** | 1.30× | 44 KB |
 
 The "Was" column is the same benchmark on the same job before the whole optimization pass described
 below, not the `ShortRun` figures previously published here. Decode time fell 30–52% on the four
-large-image scenarios. None of the six meet the 10% target on this particular run — `Small image` sits
-right at the boundary and moves across it run to run, which the next paragraph addresses directly
-rather than reading a story into it — and the remaining gap is characterized honestly at the end of
-this section.
+large-image scenarios. None of the six meet the 10% target on this particular run. `Small image` keeps
+drifting between roughly 1.06× and 1.15× run to run with its allocation figure completely unchanged —
+still a 32×24 image dominated by fixed setup cost that none of this pass's per-pixel work reaches, so
+its number is noise rather than signal and is reported as such rather than read into.
 
 Two allocation sources were eliminated by reading the pipeline rather than profiling wall-clock time —
 each was a buffer built, copied from once in full, and discarded. Lossy-with-alpha decode used to build
@@ -151,6 +151,21 @@ allocation (2.19 MB → 0.96 MB); `Lossy-Alpha` lost the discarded RGB24 interme
 (Lossless-Graphic -2.5%, Lossy-Alpha -2%). `Small image`'s allocation is unchanged byte-for-byte
 (44,480 B both before and after) — this pass never touched its code path at all — so its 1.12× → 1.10×
 move is noise, not a result, and is recorded as such rather than credited to work that didn't reach it.
+
+The inverse DCT is now vectorized too — the first hardware-specific (`Sse2`-gated, not portable
+`Vector128`) kernel in this pass. The scalar butterfly runs twice (once per column, once per row), and
+both are lane-parallel by construction, but each pass's output has to become the next pass's lanes,
+which needs a real cross-lane transpose that the portable `Vector128` API has no way to express (only
+single-vector `Shuffle`, no two-vector interleave) — the same gap the loop filter's own transpose
+already ran into and worked around with `Sse2.UnpackLow`/`UnpackHigh`. Every operation involved is
+exact integer arithmetic, so this is provably bit-identical to the scalar form rather than approximately
+equal, and is tested to exactly that standard. `Lossy-Photographic` improved 2.5% (well outside 2×
+StdDev); `Lossy-Alpha` improved 1.25%, smaller and close enough to the noise floor to report as less
+certain rather than as a clean win. Both are smaller than the profiled 7.5%+1.46% DCT budget would
+suggest — a re-profile shows why: the kernel is small enough that the JIT inlines it fully into
+`Vp8FrameDecoder.Decode`, so its own frame drops to 0.22% self-time with the rest absorbed into the
+caller rather than staying separately attributable, consistent with a real but partial capture of that
+budget once the double-transpose's own cost is netted out.
 
 A measurement caveat worth recording: `Lossless-Photographic` is the one scenario that occasionally
 reports 15% high with a 8–10% StdDev instead of its usual ~1%. It allocates 10.9 MB per operation and
@@ -192,10 +207,13 @@ commit history carries the per-change numbers.
 
 #### Remaining gap
 
-The post-change profile puts lossy decode at 41% coefficient/entropy decode, 20% upsample+convert,
-17% loop filter, 7% inverse DCT; and lossless at 69% pixel stream (Huffman/LZ77/colour cache), 24%
-predictor transform. Entropy decode dominating is the expected end state — it is the one part nobody,
-including libwebp, vectorizes. Three distinct reasons remain, in decreasing size:
+The post-change profile puts lossy decode at 39% coefficient/entropy decode, 21% upsample+convert,
+17% loop filter; the inverse DCT no longer shows as a separately attributable bucket, since the
+vectorized kernel is now small enough that the JIT inlines it into its caller (see above) — what's
+left of it explicitly is 1.6% for the still-scalar DC-only fast path. Lossless is 69% pixel stream
+(Huffman/LZ77/colour cache), 24% predictor transform. Entropy decode dominating is the expected end
+state — it is the one part nobody, including libwebp, vectorizes. Three distinct reasons remain, in
+decreasing size:
 
 1. **Entropy decode is inherently sequential**, and it is now the dominant cost on both codecs. The
    VP8 boolean decoder and VP8L's Huffman/LZ77 walk cannot be vectorized — libwebp does not vectorize
@@ -213,11 +231,13 @@ including libwebp, vectorizes. Three distinct reasons remain, in decreasing size
    all three happen while the band is still in L2. Converting is a much larger restructuring, and it
    would cost the "filters the whole frame in raster order, exactly reproducing the reference
    ordering" property that makes the current shape verifiable.
-3. **Kernel coverage.** The loop filter is fully vectorized now, in both orientations and both widths.
-   Still scalar: the inverse DCT's full-butterfly path (7%), VP8 intra prediction, and
-   `Vp8LColorTransform`. The strided orientation's transpose is x86-only — an
-   `AdvSimd.Arm64.ZipLow`/`ZipHigh` path would be the direct Arm equivalent, and until it exists Arm
-   falls back to the scalar filter for that orientation and width.
+3. **Kernel coverage.** The loop filter is fully vectorized now, in both orientations and both widths,
+   and so is the inverse DCT's full-butterfly path — both hardware-specific (`Sse2`-gated) rather than
+   portable, since the transpose each needs (a real cross-lane matrix transpose, not a lane-wise op)
+   has no equivalent in .NET's cross-platform `Vector128` API. Both are x86-only as a result; an
+   `AdvSimd.Arm64.ZipLow`/`ZipHigh` path would be the direct Arm equivalent for either, and until one
+   exists Arm falls back to the scalar form. Still scalar everywhere: VP8 intra prediction and
+   `Vp8LColorTransform`.
 
 `Lossless-Graphic` and `Small image` are not kernel-bound at all, which is why neither moved on
 wall-clock time by much across the CPU-focused work above: profiling the 640×480 flat-colour case
@@ -237,14 +257,14 @@ buffer the caller keeps, not an intermediate, so there is nothing to pool it aga
 | JPEG | 1.13×–1.30× | 1.20×–1.43× |
 | BMP | 0.40×–1.05× | no baseline (PeachImage-only) |
 | PNG | 1.08×–1.63× | 0.65×–1.27× |
-| WebP | 1.10×–2.14× | not yet implemented |
+| WebP | 1.15×–2.13× | not yet implemented |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
 and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the
 16-bit decode path. JPEG has the largest gap on both sides among the mature formats and is the best
 next target for further optimization work there (entropy coding is the most likely place to start).
-WebP is newest and still furthest from target on large images, but a profile-guided pass plus a
-follow-up allocation pass have together closed roughly half the gap on the lossy scenarios and closer
-to half on the lossless ones (lossy 4.11× → 2.14×, lossy+alpha 3.34× → 1.69×, lossless 2.58× → 1.78×),
-and the small-image case sits right at the boundary; what is left is concentrated in entropy decode, which is
+WebP is newest and still furthest from target on large images, but a profile-guided pass, a follow-up
+allocation pass, and a hardware-specific DCT kernel have together closed roughly half the gap on the
+lossy scenarios and closer to half on the lossless ones (lossy 4.11× → 2.13×, lossy+alpha 3.34× → 1.70×,
+lossless 2.58× → 1.72×); what is left is concentrated in entropy decode, which is
 inherently sequential.
