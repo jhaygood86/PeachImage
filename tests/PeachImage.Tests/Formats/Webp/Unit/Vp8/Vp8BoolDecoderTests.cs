@@ -3,45 +3,28 @@
 namespace PeachImage.Tests.Formats.Webp.Unit.Vp8;
 
 /// <summary>
-/// Validates <see cref="Vp8BoolDecoder"/> against hand-computed range-coder state transitions (RFC 6386
-/// section 7.3's split/compare/renormalize algorithm), worked out independently step by step in the comments
-/// below, rather than by round-tripping through the decoder's own logic.
+/// Validates <see cref="Vp8BoolDecoder"/> as a black box: fixed input bytes and a fixed probability sequence in,
+/// a fixed bit sequence out. The expected sequences were derived by hand from RFC 6386 section 7.3's
+/// split/compare/renormalize algorithm, independently of any implementation.
 /// </summary>
+/// <remarks>
+/// Deliberately states no internal state. These expectations originally carried a step-by-step trace of the
+/// reference decoder's <c>range</c>/<c>value</c>/<c>bitCount</c> registers, which described a machine the
+/// production decoder no longer is — it now follows libwebp's form, with a count-leading-zeros renormalization
+/// and a 56-bit bulk refill. Phrasing them as an implementation-independent contract is what lets them keep
+/// their value across that change; the internal equivalence is <c>Vp8BoolDecoderDifferentialTests</c>' job, and
+/// the state-machine commentary now lives in the decoder itself, where it describes real code.
+/// </remarks>
 public class Vp8BoolDecoderTests
 {
     /// <summary>
-    /// Traces 10 consecutive <see cref="Vp8BoolDecoder.GetBit"/> calls (probabilities 128, 128, 200, 50, 128,
-    /// 128, 128, 128, 128, 128) against input bytes [0x8F, 0x3A, 0x71, 0x00], including one byte refill
-    /// (bitCount reaching 8 partway through the 10th call, pulling in the third input byte). Every step's
-    /// arithmetic below was independently cross-checked with a from-scratch PowerShell transliteration of the
-    /// same split/compare/renormalize algorithm (not derived from or copy-pasted out of this decoder's own
-    /// source), so this both documents and independently verifies the exact state transitions.
+    /// 10 consecutive <see cref="Vp8BoolDecoder.GetBit"/> calls (probabilities 128, 128, 200, 50, 128, 128, 128,
+    /// 128, 128, 128) against input bytes [0x8F, 0x3A, 0x71, 0x00] must yield 1,0,0,1,0,0,1,0,0,0. The sequence
+    /// spans a byte refill, so it exercises the supply path as well as the arithmetic.
     /// </summary>
     /// <remarks>
-    /// Worked arithmetic (range/value after each call; split = 1 + (((range-1)*prob) &gt;&gt; 8), bigSplit =
-    /// split &lt;&lt; 8, bit = (value &gt;= bigSplit)):
-    /// <code>
-    /// init: range=255, value=0x8F3A=36666, bitCount=0
-    /// 1) prob=128: split=128, bigSplit=32768, value=36666>=32768 -> bit=1, range=127, value=3898
-    ///    renorm: range=127&lt;128 -> value=7796, range=254, bitCount=1
-    /// 2) prob=128: split=127, bigSplit=32512, value=7796&lt;32512 -> bit=0, range=127
-    ///    renorm: range=127&lt;128 -> value=15592, range=254, bitCount=2
-    /// 3) prob=200: split=198, bigSplit=50688, value=15592&lt;50688 -> bit=0, range=198 (no renorm)
-    /// 4) prob=50:  split=39,  bigSplit=9984,  value=15592>=9984  -> bit=1, range=159, value=5608 (no renorm)
-    /// 5) prob=128: split=80,  bigSplit=20480, value=5608&lt;20480  -> bit=0, range=80
-    ///    renorm: range=80&lt;128 -> value=11216, range=160, bitCount=3
-    /// 6) prob=128: split=80,  bigSplit=20480, value=11216&lt;20480 -> bit=0, range=80
-    ///    renorm: value=22432, range=160, bitCount=4
-    /// 7) prob=128: split=80,  bigSplit=20480, value=22432>=20480 -> bit=1, range=80, value=1952
-    ///    renorm: value=3904, range=160, bitCount=5
-    /// 8) prob=128: split=80,  bigSplit=20480, value=3904&lt;20480  -> bit=0, range=80
-    ///    renorm: value=7808, range=160, bitCount=6
-    /// 9) prob=128: split=80,  bigSplit=20480, value=7808&lt;20480  -> bit=0, range=80
-    ///    renorm: value=15616, range=160, bitCount=7
-    /// 10) prob=128: split=80, bigSplit=20480, value=15616&lt;20480 -> bit=0, range=80
-    ///    renorm: range=80&lt;128 -> value=31232, range=160, bitCount=8 -> refill: value|=0x71 -> 31345, bitCount=0
-    /// </code>
-    /// Expected bit sequence: 1,0,0,1,0,0,1,0,0,0.
+    /// Cross-checked against a from-scratch transliteration of the RFC algorithm rather than derived from this
+    /// decoder's source, so it is an independent expectation and not a round-trip through the code under test.
     /// </remarks>
     [Fact]
     public void GetBit_MatchesHandTracedRangeCoderStateTransitions()
@@ -60,9 +43,8 @@ public class Vp8BoolDecoderTests
 
     /// <summary>
     /// With input [0xFF, 0xFF] and probability 128 throughout, every <see cref="Vp8BoolDecoder.GetBit"/> call
-    /// returns 1 (traced identically to the first two steps of <see cref="GetBit_MatchesHandTracedRangeCoderStateTransitions"/>'s
-    /// all-zero counterpart, mirrored for all-one input), so <see cref="Vp8BoolDecoder.GetValue"/> reading 3 such
-    /// bits MSB-first should equal 0b111 = 7.
+    /// returns 1, so <see cref="Vp8BoolDecoder.GetValue"/> reading 3 such bits MSB-first should equal
+    /// 0b111 = 7.
     /// </summary>
     [Fact]
     public void GetValue_AllOnesInput_ReturnsAllOnesMagnitude()
@@ -75,7 +57,7 @@ public class Vp8BoolDecoderTests
     }
 
     /// <summary>
-    /// Continuing the same all-0xFF-input trace, the 4th call (the sign flag) also returns bit=1 (negative), so
+    /// With the same all-0xFF input the 4th call (the sign flag) also returns bit=1 (negative), so
     /// <c>GetSignedValue(3)</c> should equal -7.
     /// </summary>
     [Fact]
@@ -121,8 +103,8 @@ public class Vp8BoolDecoderTests
 
     /// <summary>
     /// A 3-node tree requiring two GetBit calls to reach a leaf: node 0 (bit0-&gt;leaf1, bit1-&gt;internal node at
-    /// index 4), node at index 4 (bit0-&gt;leaf3, bit1-&gt;leaf4). With all-0xFF input both calls return bit=1 (per
-    /// the first two steps of the all-ones trace used above), landing on leaf value 4.
+    /// index 4), node at index 4 (bit0-&gt;leaf3, bit1-&gt;leaf4). With all-0xFF input both calls return bit=1,
+    /// landing on leaf value 4.
     /// </summary>
     [Fact]
     public void GetTreeIndex_MultiLevelTree_WalksToExpectedLeaf()
@@ -139,8 +121,8 @@ public class Vp8BoolDecoderTests
     [Fact]
     public void GetBit_ReadingPastEndOfBuffer_SynthesizesZeroBytesInsteadOfThrowing()
     {
-        // Only 1 real byte; the decoder needs a second byte immediately at construction time (the initial
-        // 16-bit value window), which must be synthesized as zero rather than throwing.
+        // Only 1 real byte, then nothing: every subsequent read must behave as if the buffer continued with
+        // zeroes rather than throwing or spinning.
         var decoder = new Vp8BoolDecoder([0x00], 0, 1);
 
         // Should not throw, and should behave as if trailing bytes were all zero.
