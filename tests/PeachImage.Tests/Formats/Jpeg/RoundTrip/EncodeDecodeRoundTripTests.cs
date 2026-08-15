@@ -29,6 +29,36 @@ public class EncodeDecodeRoundTripTests
         Assert.True(psnr > 30.0, $"PSNR too low for {subsampling}: {psnr:F2} dB");
     }
 
+    [Theory]
+    [InlineData(JpegChromaSubsampling.Yuv420, 13, 11)]
+    [InlineData(JpegChromaSubsampling.Yuv420, 65, 49)]
+    [InlineData(JpegChromaSubsampling.Yuv422, 20, 13)]
+    [InlineData(JpegChromaSubsampling.Yuv444, 17, 9)]
+    [InlineData(JpegChromaSubsampling.Yuv411, 33, 15)]
+    public void RgbGradient_RoundTrips_WithinPsnrThreshold_AtNonMultipleOf8Dimensions(JpegChromaSubsampling subsampling, int width, int height)
+    {
+        // Dimensions deliberately not multiples of 8 (or of 8*samplingFactor) so the decoder's boundary-block
+        // path — the partial last block-row/-column FrameReconstructor.ReconstructComponentPlane handles via
+        // a scratch buffer, distinct from its interior-block fast path — actually gets exercised. Every other
+        // round-trip test in this file uses exact-multiple-of-8 dimensions and never touches it.
+        using var source = CreateGradientImage(width, height);
+
+        using var ms = new MemoryStream();
+        var encoder = new JpegEncoder();
+        encoder.Encode(source, ms, new JpegEncoderOptions { Quality = 90, Subsampling = subsampling });
+
+        ms.Position = 0;
+        var decoder = new JpegDecoder();
+        using var decoded = decoder.Decode(ms);
+
+        Assert.Equal(source.Width, decoded.Width);
+        Assert.Equal(source.Height, decoded.Height);
+        Assert.Equal(PixelFormat.Rgb24, decoded.PixelFormat);
+
+        double psnr = ComputePsnr(source.GetPixelSpan(), decoded.GetPixelSpan());
+        Assert.True(psnr > 30.0, $"PSNR too low for {subsampling} at {width}x{height}: {psnr:F2} dB");
+    }
+
     [Fact]
     public void GrayscaleImage_RoundTrips_WithinPsnrThreshold()
     {
