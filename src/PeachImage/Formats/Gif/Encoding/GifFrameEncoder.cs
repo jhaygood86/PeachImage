@@ -7,7 +7,7 @@ internal static class GifFrameEncoder
     private const byte GraphicControlLabel = 0xF9;
     private const byte ImageSeparator = 0x2C;
 
-    public static void WriteFrame(Stream stream, Image image, byte[] colorTable, int? transparentIndex, TimeSpan duration, GifDisposalMethod disposal, bool dither, int minCodeSize, byte alphaThreshold)
+    public static void WriteFrame(Stream stream, Image image, GifPaletteKdTree paletteTree, int? transparentIndex, TimeSpan duration, GifDisposalMethod disposal, bool dither, int minCodeSize, byte alphaThreshold)
     {
         bool needsGce = transparentIndex.HasValue || duration > TimeSpan.Zero || disposal != GifDisposalMethod.None;
         if (needsGce)
@@ -18,8 +18,8 @@ internal static class GifFrameEncoder
         WriteImageDescriptor(stream, image.Width, image.Height);
 
         byte[] indices = dither
-            ? FloydSteinbergDitherer.Map(image, colorTable, transparentIndex, alphaThreshold)
-            : GifPaletteMapper.Map(image, colorTable, transparentIndex, alphaThreshold);
+            ? FloydSteinbergDitherer.Map(image, paletteTree, transparentIndex, alphaThreshold)
+            : GifPaletteMapper.Map(image, paletteTree, transparentIndex, alphaThreshold);
 
         stream.WriteByte((byte)minCodeSize);
         GifLzwEncoder.Encode(stream, indices, minCodeSize);

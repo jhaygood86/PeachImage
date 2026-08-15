@@ -8,8 +8,9 @@ namespace PeachImage.Formats.Gif.Encoding;
 /// </summary>
 internal static class FloydSteinbergDitherer
 {
-    public static byte[] Map(Image image, byte[] palette, int? transparentIndex, byte alphaThreshold)
+    public static byte[] Map(Image image, GifPaletteKdTree paletteTree, int? transparentIndex, byte alphaThreshold)
     {
+        byte[] palette = paletteTree.Palette;
         int width = image.Width, height = image.Height;
         byte[] indices = new byte[width * height];
         var pixels = image.GetPixelSpan();
@@ -42,7 +43,7 @@ internal static class FloydSteinbergDitherer
                 float oldG = Math.Clamp(work[(i * 3) + 1], 0, 255);
                 float oldB = Math.Clamp(work[(i * 3) + 2], 0, 255);
 
-                int index = GifPaletteLookup.NearestIndex((byte)oldR, (byte)oldG, (byte)oldB, palette);
+                int index = paletteTree.NearestIndex((byte)oldR, (byte)oldG, (byte)oldB);
                 indices[i] = (byte)index;
 
                 float errR = oldR - palette[(index * 3) + 0];

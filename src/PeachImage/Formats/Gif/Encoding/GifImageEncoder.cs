@@ -87,9 +87,13 @@ internal static class GifImageEncoder
             WriteNetscapeLoopExtension(stream, loops);
         }
 
+        // Built once and reused across every pixel of every frame — the k-d tree's O(n log n) build cost is
+        // amortized against however many pixels this encode ends up mapping through it.
+        var paletteTree = new GifPaletteKdTree(colorTable);
+
         foreach (var frame in frames)
         {
-            GifFrameEncoder.WriteFrame(stream, frame.Image, colorTable, transparentIndex, frame.Duration, frame.Disposal, options.Dither, minCodeSize, AlphaThreshold);
+            GifFrameEncoder.WriteFrame(stream, frame.Image, paletteTree, transparentIndex, frame.Duration, frame.Disposal, options.Dither, minCodeSize, AlphaThreshold);
         }
 
         stream.WriteByte(Trailer);
