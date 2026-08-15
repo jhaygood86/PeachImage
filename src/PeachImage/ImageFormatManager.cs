@@ -2,6 +2,7 @@ using PeachImage.Formats.Bmp;
 using PeachImage.Formats.Gif;
 using PeachImage.Formats.Jpeg;
 using PeachImage.Formats.Png;
+using PeachImage.Formats.Webp;
 
 namespace PeachImage;
 
@@ -24,6 +25,7 @@ public static class ImageFormatManager
         Register(BmpCodec.Instance);
         Register(PngCodec.Instance);
         Register(GifCodec.Instance);
+        Register(WebpCodec.Instance);
     }
 
     /// <summary>The codecs currently registered, in registration order.</summary>
