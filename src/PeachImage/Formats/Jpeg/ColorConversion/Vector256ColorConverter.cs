@@ -134,12 +134,11 @@ internal sealed class Vector256ColorConverter : IColorConverter
         }
     }
 
-    /// <summary>Loads <see cref="Lanes"/> contiguous bytes and widens them to float via hardware byte-&gt;ushort-&gt;uint-&gt;float widen/convert, not a scalar per-lane cast.</summary>
+    /// <summary>Loads <see cref="Lanes"/> contiguous bytes and widens them to float via hardware byte-&gt;ushort-&gt;uint-&gt;float widen/convert, not a scalar per-lane cast. Builds the zero-padded 16-byte vector directly from an 8-byte vector load plus a zero upper half — the load-side mirror of <see cref="StoreInterleavedRgb"/>'s <c>Vector128.Create(NarrowRounded(...), Vector64&lt;byte&gt;.Zero)</c> — rather than routing already-contiguous source bytes through a stack buffer just to satisfy <see cref="Vector128"/>'s 16-byte <see cref="Vector128.Create{T}(System.ReadOnlySpan{T})"/> overload.</summary>
     private static Vector256<float> LoadWidened(ReadOnlySpan<byte> source, int offset)
     {
-        Span<byte> padded = stackalloc byte[16];
-        source.Slice(offset, Lanes).CopyTo(padded);
-        return WidenBytes(padded);
+        var byteVec = Vector128.Create(Vector64.Create(source.Slice(offset, Lanes)), Vector64<byte>.Zero);
+        return WidenBytes(byteVec);
     }
 
     /// <summary>Gathers <see cref="Lanes"/> pixels' R/G/B bytes out of interleaved RGB (an unavoidable scalar strided read — see the type-level remarks) and widens each channel to float via the same hardware widen chain as <see cref="LoadWidened"/>.</summary>
@@ -156,13 +155,12 @@ internal sealed class Vector256ColorConverter : IColorConverter
             bPadded[lane] = rgb[offset + 2];
         }
 
-        return (WidenBytes(rPadded), WidenBytes(gPadded), WidenBytes(bPadded));
+        return (WidenBytes(Vector128.Create((ReadOnlySpan<byte>)rPadded)), WidenBytes(Vector128.Create((ReadOnlySpan<byte>)gPadded)), WidenBytes(Vector128.Create((ReadOnlySpan<byte>)bPadded)));
     }
 
-    /// <summary><paramref name="padded16"/>'s first <see cref="Lanes"/> bytes (the rest is don't-care padding, never read past lane 7) widened to a <see cref="Vector256{Single}"/> — byte-&gt;ushort-&gt;uint widen, then a hardware uint-&gt;float convert, no scalar casts.</summary>
-    private static Vector256<float> WidenBytes(ReadOnlySpan<byte> padded16)
+    /// <summary><paramref name="byteVec"/>'s first <see cref="Lanes"/> bytes (the rest is don't-care padding, never read past lane 7) widened to a <see cref="Vector256{Single}"/> — byte-&gt;ushort-&gt;uint widen, then a hardware uint-&gt;float convert, no scalar casts.</summary>
+    private static Vector256<float> WidenBytes(Vector128<byte> byteVec)
     {
-        var byteVec = Vector128.Create(padded16);
         var ushortVec = Vector128.WidenLower(byteVec);
         var (uintLower, uintUpper) = Vector128.Widen(ushortVec);
         return Vector256.ConvertToSingle(Vector256.Create(uintLower, uintUpper));
