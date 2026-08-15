@@ -113,16 +113,21 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                     coeffs.Clear();
                     bool anyNonZero;
 
+                    uint nonZeroBlocks;
+                    uint acBlocks;
+
                     if (modes.Skip)
                     {
                         ResetSkippedContext(coeffContext, mbX, modes.IsI4x4);
                         anyNonZero = false;
+                        nonZeroBlocks = 0;
+                        acBlocks = 0;
                     }
                     else
                     {
                         anyNonZero = DecodeMacroblockCoefficients(
                             tokenBr, coeffProbabilities, quant, modes, mbX, coeffContext,
-                            coeffs, y2Coeffs, blockDc, colY, colU, colV);
+                            coeffs, y2Coeffs, blockDc, colY, colU, colV, out nonZeroBlocks, out acBlocks);
                     }
 
                     int mbIndex = (mbY * mbCols) + mbX;
@@ -141,10 +146,15 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
 
                         for (int n = 0; n < 16; n++)
                         {
+                            if ((nonZeroBlocks & (1u << n)) == 0)
+                            {
+                                continue;
+                            }
+
                             int row = n / 4;
                             int col = n % 4;
                             int blockOrigin = YOff((mbX * 16) + (col * 4), (mbY * 16) + (row * 4));
-                            Vp8ScalarInverseDct.TransformAndAdd(coeffs.Slice(n * 16, 16), yPlane, blockOrigin, yStride);
+                            AddResidual(coeffs, n, acBlocks, yPlane, blockOrigin, yStride);
                         }
                     }
                     else
@@ -161,8 +171,14 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                                 ? aboveRight
                                 : yPlane.AsSpan(blockOrigin - yStride + 4, 4);
 
+                            // Prediction runs for every subblock regardless — each one's reconstructed pixels
+                            // are what the next subblock predicts from. Only the residual can be skipped.
                             Vp8IntraPrediction4x4.Predict(modes.SubModes[n], yPlane, blockOrigin, yStride, ar);
-                            Vp8ScalarInverseDct.TransformAndAdd(coeffs.Slice(n * 16, 16), yPlane, blockOrigin, yStride);
+
+                            if ((nonZeroBlocks & (1u << n)) != 0)
+                            {
+                                AddResidual(coeffs, n, acBlocks, yPlane, blockOrigin, yStride);
+                            }
                         }
                     }
 
@@ -175,8 +191,16 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                         int row = c / 2;
                         int col = c % 2;
                         int uBlockOrigin = UOff((mbX * 8) + (col * 4), (mbY * 8) + (row * 4));
-                        Vp8ScalarInverseDct.TransformAndAdd(coeffs.Slice((16 + c) * 16, 16), uPlane, uBlockOrigin, uvStride);
-                        Vp8ScalarInverseDct.TransformAndAdd(coeffs.Slice((20 + c) * 16, 16), vPlane, uBlockOrigin, uvStride);
+
+                        if ((nonZeroBlocks & (1u << (16 + c))) != 0)
+                        {
+                            AddResidual(coeffs, 16 + c, acBlocks, uPlane, uBlockOrigin, uvStride);
+                        }
+
+                        if ((nonZeroBlocks & (1u << (20 + c))) != 0)
+                        {
+                            AddResidual(coeffs, 20 + c, acBlocks, vPlane, uBlockOrigin, uvStride);
+                        }
                     }
                 }
             }
@@ -213,6 +237,25 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         }
     }
 
+    /// <summary>
+    /// Adds block <paramref name="blockIndex"/>'s residual, taking the DC-only shortcut when
+    /// <paramref name="acBlocks"/> says the block has no AC coefficients. Callers have already established
+    /// from <c>nonZeroBlocks</c> that the block has something to add.
+    /// </summary>
+    private static void AddResidual(Span<short> coeffs, int blockIndex, uint acBlocks, Span<byte> plane, int origin, int stride)
+    {
+        var block = coeffs.Slice(blockIndex * 16, 16);
+
+        if ((acBlocks & (1u << blockIndex)) != 0)
+        {
+            Vp8ScalarInverseDct.TransformFullAndAdd(block, plane, origin, stride);
+        }
+        else
+        {
+            Vp8ScalarInverseDct.TransformDcOnlyAndAdd(block, plane, origin, stride);
+        }
+    }
+
     private static void ResetSkippedContext(Vp8CoefficientContext context, int mbX, bool isI4x4)
     {
         for (int i = 0; i < 4; i++)
@@ -236,6 +279,25 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         }
     }
 
+    /// <summary>
+    /// Decodes one macroblock's coefficients, and reports per 4x4 block which of the three reconstruction cases
+    /// it falls into via two 24-bit masks (blocks 0-15 luma, 16-19 U, 20-23 V).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A bit set in <paramref name="acBlocks"/> means the block carries at least one AC coefficient and needs
+    /// the full inverse transform; a bit set in <paramref name="nonZeroBlocks"/> but not in
+    /// <paramref name="acBlocks"/> means DC only; clear in both means the block is entirely zero and
+    /// reconstruction can skip it outright. At ordinary quality most blocks are in that last case.
+    /// </para>
+    /// <para>
+    /// The AC test is <c>last &gt; 1</c>, where <c>last</c> is the scan position decoding stopped at. That is
+    /// exact rather than approximate for two reasons: every coefficient the decoder writes is nonzero (the
+    /// magnitude is at least 1 and the quantizer is at least 1), and the zigzag maps scan position 0 to raster
+    /// position 0 and every later scan position to a raster position above it — so "stopped past scan 1"
+    /// and "some raster position 1..15 is nonzero" are the same statement.
+    /// </para>
+    /// </remarks>
     private static bool DecodeMacroblockCoefficients(
         Vp8BoolDecoder tokenBr,
         byte[] probabilities,
@@ -248,9 +310,13 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         Span<short> blockDc,
         Span<bool> colY,
         Span<bool> colU,
-        Span<bool> colV)
+        Span<bool> colV,
+        out uint nonZeroBlocks,
+        out uint acBlocks)
     {
         bool anyNonZero = false;
+        nonZeroBlocks = 0;
+        acBlocks = 0;
 
         if (!modes.IsI4x4)
         {
@@ -295,6 +361,18 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                     anyNonZero = true;
                 }
 
+                // block[0] is read after the Y2/WHT pass above has written each luma block's DC, so this sees
+                // the DC the reconstruction will actually transform, not just what this block's own tokens set.
+                if (last > 1)
+                {
+                    acBlocks |= 1u << idx;
+                    nonZeroBlocks |= 1u << idx;
+                }
+                else if (block[0] != 0)
+                {
+                    nonZeroBlocks |= 1u << idx;
+                }
+
                 rowLeft = nz;
                 colY[col] = nz;
             }
@@ -307,8 +385,8 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
             context.AboveY[(mbX * 4) + i] = colY[i];
         }
 
-        anyNonZero |= DecodeChromaPlane(tokenBr, probabilities, quant, mbX, context.AboveU, context.LeftU, coeffs, colU, blockOffset: 16);
-        anyNonZero |= DecodeChromaPlane(tokenBr, probabilities, quant, mbX, context.AboveV, context.LeftV, coeffs, colV, blockOffset: 20);
+        anyNonZero |= DecodeChromaPlane(tokenBr, probabilities, quant, mbX, context.AboveU, context.LeftU, coeffs, colU, blockOffset: 16, ref nonZeroBlocks, ref acBlocks);
+        anyNonZero |= DecodeChromaPlane(tokenBr, probabilities, quant, mbX, context.AboveV, context.LeftV, coeffs, colV, blockOffset: 20, ref nonZeroBlocks, ref acBlocks);
 
         return anyNonZero;
     }
@@ -322,7 +400,9 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         bool[] left,
         Span<short> coeffs,
         Span<bool> col,
-        int blockOffset)
+        int blockOffset,
+        ref uint nonZeroBlocks,
+        ref uint acBlocks)
     {
         bool anyNonZero = false;
 
@@ -342,6 +422,16 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                 if (nz || block[0] != 0)
                 {
                     anyNonZero = true;
+                }
+
+                if (last > 1)
+                {
+                    acBlocks |= 1u << idx;
+                    nonZeroBlocks |= 1u << idx;
+                }
+                else if (block[0] != 0)
+                {
+                    nonZeroBlocks |= 1u << idx;
                 }
 
                 rowLeft = nz;

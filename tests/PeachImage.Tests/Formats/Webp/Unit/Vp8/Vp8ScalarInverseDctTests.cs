@@ -119,3 +119,112 @@ public class Vp8ScalarInverseDctTests
         return result;
     }
 }
+/// <summary>
+/// Pins the three-way split the frame decoder now dispatches on — skip / DC-only / full — against the
+/// self-classifying <see cref="Vp8ScalarInverseDct.TransformAndAdd"/> that used to scan every block.
+/// </summary>
+/// <remarks>
+/// The classification itself lives in the coefficient decoder (it falls out of the scan position decoding
+/// stopped at), so what these tests establish is the property that makes it safe: the full path is correct for
+/// <em>any</em> block, DC-only is correct exactly when there is no AC, and skipping is correct exactly when the
+/// block is entirely zero. Only the two narrowing directions can be wrong, which is where the risk is.
+/// </remarks>
+public class Vp8InverseDctDispatchTests
+{
+    private const int Stride = 16;
+
+    /// <summary>The general path must reproduce the self-classifying entry point on every block shape, including ones a caller would have routed elsewhere.</summary>
+    [Fact]
+    public void TransformFullAndAdd_MatchesTheSelfClassifyingPath_ForEveryBlockShape()
+    {
+        foreach (var (coefficients, label) in EnumerateBlocks())
+        {
+            byte[] viaDispatch = MakePlane();
+            byte[] viaClassifier = MakePlane();
+
+            Vp8ScalarInverseDct.TransformFullAndAdd(coefficients, viaDispatch, Stride + 1, Stride);
+            Vp8ScalarInverseDct.TransformAndAdd(coefficients, viaClassifier, Stride + 1, Stride);
+
+            Assert.True(viaDispatch.AsSpan().SequenceEqual(viaClassifier), $"Full path diverged for {label}.");
+        }
+    }
+
+    /// <summary>The DC-only shortcut must reproduce it whenever the block genuinely carries no AC coefficient.</summary>
+    [Fact]
+    public void TransformDcOnlyAndAdd_MatchesTheSelfClassifyingPath_WhenTheBlockHasNoAc()
+    {
+        var random = new Random(6060842);
+
+        for (int trial = 0; trial < 4000; trial++)
+        {
+            short[] coefficients = new short[16];
+            coefficients[0] = (short)random.Next(-2048, 2048);
+
+            byte[] viaDispatch = MakePlane();
+            byte[] viaClassifier = MakePlane();
+
+            Vp8ScalarInverseDct.TransformDcOnlyAndAdd(coefficients, viaDispatch, Stride + 1, Stride);
+            Vp8ScalarInverseDct.TransformAndAdd(coefficients, viaClassifier, Stride + 1, Stride);
+
+            Assert.Equal(viaClassifier, viaDispatch);
+        }
+    }
+
+    /// <summary>And skipping must reproduce it whenever the block is entirely zero — the case the decoder now takes for most blocks.</summary>
+    [Fact]
+    public void SkippingAnAllZeroBlock_MatchesTheSelfClassifyingPath()
+    {
+        short[] zero = new short[16];
+
+        byte[] untouched = MakePlane();
+        byte[] viaClassifier = MakePlane();
+
+        Vp8ScalarInverseDct.TransformAndAdd(zero, viaClassifier, Stride + 1, Stride);
+
+        Assert.Equal(untouched, viaClassifier);
+    }
+
+    private static IEnumerable<(short[] Coefficients, string Label)> EnumerateBlocks()
+    {
+        yield return (new short[16], "all zero");
+
+        short[] dcOnly = new short[16];
+        dcOnly[0] = 300;
+        yield return (dcOnly, "DC only");
+
+        short[] negativeDc = new short[16];
+        negativeDc[0] = -300;
+        yield return (negativeDc, "negative DC only");
+
+        for (int position = 1; position < 16; position++)
+        {
+            short[] singleAc = new short[16];
+            singleAc[position] = 250;
+            yield return (singleAc, $"single AC at {position}");
+        }
+
+        var random = new Random(31415);
+        for (int trial = 0; trial < 500; trial++)
+        {
+            short[] block = new short[16];
+            for (int i = 0; i < 16; i++)
+            {
+                block[i] = (short)random.Next(-1024, 1024);
+            }
+
+            yield return (block, $"random block {trial}");
+        }
+    }
+
+    /// <summary>A plane with a non-uniform starting value, so a transform that writes to the wrong offset shows up rather than blending in.</summary>
+    private static byte[] MakePlane()
+    {
+        byte[] plane = new byte[Stride * Stride];
+        for (int i = 0; i < plane.Length; i++)
+        {
+            plane[i] = (byte)(i * 7 % 251);
+        }
+
+        return plane;
+    }
+}

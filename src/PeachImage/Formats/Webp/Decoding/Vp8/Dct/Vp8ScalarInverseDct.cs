@@ -33,19 +33,41 @@ internal static class Vp8ScalarInverseDct
                 return;
             }
 
-            int dc = (coefficients[0] + 4) >> 3;
-            for (int y = 0; y < 4; y++)
-            {
-                int rowOffset = offset + (y * stride);
-                for (int x = 0; x < 4; x++)
-                {
-                    dst[rowOffset + x] = ClipAdd(dst[rowOffset + x], dc);
-                }
-            }
-
+            TransformDcOnlyAndAdd(coefficients, dst, offset, stride);
             return;
         }
 
+        TransformFullAndAdd(coefficients, dst, offset, stride);
+    }
+
+    /// <summary>
+    /// Adds a block whose only surviving coefficient is DC — <c>TransformDC_C</c>. The inverse transform of a
+    /// DC-only block is a constant, so this adds that constant to all 16 pixels instead of running the
+    /// butterflies.
+    /// </summary>
+    /// <remarks>
+    /// Split out so <see cref="Vp8FrameDecoder"/> can select it directly. The coefficient decoder already knows
+    /// which of the three cases (nothing, DC only, full) a block is in, from the scan position it stopped at;
+    /// having <see cref="TransformAndAdd"/> rediscover that by scanning 15 <see cref="short"/>s per block cost a
+    /// measurable share of decode, since it ran for all 24 blocks of every macroblock including the majority
+    /// that quantized to nothing at all.
+    /// </remarks>
+    public static void TransformDcOnlyAndAdd(ReadOnlySpan<short> coefficients, Span<byte> dst, int offset, int stride)
+    {
+        int dc = (coefficients[0] + 4) >> 3;
+        for (int y = 0; y < 4; y++)
+        {
+            int rowOffset = offset + (y * stride);
+            for (int x = 0; x < 4; x++)
+            {
+                dst[rowOffset + x] = ClipAdd(dst[rowOffset + x], dc);
+            }
+        }
+    }
+
+    /// <summary>Runs the full two-pass butterfly — <see cref="TransformAndAdd"/>'s general case, for a block known to carry at least one AC coefficient.</summary>
+    public static void TransformFullAndAdd(ReadOnlySpan<short> coefficients, Span<byte> dst, int offset, int stride)
+    {
         Span<int> tmp = stackalloc int[16];
         for (int i = 0; i < 4; i++)
         {
