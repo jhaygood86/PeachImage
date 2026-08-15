@@ -6,8 +6,6 @@ namespace PeachImage.Formats.Webp.Kernels;
 internal sealed class Vector128Vp8LTransformKernel : IVp8LTransformKernel
 {
     private static readonly Vector128<uint> GreenMask = Vector128.Create(0x0000FF00u);
-    private static readonly Vector128<uint> LowChannelMask = Vector128.Create(0x00FF00FFu);
-    private static readonly Vector128<uint> HighChannelMask = Vector128.Create(0xFF00FF00u);
 
     public void SubtractGreenInverse(Span<uint> pixels)
     {
@@ -18,9 +16,11 @@ internal sealed class Vector128Vp8LTransformKernel : IVp8LTransformKernel
         {
             var argb = Vector128.Create(pixels.Slice(i, n));
             var green = (argb & GreenMask) >> 8;
-            var redBlueAdd = (green << 16) | green;
-            var newRedBlue = (argb + redBlueAdd) & LowChannelMask;
-            var result = (argb & HighChannelMask) | newRedBlue;
+
+            // Byte-lane add, for the same reason as Vector256Vp8LTransformKernel.SubtractGreenInverse -- see
+            // the comment there: a uint-lane add carries out of blue, through green, into red.
+            var greenIntoRedAndBlue = ((green << 16) | green).AsByte();
+            var result = (argb.AsByte() + greenIntoRedAndBlue).AsUInt32();
             result.CopyTo(pixels.Slice(i, n));
         }
 

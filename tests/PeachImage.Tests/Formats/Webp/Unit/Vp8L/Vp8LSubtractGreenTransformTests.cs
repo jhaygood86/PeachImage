@@ -73,6 +73,40 @@ public class Vp8LSubtractGreenTransformTests
             source[i] = (uint)random.Next();
         }
 
+        AssertAllTiersAgree(source);
+    }
+
+    /// <summary>
+    /// Regression test for a carry-propagation bug in both SIMD tiers: they added green to red and blue with a
+    /// single <c>uint</c>-lane add, so a carry out of the blue byte ran through the green byte and into red.
+    /// Red therefore came out one too high for every pixel with green == 255 and blue &gt;= 1 — visible in
+    /// libwebp-test-data's <c>lossless1..3.webp</c> and <c>lossless_big_random_alpha.webp</c>, which the
+    /// SkiaSharp corpus differential flagged only once it compared every pixel rather than a sampled grid.
+    /// </summary>
+    /// <remarks>
+    /// The pre-existing random-input tier-agreement test above missed it twice over: the carry needs
+    /// green == 255 specifically (~0.4% of random pixels), and the one hand-written case that does have
+    /// green == 255 lives in a 3-element array, which is shorter than <c>Vector128&lt;uint&gt;.Count</c> and so
+    /// never reaches either vectorized body at all. Hence the deliberately long, deliberately
+    /// carry-triggering buffer here.
+    /// </remarks>
+    [Fact]
+    public void AllThreeKernelTiers_Agree_WhenGreenIsMaxAndBlueWouldCarryOutOfItsByte()
+    {
+        var source = new List<uint>();
+        for (int blue = 0; blue <= 255; blue++)
+        {
+            for (int red = 250; red <= 255; red++)
+            {
+                source.Add(Pack(a: 128, r: red, g: 255, b: blue));
+            }
+        }
+
+        AssertAllTiersAgree([.. source]);
+    }
+
+    private static void AssertAllTiersAgree(uint[] source)
+    {
         uint[] scalarResult = (uint[])source.Clone();
         new ScalarVp8LTransformKernel().SubtractGreenInverse(scalarResult);
 

@@ -69,8 +69,8 @@ internal static class CorpusAssertions
                     return;
                 }
 
-                double averageDifference = ComputeAverageDifference(peachImage, skiaBitmap, includeAlpha: false);
-                Assert.True(averageDifference < 4.0, $"{Path.GetFileName(path)}: average per-channel difference from SkiaSharp too high: {averageDifference:F2}");
+                var difference = ComputeDifference(peachImage, skiaBitmap, includeAlpha: false);
+                AssertWithinTolerance(path, difference, includeAlpha: false);
                 return;
             }
 
@@ -90,11 +90,48 @@ internal static class CorpusAssertions
                     return;
                 }
 
-                double averageDifference = ComputeAverageDifference(peachImage, skiaBitmap, includeAlpha: true);
-                Assert.True(averageDifference < 4.0, $"{Path.GetFileName(path)}: average per-channel difference (incl. alpha) from SkiaSharp too high: {averageDifference:F2}");
+                var difference = ComputeDifference(peachImage, skiaBitmap, includeAlpha: true);
+                AssertWithinTolerance(path, difference, includeAlpha: true);
             }
         }
     }
+
+    /// <summary>
+    /// Gates on both statistics: the mean catches a systematically-wrong decode, the max catches a kernel that
+    /// is right almost everywhere and badly wrong in a few places. <see cref="MaxChannelTolerance"/> is set from
+    /// the worst difference actually observed across the corpus, so it is a real ceiling rather than a number
+    /// picked to be comfortably unreachable.
+    /// </summary>
+    private static void AssertWithinTolerance(string path, PixelDifference difference, bool includeAlpha)
+    {
+        string suffix = includeAlpha ? " (incl. alpha)" : string.Empty;
+
+        Assert.True(
+            difference.Mean < MeanChannelTolerance,
+            $"{Path.GetFileName(path)}: mean per-channel difference{suffix} from SkiaSharp too high: {difference}");
+
+        Assert.True(
+            difference.Max <= MaxChannelTolerance,
+            $"{Path.GetFileName(path)}: worst single-channel difference{suffix} from SkiaSharp too high: {difference}");
+    }
+
+    /// <summary>Mean per-channel difference ceiling, unchanged from the sampled comparison this replaced.</summary>
+    private const double MeanChannelTolerance = 4.0;
+
+    /// <summary>
+    /// Worst-single-channel ceiling, set from the worst difference actually measured across the corpus rather
+    /// than picked to be comfortably unreachable.
+    /// </summary>
+    /// <remarks>
+    /// Both bitstreams are exactly specified, and 126 of the 131 corpus files currently decode <em>bit-for-bit
+    /// identically</em> to libwebp. The five that don't are all lossy (<c>vp80-02-inter-1418</c> at 6,
+    /// <c>lossy_alpha4</c> at 4, <c>bryce</c> at 3, <c>vp80-00-comprehensive-008</c> and
+    /// <c>lossy_extreme_probabilities</c> at 2), which points at exactly one thing:
+    /// <see cref="PeachImage.Formats.Webp.Decoding.Vp8.Upsampling.Vp8ChromaUpsampler"/> computes a single-shift
+    /// closed form where libwebp uses a two-stage shift, and the two round differently. Anything above 6 is
+    /// therefore a new defect, not accumulated rounding.
+    /// </remarks>
+    private const int MaxChannelTolerance = 6;
 
     private static (bool Succeeded, Exception? Exception) TryDecode(string path)
     {
@@ -110,40 +147,83 @@ internal static class CorpusAssertions
         }
     }
 
-    private static double ComputeAverageDifference(Image peachImage, SKBitmap skiaBitmap, bool includeAlpha)
+    /// <summary>
+    /// Compares <em>every</em> pixel (not a sampled grid) and reports both the mean per-channel difference and
+    /// the worst single-channel difference anywhere in the image, with the position it occurred at.
+    /// </summary>
+    /// <remarks>
+    /// The max matters at least as much as the mean here. A vectorized kernel that is wrong only in the final
+    /// lane of each row, or only where a clamp fires, moves the mean by a rounding error while being flatly
+    /// broken — and the mean-only, ~64x64-sampled comparison this replaced would have passed it.
+    /// </remarks>
+    private static PixelDifference ComputeDifference(Image peachImage, SKBitmap skiaBitmap, bool includeAlpha)
     {
         var span = peachImage.GetPixelSpan();
         int bytesPerPixel = peachImage.PixelFormat.GetBytesPerPixel();
-        int step = Math.Max(1, Math.Min(peachImage.Width, peachImage.Height) / 64);
+        int channels = includeAlpha ? 4 : 3;
+
+        // One span over Skia's buffer beats SKBitmap.GetPixel() per pixel (a managed->native call each time),
+        // which matters now that this walks every pixel rather than a ~64x64 grid. Only the two 8-bit RGBA
+        // layouts Skia actually produces for WebP are handled; anything else is a hard failure rather than a
+        // silently mis-swizzled comparison.
+        Assert.True(
+            skiaBitmap.ColorType is SKColorType.Bgra8888 or SKColorType.Rgba8888,
+            $"Unexpected SkiaSharp color type {skiaBitmap.ColorType}; the byte-order mapping below only covers 8-bit RGBA/BGRA.");
+
+        var skiaSpan = skiaBitmap.GetPixelSpan();
+        int skiaBytesPerPixel = skiaBitmap.BytesPerPixel;
+        bool skiaIsBgra = skiaBitmap.ColorType == SKColorType.Bgra8888;
 
         double sum = 0;
         long count = 0;
-        for (int y = 0; y < peachImage.Height; y += step)
+        int max = 0;
+        int maxX = 0, maxY = 0;
+
+        for (int y = 0; y < peachImage.Height; y++)
         {
-            for (int x = 0; x < peachImage.Width; x += step)
+            int rowOffset = y * peachImage.Width * bytesPerPixel;
+            int skiaRowOffset = y * skiaBitmap.RowBytes;
+
+            for (int x = 0; x < peachImage.Width; x++)
             {
-                var skiaPixel = skiaBitmap.GetPixel(x, y);
-                int offset = ((y * peachImage.Width) + x) * bytesPerPixel;
+                int offset = rowOffset + (x * bytesPerPixel);
+                int skiaOffset = skiaRowOffset + (x * skiaBytesPerPixel);
 
-                double r = span[offset];
-                double g = span[offset + 1];
-                double b = span[offset + 2];
+                int skiaR = skiaSpan[skiaOffset + (skiaIsBgra ? 2 : 0)];
+                int skiaG = skiaSpan[skiaOffset + 1];
+                int skiaB = skiaSpan[skiaOffset + (skiaIsBgra ? 0 : 2)];
 
-                double diff = Math.Abs(r - skiaPixel.Red) + Math.Abs(g - skiaPixel.Green) + Math.Abs(b - skiaPixel.Blue);
-                int channels = 3;
+                int dr = Math.Abs(span[offset] - skiaR);
+                int dg = Math.Abs(span[offset + 1] - skiaG);
+                int db = Math.Abs(span[offset + 2] - skiaB);
+                int worst = Math.Max(dr, Math.Max(dg, db));
+                int total = dr + dg + db;
 
                 if (includeAlpha)
                 {
-                    double a = span[offset + 3];
-                    diff += Math.Abs(a - skiaPixel.Alpha);
-                    channels = 4;
+                    int da = Math.Abs(span[offset + 3] - skiaSpan[skiaOffset + 3]);
+                    worst = Math.Max(worst, da);
+                    total += da;
                 }
 
-                sum += diff / channels;
+                if (worst > max)
+                {
+                    max = worst;
+                    maxX = x;
+                    maxY = y;
+                }
+
+                sum += (double)total / channels;
                 count++;
             }
         }
 
-        return count == 0 ? 0 : sum / count;
+        return new PixelDifference(count == 0 ? 0 : sum / count, max, maxX, maxY);
+    }
+
+    /// <summary>Mean per-channel difference across the whole image, plus the worst single channel and where it was.</summary>
+    private readonly record struct PixelDifference(double Mean, int Max, int MaxX, int MaxY)
+    {
+        public override string ToString() => $"mean {Mean:F3}, max {Max} at ({MaxX},{MaxY})";
     }
 }
