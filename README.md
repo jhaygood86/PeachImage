@@ -23,7 +23,15 @@ Targets .NET 10. No native interop — every codec is managed code, using modern
   `png_set_gamma`), and the common ancillary chunks (`gAMA`/`cHRM`/`sRGB`/`iCCP`/`pHYs`/`tEXt`/`zTXt`/`iTXt`/`tIME`/`bKGD`).
   Encoding doesn't yet build an indexed palette from an arbitrary truecolor source (no automatic
   quantization) — non-palette sources always encode as grayscale/truecolor(+alpha).
-- Other formats (WebP, GIF, ...) are not yet implemented. The public API
+- **GIF**: decode (GIF87a/GIF89a, interlacing, transparency, multi-frame animation with per-frame
+  disposal methods and the NETSCAPE2.0 loop count via `GifDecoder.DecodeAnimation`) and encode
+  (median-cut palette quantization, optional Floyd-Steinberg dithering, animation) are implemented.
+- **WebP**: decode is implemented for both of WebP's bitstream codecs — VP8 (lossy) and VP8L
+  (lossless) — including alpha (`ALPH` chunk / VP8L's own alpha) in the RIFF "simple" and "extended"
+  (non-animated) container formats. Animated WebP and encode are not yet implemented. WebP decode
+  performance is not yet close to SkiaSharp's (see `LIBRARY_COMPARISON.md`) — the entropy-decode hot
+  loops are scalar-only so far and the large per-decode working buffers aren't yet pooled.
+- Other formats (AVIF, ...) are not yet implemented. The public API
   (`Image`, `IImageDecoder`/`IImageEncoder`, `ImageFormatManager`) is designed to support them without
   breaking changes when they're added.
 
