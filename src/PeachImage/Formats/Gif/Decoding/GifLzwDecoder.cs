@@ -16,19 +16,24 @@ internal static class GifLzwDecoder
     public static byte[] Decode(byte[] imageData, int minCodeSize, int pixelCount)
     {
         byte[] output = new byte[pixelCount];
-        DecodeInto(imageData, minCodeSize, output, pixelCount);
+        DecodeInto(imageData, imageData.Length, minCodeSize, output, pixelCount);
         return output;
     }
 
-    /// <summary>Same as <see cref="Decode"/>, but writes into a caller-provided (e.g. array-pool-rented) buffer instead of allocating one, for callers on a hot decode path.</summary>
-    public static void DecodeInto(byte[] imageData, int minCodeSize, byte[] output, int pixelCount)
+    /// <summary>
+    /// Same as <see cref="Decode"/>, but writes into a caller-provided (e.g. array-pool-rented) buffer instead
+    /// of allocating one, for callers on a hot decode path. <paramref name="imageDataLength"/> is the actual
+    /// amount of valid data in <paramref name="imageData"/> (which, like <paramref name="output"/>, may itself
+    /// be array-pool-rented and therefore longer than the real data).
+    /// </summary>
+    public static void DecodeInto(byte[] imageData, int imageDataLength, int minCodeSize, byte[] output, int pixelCount)
     {
         if (minCodeSize is < 2 or > 8 || pixelCount == 0)
         {
             return;
         }
 
-        var reader = new GifLzwBitReader(imageData);
+        var reader = new GifLzwBitReader(imageData, imageDataLength);
 
         int clearCode = 1 << minCodeSize;
         int endCode = clearCode + 1;

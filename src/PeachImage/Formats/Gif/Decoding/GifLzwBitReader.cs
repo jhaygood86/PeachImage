@@ -1,7 +1,11 @@
 namespace PeachImage.Formats.Gif.Decoding;
 
-/// <summary>Reads fixed-width (2-12 bit) LZW codes least-significant-bit-first from an already-assembled image-data byte buffer.</summary>
-internal sealed class GifLzwBitReader(byte[] data)
+/// <summary>
+/// Reads fixed-width (2-12 bit) LZW codes least-significant-bit-first from an already-assembled image-data
+/// byte buffer. <paramref name="length"/> is the actual amount of valid data in <paramref name="data"/> — it
+/// may be array-pool-rented and therefore longer than the real data.
+/// </summary>
+internal sealed class GifLzwBitReader(byte[] data, int length)
 {
     private int _bytePos;
     private int _bitBuffer;
@@ -12,7 +16,7 @@ internal sealed class GifLzwBitReader(byte[] data)
     {
         while (_bitCount < bits)
         {
-            if (_bytePos >= data.Length)
+            if (_bytePos >= length)
             {
                 code = 0;
                 return false;

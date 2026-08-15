@@ -1,4 +1,4 @@
-using System.Buffers;
+using PeachImage.Formats.Gif.Internal;
 
 namespace PeachImage.Formats.Gif.Decoding;
 
@@ -48,57 +48,65 @@ internal static class GifSingleFrameDecoder
     {
         var descriptor = GifImageDescriptorReader.Read(stream);
         byte minCodeSize = GifStreamHelpers.ReadByteOrThrow(stream);
-        byte[] imageData = GifSubBlocks.ReadAllImageData(stream);
+        var (imageData, imageDataLength) = GifSubBlocks.ReadAllImageData(stream);
 
-        byte[] palette = descriptor.LocalColorTable.Length > 0 ? descriptor.LocalColorTable : header.GlobalColorTable;
-        if (palette.Length == 0)
-        {
-            throw new GifDecodingException("GIF frame has no color table (neither local nor global).");
-        }
-
-        int pixelCount = descriptor.Width * descriptor.Height;
-
-        // The indices buffer is a pure intermediate — resolved into the final Image below and then
-        // discarded — so it's array-pool-rented rather than GC-allocated, avoiding a full-frame-sized
-        // (often large-object-heap) allocation on every decode.
-        byte[] rentedIndices = ArrayPool<byte>.Shared.Rent(pixelCount);
         try
         {
-            GifLzwDecoder.DecodeInto(imageData, minCodeSize, rentedIndices, pixelCount);
-            byte[] indices = rentedIndices;
-
-            byte[]? rentedDeinterlaced = null;
-            if (descriptor.Interlaced)
+            byte[] palette = descriptor.LocalColorTable.Length > 0 ? descriptor.LocalColorTable : header.GlobalColorTable;
+            if (palette.Length == 0)
             {
-                rentedDeinterlaced = ArrayPool<byte>.Shared.Rent(pixelCount);
-                GifInterlacer.DeinterlaceInto(rentedIndices, rentedDeinterlaced, descriptor.Width, descriptor.Height);
-                indices = rentedDeinterlaced;
+                throw new GifDecodingException("GIF frame has no color table (neither local nor global).");
             }
 
-            bool hasAlpha = gce.TransparentColorIndex.HasValue;
-            var image = Image.Create(header.Width, header.Height, hasAlpha ? PixelFormat.Rgba32 : PixelFormat.Rgb24);
+            int pixelCount = descriptor.Width * descriptor.Height;
+            var pool = GifBufferPool.Shared;
+
+            // The indices buffer is a pure intermediate — resolved into the final Image below and then
+            // discarded — so it's array-pool-rented rather than GC-allocated, avoiding a full-frame-sized
+            // (often large-object-heap) allocation on every decode.
+            byte[] rentedIndices = pool.Rent(pixelCount);
             try
             {
-                ResolveIndices(image, descriptor, indices, palette, gce.TransparentColorIndex, hasAlpha);
-            }
-            catch
-            {
-                image.Dispose();
-                throw;
+                GifLzwDecoder.DecodeInto(imageData, imageDataLength, minCodeSize, rentedIndices, pixelCount);
+                byte[] indices = rentedIndices;
+
+                byte[]? rentedDeinterlaced = null;
+                if (descriptor.Interlaced)
+                {
+                    rentedDeinterlaced = pool.Rent(pixelCount);
+                    GifInterlacer.DeinterlaceInto(rentedIndices, rentedDeinterlaced, descriptor.Width, descriptor.Height);
+                    indices = rentedDeinterlaced;
+                }
+
+                bool hasAlpha = gce.TransparentColorIndex.HasValue;
+                var image = Image.Create(header.Width, header.Height, hasAlpha ? PixelFormat.Rgba32 : PixelFormat.Rgb24);
+                try
+                {
+                    ResolveIndices(image, descriptor, indices, palette, gce.TransparentColorIndex, hasAlpha);
+                }
+                catch
+                {
+                    image.Dispose();
+                    throw;
+                }
+                finally
+                {
+                    if (rentedDeinterlaced is not null)
+                    {
+                        pool.Return(rentedDeinterlaced);
+                    }
+                }
+
+                return image;
             }
             finally
             {
-                if (rentedDeinterlaced is not null)
-                {
-                    ArrayPool<byte>.Shared.Return(rentedDeinterlaced);
-                }
+                pool.Return(rentedIndices);
             }
-
-            return image;
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rentedIndices);
+            GifBufferPool.Shared.Return(imageData);
         }
     }
 

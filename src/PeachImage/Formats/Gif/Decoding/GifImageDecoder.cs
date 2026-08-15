@@ -1,3 +1,5 @@
+using PeachImage.Formats.Gif.Internal;
+
 namespace PeachImage.Formats.Gif.Decoding;
 
 /// <summary>Orchestrates a full GIF decode: header → a run of extension/image blocks → composited <see cref="GifFrame"/>s. Shared by <see cref="GifDecoder.Decode"/> (stops after one frame) and <see cref="GifDecoder.DecodeAnimation"/> (decodes every frame).</summary>
@@ -67,22 +69,53 @@ internal static class GifImageDecoder
     {
         var descriptor = GifImageDescriptorReader.Read(stream);
         byte minCodeSize = GifStreamHelpers.ReadByteOrThrow(stream);
-        byte[] imageData = GifSubBlocks.ReadAllImageData(stream);
+        var (imageData, imageDataLength) = GifSubBlocks.ReadAllImageData(stream);
 
-        byte[] palette = descriptor.LocalColorTable.Length > 0 ? descriptor.LocalColorTable : header.GlobalColorTable;
-        if (palette.Length == 0)
+        try
         {
-            throw new GifDecodingException("GIF frame has no color table (neither local nor global).");
-        }
+            byte[] palette = descriptor.LocalColorTable.Length > 0 ? descriptor.LocalColorTable : header.GlobalColorTable;
+            if (palette.Length == 0)
+            {
+                throw new GifDecodingException("GIF frame has no color table (neither local nor global).");
+            }
 
-        int pixelCount = descriptor.Width * descriptor.Height;
-        byte[] indices = GifLzwDecoder.Decode(imageData, minCodeSize, pixelCount);
-        if (descriptor.Interlaced)
+            int pixelCount = descriptor.Width * descriptor.Height;
+            var pool = GifBufferPool.Shared;
+            byte[] rentedIndices = pool.Rent(pixelCount);
+            try
+            {
+                GifLzwDecoder.DecodeInto(imageData, imageDataLength, minCodeSize, rentedIndices, pixelCount);
+                byte[] indices = rentedIndices;
+
+                byte[]? rentedDeinterlaced = null;
+                if (descriptor.Interlaced)
+                {
+                    rentedDeinterlaced = pool.Rent(pixelCount);
+                    GifInterlacer.DeinterlaceInto(rentedIndices, rentedDeinterlaced, descriptor.Width, descriptor.Height);
+                    indices = rentedDeinterlaced;
+                }
+
+                try
+                {
+                    var frameImage = compositor.DrawFrame(descriptor, indices, palette, gce.TransparentColorIndex, gce.Disposal);
+                    return new GifFrame(frameImage, gce.Delay, gce.Disposal);
+                }
+                finally
+                {
+                    if (rentedDeinterlaced is not null)
+                    {
+                        pool.Return(rentedDeinterlaced);
+                    }
+                }
+            }
+            finally
+            {
+                pool.Return(rentedIndices);
+            }
+        }
+        finally
         {
-            indices = GifInterlacer.Deinterlace(indices, descriptor.Width, descriptor.Height);
+            GifBufferPool.Shared.Return(imageData);
         }
-
-        var frameImage = compositor.DrawFrame(descriptor, indices, palette, gce.TransparentColorIndex, gce.Disposal);
-        return new GifFrame(frameImage, gce.Delay, gce.Disposal);
     }
 }
