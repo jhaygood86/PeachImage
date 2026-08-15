@@ -1,3 +1,4 @@
+using PeachImage.Formats.Bmp;
 using PeachImage.Formats.Jpeg;
 
 namespace PeachImage;
@@ -18,6 +19,7 @@ public static class ImageFormatManager
     static ImageFormatManager()
     {
         Register(JpegCodec.Instance);
+        Register(BmpCodec.Instance);
     }
 
     /// <summary>The codecs currently registered, in registration order.</summary>
