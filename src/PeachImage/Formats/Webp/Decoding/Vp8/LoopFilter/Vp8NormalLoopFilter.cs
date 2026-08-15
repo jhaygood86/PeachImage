@@ -20,9 +20,13 @@ internal static class Vp8NormalLoopFilter
     {
         for (int k = 1; k <= 3; k++)
         {
-            FilterInnerEdge(plane, origin + (4 * k * stride), stride, 1, 16, thresh, interiorLimit, hevThresh);
+            FilterTopEdgeInner16(plane, origin + (4 * k * stride), stride, thresh, interiorLimit, hevThresh);
         }
     }
+
+    /// <summary>Filters a single 16-wide interior subblock edge. Split out of <see cref="FilterTopEdgesInner16"/> so one edge can be exercised in isolation.</summary>
+    public static void FilterTopEdgeInner16(Span<byte> plane, int origin, int stride, int thresh, int interiorLimit, int hevThresh) =>
+        FilterInnerEdge(plane, origin, stride, 1, 16, thresh, interiorLimit, hevThresh);
 
     public static void FilterLeftEdgesInner16(Span<byte> plane, int origin, int stride, int thresh, int interiorLimit, int hevThresh)
     {
@@ -46,6 +50,14 @@ internal static class Vp8NormalLoopFilter
 
     private static void FilterMacroblockEdge(Span<byte> plane, int origin, int acrossStep, int alongStep, int size, int thresh, int interiorLimit, int hevThresh)
     {
+        // alongStep == 1 means the lanes are adjacent bytes (a horizontal edge), which is the orientation
+        // Vp8VectorLoopFilter can load and store directly. See its remarks for why the other one stays scalar.
+        if (alongStep == 1 && Vp8VectorLoopFilter.CanFilter(size, origin, acrossStep, plane.Length))
+        {
+            Vp8VectorLoopFilter.FilterContiguousEdge(plane, origin, acrossStep, thresh, interiorLimit, hevThresh, macroblockEdge: true);
+            return;
+        }
+
         int thresh2 = (2 * thresh) + 1;
         for (int i = 0; i < size; i++)
         {
@@ -66,6 +78,12 @@ internal static class Vp8NormalLoopFilter
 
     private static void FilterInnerEdge(Span<byte> plane, int origin, int acrossStep, int alongStep, int size, int thresh, int interiorLimit, int hevThresh)
     {
+        if (alongStep == 1 && Vp8VectorLoopFilter.CanFilter(size, origin, acrossStep, plane.Length))
+        {
+            Vp8VectorLoopFilter.FilterContiguousEdge(plane, origin, acrossStep, thresh, interiorLimit, hevThresh, macroblockEdge: false);
+            return;
+        }
+
         int thresh2 = (2 * thresh) + 1;
         for (int i = 0; i < size; i++)
         {
