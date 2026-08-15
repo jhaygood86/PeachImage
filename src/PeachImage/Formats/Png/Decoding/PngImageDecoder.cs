@@ -222,6 +222,13 @@ internal static class PngImageDecoder
     {
         if (chunkHeader.Type == PngChunkType.Plte)
         {
+            // 256 entries x 3 bytes is PLTE's hard spec ceiling — unlike the generic ancillary-chunk cap
+            // below, this doesn't need a byte-budget constant since the maximum is exact and fixed.
+            if (chunkHeader.Length > 768)
+            {
+                throw new PngDecodingException($"PLTE chunk declares {chunkHeader.Length} bytes, exceeding the 768-byte (256-entry) limit.");
+            }
+
             byte[] data = PngChunkReader.ReadDataAndValidateCrc(stream, chunkHeader);
             palette = PngPalette.Read(data);
             return;
@@ -229,6 +236,13 @@ internal static class PngImageDecoder
 
         if (chunkHeader.Type == PngChunkType.Trns)
         {
+            // 256 bytes covers tRNS's largest legal form (a full palette's worth of alpha entries);
+            // grayscale/truecolor need only 2/6 bytes, validated exactly by PngTrnsReader/ApplyTrns below.
+            if (chunkHeader.Length > 256)
+            {
+                throw new PngDecodingException($"tRNS chunk declares {chunkHeader.Length} bytes, exceeding the 256-byte limit.");
+            }
+
             byte[] data = PngChunkReader.ReadDataAndValidateCrc(stream, chunkHeader);
             ApplyTrns(data, header, palette, ref grayOrRgbTrnsKey);
             return;
