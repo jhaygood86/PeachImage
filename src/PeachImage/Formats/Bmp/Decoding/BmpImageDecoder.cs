@@ -40,7 +40,7 @@ internal static class BmpImageDecoder
     private static void DecodeUncompressedPixels(Stream stream, BmpHeader header, byte[] palette, bool isIndexed, bool hasAlpha, Image image)
     {
         int paddedRowBytes = BmpRowUnpacker.GetPaddedRowByteCount(header.Width, header.BitCount);
-        Span<byte> rowBuffer = paddedRowBytes <= 4096 ? stackalloc byte[paddedRowBytes] : new byte[paddedRowBytes];
+        Span<byte> rowBuffer = paddedRowBytes is > 0 and <= 4096 ? stackalloc byte[paddedRowBytes] : new byte[paddedRowBytes];
         byte[] indexBuffer = isIndexed ? new byte[header.Width] : [];
 
         for (int sourceRow = 0; sourceRow < header.Height; sourceRow++)

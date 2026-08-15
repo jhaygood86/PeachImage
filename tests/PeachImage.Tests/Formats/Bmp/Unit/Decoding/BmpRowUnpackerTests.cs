@@ -109,6 +109,26 @@ public class BmpRowUnpackerTests
     }
 
     [Fact]
+    public void GetPaddedRowByteCount_WidthTimesBitCountOverflowsInt32_StillReturnsCorrectPositiveCount()
+    {
+        // width * bitCount = 268,435,456 * 8 = 2,147,483,648, one past Int32.MaxValue — but the true padded
+        // row size (268,435,456 bytes) is well within range. Computed with plain `int` arithmetic the
+        // intermediate product used to wrap to a negative number, which BmpImageDecoder then fed straight
+        // into `stackalloc` as a negative length — an uncatchable StackOverflowException that took down the
+        // whole process. The intermediate math must not overflow even though the final answer is in range.
+        Assert.Equal(268_435_456, BmpRowUnpacker.GetPaddedRowByteCount(268_435_456, 8));
+    }
+
+    [Fact]
+    public void GetPaddedRowByteCount_ResultTrulyExceedsInt32_ThrowsRatherThanReturningGarbage()
+    {
+        // A synthetic width/bitCount pair whose true padded-row byte count exceeds Int32.MaxValue — not
+        // reachable today given BmpDecodingLimits.MaxPixelCount, but this guards the boundary directly so a
+        // future change to that limit can't silently reintroduce an overflow further downstream.
+        Assert.Throws<BmpDecodingException>(() => BmpRowUnpacker.GetPaddedRowByteCount(int.MaxValue, 32));
+    }
+
+    [Fact]
     public void UnpackDirectColorRow_32Bpp_NonStandardMaskOrder_StillExtractsCorrectly()
     {
         // ABGR32: A@0xFF000000, B@0x00FF0000, G@0x0000FF00, R@0x000000FF — reversed from the usual layout.

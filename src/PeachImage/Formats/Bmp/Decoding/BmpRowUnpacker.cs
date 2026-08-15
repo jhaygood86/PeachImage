@@ -9,9 +9,24 @@ namespace PeachImage.Formats.Bmp.Decoding;
 /// </summary>
 internal static class BmpRowUnpacker
 {
-    /// <summary>The row size, in bytes, once padded to a 4-byte boundary — BMP's on-disk row layout.</summary>
-    public static int GetPaddedRowByteCount(int width, int bitCount) =>
-        (((width * bitCount) + 31) / 32) * 4;
+    /// <summary>
+    /// The row size, in bytes, once padded to a 4-byte boundary — BMP's on-disk row layout. Computed in
+    /// <see langword="long"/> arithmetic so an extreme (but individually valid, e.g. a pixel-count-limit-bounded
+    /// width with height 1) <paramref name="width"/>/<paramref name="bitCount"/> combination can't silently
+    /// wrap negative in <see langword="int"/> math and flow into a negative-length allocation downstream.
+    /// </summary>
+    public static int GetPaddedRowByteCount(int width, int bitCount)
+    {
+        long bitsPerRow = (long)width * bitCount;
+        long paddedRowBytes = ((bitsPerRow + 31) / 32) * 4;
+
+        if (paddedRowBytes > int.MaxValue)
+        {
+            throw new BmpDecodingException($"BMP row byte count ({paddedRowBytes}) for width {width} at {bitCount}bpp is too large to decode.");
+        }
+
+        return (int)paddedRowBytes;
+    }
 
     /// <summary>Unpacks a 1/4/8bpp packed row into one palette index per pixel.</summary>
     public static void UnpackBitsToIndices(ReadOnlySpan<byte> rowBytes, int bitCount, Span<byte> indices)
