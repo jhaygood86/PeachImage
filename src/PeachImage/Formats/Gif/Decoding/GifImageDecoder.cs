@@ -9,10 +9,16 @@ internal static class GifImageDecoder
     private const byte ImageSeparator = 0x2C;
     private const byte Trailer = 0x3B;
 
-    public static (List<GifFrame> Frames, int LoopCount) Decode(Stream stream, int maxFrames)
+    /// <summary>
+    /// <paramref name="maxCumulativeCanvasBytes"/> defaults to the production
+    /// <see cref="GifDecodingLimits.MaxCumulativeCanvasBytes"/> cap and is exposed as a parameter only so
+    /// tests can exercise it without needing to construct a file with a huge frame count.
+    /// </summary>
+    public static (List<GifFrame> Frames, int LoopCount) Decode(Stream stream, int maxFrames, long maxCumulativeCanvasBytes = GifDecodingLimits.MaxCumulativeCanvasBytes)
     {
         var header = GifHeaderReader.Read(stream);
         var compositor = new GifFrameCompositor(header.Width, header.Height);
+        long canvasBytes = (long)header.Width * header.Height * 4;
         var frames = new List<GifFrame>();
         int loopCount = 0;
         GifGraphicControlExtension? pendingGce = null;
@@ -39,6 +45,12 @@ internal static class GifImageDecoder
                     // Unknown/unsupported block introducer: can't safely resync with the rest of the
                     // stream — stop here with whatever frames were already decoded.
                     break;
+                }
+
+                long cumulativeCanvasBytes = canvasBytes * (frames.Count + 1);
+                if (cumulativeCanvasBytes > maxCumulativeCanvasBytes)
+                {
+                    throw new GifDecodingException($"GIF animation's cumulative frame-canvas memory ({cumulativeCanvasBytes:N0} bytes across {frames.Count + 1} frames) exceeds the {maxCumulativeCanvasBytes:N0}-byte limit.");
                 }
 
                 var gceForFrame = pendingGce ?? GifGraphicControlExtension.Default;
