@@ -123,17 +123,24 @@ resolve them. Every figure here has a StdDev under 1.2%.
 
 | Scenario | PeachImage | SkiaSharp | Ratio | Was | Allocated (PeachImage) |
 |---|---:|---:|---:|---:|---:|
-| Lossless, Photographic | 44.95 ms | 23.97 ms | **1.88×** | 2.58× | 10.9 MB |
-| Lossy, Photographic | 42.18 ms | 14.04 ms | **3.00×** | 4.11× | 6.9 MB |
-| Lossless, Graphic (flat color) | 0.74 ms | 0.35 ms | 2.09× | 2.08× | 2.2 MB |
-| Lossy, Alpha | 46.58 ms | 19.69 ms | **2.37×** | 3.34× | 17.3 MB |
-| Lossless, Alpha | 45.73 ms | 25.14 ms | **1.82×** | 2.63× | 13.0 MB |
-| Small image (32×24) | 17.41 µs | 14.29 µs | 1.27× | 1.30× | 44 KB |
+| Lossless, Photographic | 44.47 ms | 23.86 ms | **1.86×** | 2.58× | 10.9 MB |
+| Lossy, Photographic | 37.39 ms | 14.14 ms | **2.64×** | 4.11× | 6.9 MB |
+| Lossless, Graphic (flat color) | 0.73 ms | 0.35 ms | 2.11× | 2.08× | 2.2 MB |
+| Lossy, Alpha | 41.56 ms | 19.62 ms | **2.12×** | 3.34× | 17.3 MB |
+| Lossless, Alpha | 45.84 ms | 24.87 ms | **1.84×** | 2.63× | 13.0 MB |
+| Small image (32×24) | 13.88 µs | 12.64 µs | **1.10×** | 1.30× | 44 KB |
 
 The "Was" column is the same benchmark on the same job before the optimization pass described below,
-not the `ShortRun` figures previously published here. Decode time fell ~30% on all four large-image
-scenarios. **WebP still does not meet the 10% target**, and the remaining gap is characterized honestly
-at the end of this section.
+not the `ShortRun` figures previously published here. Decode time fell 30–36% on the four large-image
+scenarios, and **Small image now meets the 10% target**. The rest do not, and the remaining gap is
+characterized honestly at the end of this section.
+
+A measurement caveat worth recording: `Lossless-Photographic` is the one scenario that occasionally
+reports 15% high with a 8–10% StdDev instead of its usual ~1%. It allocates 10.9 MB per operation and
+runs Gen2 collections throughout, so it is the most sensitive to whatever else the machine is doing.
+The figures above are from a run where every scenario's StdDev was ≤1.2%, cross-checked against two
+further benchmark runs and against a separate decode-loop harness that reports it at 46.6–47.5 ms with
+sub-1% spread. Discard any single run where that scenario's error bar blows out.
 
 #### What the profile actually showed
 
@@ -141,7 +148,7 @@ The previous round of work had established, by elimination, that allocation was 
 (pooling the VP8L ARGB buffer cut allocation 30–45% and moved wall-clock barely at all). This round
 started by producing the sampling-profiler evidence that note called for — a `profile` mode on the
 benchmarks executable that decodes one asset in a tight loop, traced with `dotnet-trace`. Two of the
-five findings contradicted the standing hypotheses:
+six findings contradicted the standing hypotheses:
 
 - **The in-loop deblocking filter was the largest single bucket in lossy decode at 32%**, not the
   3–6% assumed. It had been treated as a secondary target behind entropy decode.
@@ -155,28 +162,38 @@ five findings contradicted the standing hypotheses:
   upsampler calls per frame.
 - The coefficient probability table was a `byte[4,8,3,11]`, indexed two or three times per decoded
   coefficient bit — a CLR multidimensional array cannot be spanned and costs a bounds check per rank.
+- `Vp8BoolDecoder`, underneath every bit of every lossy file, was still RFC 6386's reference decoder:
+  renormalization doubled the range one bit at a time in a loop, refilling one byte every eighth
+  iteration. libwebp does the same work with a single count-leading-zeros shift and a 56-bit bulk
+  refill.
 
 Each of those was fixed, in that order of measured cost, re-measuring after each change. The
 commit history carries the per-change numbers.
 
 #### Remaining gap
 
-The post-change profile puts lossy decode at 36% coefficient/entropy decode, 27% loop filter, 14%
-upsample+convert, 9% inverse DCT; and lossless at 69% pixel stream (Huffman/LZ77/colour cache), 24%
+The post-change profile puts lossy decode at 32% coefficient/entropy decode, 31% loop filter, 16%
+upsample+convert, 10% inverse DCT; and lossless at 69% pixel stream (Huffman/LZ77/colour cache), 24%
 predictor transform. Three distinct reasons remain, in decreasing size:
 
 1. **Entropy decode is inherently sequential**, and it is now the dominant cost on both codecs. The
    VP8 boolean decoder and VP8L's Huffman/LZ77 walk cannot be vectorized — libwebp does not vectorize
-   them either. What libwebp gets there is C's freedom from bounds checks on every table lookup and
-   better register allocation across the refill boundary.
+   them either, and the VP8 side now runs libwebp's own algorithm. What remains is that C gets bounds
+   checks off every table lookup for free and keeps the bit-reader registers in registers. The managed
+   equivalents are real but each has to be earned: making `Vp8LHuffmanTable`'s root size a
+   compile-time constant so RyuJIT can prove the root-table index in range; shrinking
+   `Vp8LBitReader`'s state (its `_bitsConsumed`/`_totalBits` pair is derivable from the byte position
+   and bit count) so the JIT can promote it; and flattening a `Vp8LHuffmanGroup`'s five tables into one
+   array so a symbol decode is not three dependent pointer loads deep before it starts.
 2. **Pipeline architecture, not kernel quality.** `Vp8FrameDecoder` makes three full-frame passes
    (reconstruct → loop filter → upsample+convert). libwebp runs a macroblock-row-band pipeline where
    all three happen while the band is still in L2. Converting is a much larger restructuring, and it
    would cost the "filters the whole frame in raster order, exactly reproducing the reference
    ordering" property that makes the current shape verifiable.
 3. **Kernel coverage.** The loop filter's strided ("left") edge orientation is still scalar — it needs
-   a 16×8 transpose in and out, which is the obvious next single-digit-percent item at ~15% of lossy.
-   So are the inverse DCT (9%), VP8 intra prediction, and `Vp8LColorTransform`.
+   a 16×8 transpose in and out, and it is now the largest single named item at ~15% of lossy. So are
+   the inverse DCT (10%, where most blocks at typical quality are all-zero and could be skipped
+   outright rather than transformed), VP8 intra prediction, and `Vp8LColorTransform`.
 
 **Lossless-Graphic is the one scenario that did not move**, and that is expected: at 640×480 from a
 370-byte file, its decode is dominated by fixed per-decode overhead (Huffman table construction,
@@ -191,12 +208,13 @@ at 1.27× too.
 | JPEG | 1.13×–1.30× | 1.20×–1.43× |
 | BMP | 0.40×–1.05× | no baseline (PeachImage-only) |
 | PNG | 1.08×–1.63× | 0.65×–1.27× |
-| WebP | 1.27×–3.00× | not yet implemented |
+| WebP | 1.10×–2.64× | not yet implemented |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
 and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the
 16-bit decode path. JPEG has the largest gap on both sides among the mature formats and is the best
 next target for further optimization work there (entropy coding is the most likely place to start).
-WebP is newest and still furthest from target, but a profile-guided pass has closed roughly a third of
-the gap on every large-image scenario (lossy 4.11× → 3.00×, lossless 2.58× → 1.88×); what is left is
-concentrated in entropy decode, which is inherently sequential.
+WebP is newest and still furthest from target on large images, but a profile-guided pass has closed
+roughly a third of the gap on every one of them (lossy 4.11× → 2.64×, lossless 2.58× → 1.86×) and
+brought the small-image case inside it; what is left is concentrated in entropy decode, which is
+inherently sequential.
