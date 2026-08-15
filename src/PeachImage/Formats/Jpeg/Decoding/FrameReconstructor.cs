@@ -24,7 +24,7 @@ internal static class FrameReconstructor
 
         IChromaUpsampler upsampler = options?.FastUpsampling == true
             ? new NearestNeighborUpsampler()
-            : new TriangleFilterUpsampler();
+            : ChromaUpsamplerSelector.Instance;
 
         int hMax = 1;
         int vMax = 1;
