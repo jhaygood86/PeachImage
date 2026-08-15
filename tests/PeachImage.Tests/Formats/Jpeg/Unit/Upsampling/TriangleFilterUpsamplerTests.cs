@@ -3,11 +3,12 @@ using PeachImage.Formats.Jpeg.Decoding.Upsampling;
 namespace PeachImage.Tests.Formats.Jpeg.Unit.Upsampling;
 
 /// <summary>
-/// Verifies <see cref="TriangleFilterUpsampler"/>'s vectorized <c>horizontalRatio == 2</c> path against an
-/// independent reimplementation of the original per-pixel formula (not a call into the production code —
-/// see <see cref="ReferenceUpsample"/>), across a range of widths deliberately including non-multiples of 8
-/// (the vectorized path processes 8 source columns at a time, so its scalar remainder handling is the part
-/// most likely to be wrong) and both real-world ratios, (2,2) and (2,1).
+/// Verifies both <see cref="TriangleFilterUpsampler"/> (Vector128) and <see cref="Vector256TriangleFilterUpsampler"/>
+/// (AVX2)'s vectorized <c>horizontalRatio == 2</c> path against an independent reimplementation of the
+/// original per-pixel formula (not a call into the production code — see <see cref="ReferenceUpsample"/>),
+/// across a range of widths deliberately including non-multiples of 8 <i>and</i> 16 (the Vector128 tier
+/// processes 8 source columns at a time, the Vector256 tier 16 — each tier's scalar remainder handling is
+/// the part most likely to be wrong) and both real-world ratios, (2,2) and (2,1).
 /// </summary>
 public class TriangleFilterUpsamplerTests
 {
@@ -22,6 +23,9 @@ public class TriangleFilterUpsamplerTests
     [InlineData(16, 4)]
     [InlineData(17, 4)]
     [InlineData(23, 5)]
+    [InlineData(24, 5)]
+    [InlineData(31, 5)]
+    [InlineData(32, 5)]
     [InlineData(64, 6)]
     public void Upsample2x2_MatchesIndependentReference(int sourceWidth, int sourceHeight)
     {
@@ -34,7 +38,9 @@ public class TriangleFilterUpsamplerTests
     [InlineData(7, 3)]
     [InlineData(8, 3)]
     [InlineData(9, 3)]
+    [InlineData(16, 3)]
     [InlineData(17, 4)]
+    [InlineData(32, 4)]
     public void Upsample2x1_MatchesIndependentReference(int sourceWidth, int sourceHeight)
     {
         AssertMatchesReference(sourceWidth, sourceHeight, horizontalRatio: 2, verticalRatio: 1);
@@ -62,12 +68,15 @@ public class TriangleFilterUpsamplerTests
         int destinationWidth = sourceWidth * horizontalRatio;
         int destinationHeight = sourceHeight * verticalRatio;
 
-        var actual = new byte[destinationWidth * destinationHeight];
-        new TriangleFilterUpsampler().Upsample(source, sourceWidth, sourceHeight, actual, destinationWidth, destinationHeight, horizontalRatio, verticalRatio);
-
         var expected = ReferenceUpsample(source, sourceWidth, sourceHeight, destinationWidth, destinationHeight, horizontalRatio, verticalRatio);
 
-        Assert.Equal(expected, actual);
+        var vector128Actual = new byte[destinationWidth * destinationHeight];
+        new TriangleFilterUpsampler().Upsample(source, sourceWidth, sourceHeight, vector128Actual, destinationWidth, destinationHeight, horizontalRatio, verticalRatio);
+        Assert.Equal(expected, vector128Actual);
+
+        var vector256Actual = new byte[destinationWidth * destinationHeight];
+        new Vector256TriangleFilterUpsampler().Upsample(source, sourceWidth, sourceHeight, vector256Actual, destinationWidth, destinationHeight, horizontalRatio, verticalRatio);
+        Assert.Equal(expected, vector256Actual);
     }
 
     /// <summary>

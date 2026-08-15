@@ -66,33 +66,41 @@ internal sealed class Vector256AanInverseDct : IInverseDctKernel
         StoreRow(m.V7, output, 7 * outputStride);
     }
 
+    /// <summary>
+    /// Loads 8 coefficients and dequantizes them via hardware short-&gt;int-&gt;float widen and a genuine vector
+    /// load of the dequant row — no scalar per-lane loop, the same widen technique
+    /// <see cref="ColorConversion.Vector256ColorConverter.WidenBytes"/> uses for bytes, sign-extended here
+    /// since coefficients (unlike color bytes) can be negative.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector256<float> LoadAndDequantizeRow(ReadOnlySpan<short> coefficients, ReadOnlySpan<float> dequantTable, int offset)
     {
-        Span<float> row = stackalloc float[8];
-        for (int u = 0; u < 8; u++)
-        {
-            row[u] = coefficients[offset + u] * dequantTable[offset + u];
-        }
-
-        return Vector256.Create((ReadOnlySpan<float>)row);
+        var coeffShorts = Vector128.Create(coefficients.Slice(offset, 8));
+        var (intLower, intUpper) = Vector128.Widen(coeffShorts);
+        var coeffFloats = Vector256.ConvertToSingle(Vector256.Create(intLower, intUpper));
+        var dequant = Vector256.Create(dequantTable.Slice(offset, 8));
+        return coeffFloats * dequant;
     }
 
+    /// <summary>
+    /// Rounds and writes a row's 8 samples via hardware float-&gt;int-&gt;ushort-&gt;byte narrow — the same chain
+    /// <see cref="ColorConversion.Vector256ColorConverter.NarrowRounded"/> uses. A row's 8 output bytes are
+    /// always contiguous regardless of <paramref name="offset"/>'s stride (stride only separates rows), so
+    /// this is a plain vector store, no scalar per-lane loop.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void StoreRow(Vector256<float> row, Span<byte> output, int offset)
     {
         var biased = row + LevelShiftAndRoundingBias;
         var clamped = Vector256.Min(Vector256.Max(biased, Vector256<float>.Zero), MaxSample);
 
-        Span<float> values = stackalloc float[8];
-        clamped.CopyTo(values);
-        for (int i = 0; i < 8; i++)
-        {
-            // Clamped to [0, 255] above and biased by +0.5 for round-to-nearest, so a plain truncating cast
-            // is exact — the same bias-and-truncate idea as AanScalarInverseDct's range-limit-table finish,
-            // just via a vector Min/Max clamp instead of a table lookup (a table lookup here would need a
-            // gather, which is slower than the two compare instructions Min/Max already are).
-            output[offset + i] = (byte)values[i];
-        }
+        // Clamped to [0, 255] above and biased by +0.5 for round-to-nearest, so a plain truncating convert
+        // is exact — the same bias-and-truncate idea as AanScalarInverseDct's range-limit-table finish, just
+        // via a vector Min/Max clamp instead of a table lookup (a table lookup here would need a gather,
+        // which is slower than the two compare instructions Min/Max already are).
+        var asUInt = Vector256.ConvertToInt32(clamped).AsUInt32();
+        var narrowedToUShort = Vector128.Narrow(asUInt.GetLower(), asUInt.GetUpper());
+        var bytes = Vector128.Narrow(narrowedToUShort, Vector128<ushort>.Zero).GetLower();
+        bytes.CopyTo(output.Slice(offset, 8));
     }
 }
