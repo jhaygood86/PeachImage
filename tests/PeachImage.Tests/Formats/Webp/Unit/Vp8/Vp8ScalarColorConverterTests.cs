@@ -22,10 +22,9 @@ public class Vp8ScalarColorConverterTests
     [InlineData((byte)235, (byte)255, (byte)255, (byte)255)]
     public void Convert_NeutralChroma_ProducesGray(byte y, byte expectedR, byte expectedG, byte expectedB)
     {
-        var converter = new Vp8ScalarColorConverter();
         Span<byte> rgb = stackalloc byte[3];
 
-        converter.Convert(y, 128, 128, rgb);
+        Vp8ScalarColorConverter.ConvertPixel(y, 128, 128, rgb);
 
         Assert.Equal(expectedR, rgb[0]);
         Assert.Equal(expectedG, rgb[1]);
@@ -41,10 +40,9 @@ public class Vp8ScalarColorConverterTests
     [Fact]
     public void Convert_SkewedChroma_MatchesHandComputedValue()
     {
-        var converter = new Vp8ScalarColorConverter();
         Span<byte> rgb = stackalloc byte[3];
 
-        converter.Convert(128, 90, 200, rgb);
+        Vp8ScalarColorConverter.ConvertPixel(128, 90, 200, rgb);
 
         Assert.Equal(245, rgb[0]);
         Assert.Equal(87, rgb[1]);
@@ -54,17 +52,16 @@ public class Vp8ScalarColorConverterTests
     [Fact]
     public void Convert_OutOfRangeCombination_ClampsToByteRange()
     {
-        var converter = new Vp8ScalarColorConverter();
         Span<byte> rgb = stackalloc byte[3];
 
         // Y=255, V=255 pushes R's raw value well past 255*64; Y=0, U=0 would push B's raw value negative for
         // other channels — verify both ends of the clamp are respected (no overflow/underflow wraparound).
-        converter.Convert(255, 255, 255, rgb);
+        Vp8ScalarColorConverter.ConvertPixel(255, 255, 255, rgb);
         Assert.InRange(rgb[0], (byte)0, (byte)255);
         Assert.InRange(rgb[1], (byte)0, (byte)255);
         Assert.InRange(rgb[2], (byte)0, (byte)255);
 
-        converter.Convert(0, 0, 0, rgb);
+        Vp8ScalarColorConverter.ConvertPixel(0, 0, 0, rgb);
         Assert.InRange(rgb[0], (byte)0, (byte)255);
         Assert.InRange(rgb[1], (byte)0, (byte)255);
         Assert.InRange(rgb[2], (byte)0, (byte)255);

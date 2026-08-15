@@ -1,4 +1,6 @@
-﻿namespace PeachImage.Formats.Webp.Decoding.Vp8.ColorConversion;
+using System.Runtime.CompilerServices;
+
+namespace PeachImage.Formats.Webp.Decoding.Vp8.ColorConversion;
 
 /// <summary>
 /// Studio/limited-range fixed-point YUV-&gt;RGB conversion (BT.601), matching libwebp's <c>src/dsp/yuv.h</c>
@@ -16,16 +18,57 @@
 /// </remarks>
 internal sealed class Vp8ScalarColorConverter : IVp8ColorConverter
 {
-    public void Convert(byte y, byte u, byte v, Span<byte> rgb)
+    /// <summary>Y's coefficient, shared by all three output channels.</summary>
+    internal const int YCoefficient = 19077;
+
+    /// <summary>V's coefficient for red.</summary>
+    internal const int VToRed = 26149;
+
+    /// <summary>U's coefficient for green (subtracted).</summary>
+    internal const int UToGreen = 6419;
+
+    /// <summary>V's coefficient for green (subtracted).</summary>
+    internal const int VToGreen = 13320;
+
+    /// <summary>U's coefficient for blue.</summary>
+    internal const int UToBlue = 33050;
+
+    /// <summary>Constant bias for red.</summary>
+    internal const int RedBias = -14234;
+
+    /// <summary>Constant bias for green.</summary>
+    internal const int GreenBias = 8708;
+
+    /// <summary>Constant bias for blue.</summary>
+    internal const int BlueBias = -17685;
+
+    /// <inheritdoc/>
+    public void ConvertRow(ReadOnlySpan<byte> y, ReadOnlySpan<byte> u, ReadOnlySpan<byte> v, Span<byte> rgb, int width) =>
+        ConvertRemainder(y, u, v, rgb, 0, width);
+
+    /// <summary>Converts <paramref name="width"/> minus <paramref name="start"/> samples one at a time — the shared tail of every vectorized tier, and the whole of this one.</summary>
+    internal static void ConvertRemainder(ReadOnlySpan<byte> y, ReadOnlySpan<byte> u, ReadOnlySpan<byte> v, Span<byte> rgb, int start, int width)
     {
-        rgb[0] = (byte)ClipToByteAfterShift(MultHi(y, 19077) + MultHi(v, 26149) - 14234);
-        rgb[1] = (byte)ClipToByteAfterShift(MultHi(y, 19077) - MultHi(u, 6419) - MultHi(v, 13320) + 8708);
-        rgb[2] = (byte)ClipToByteAfterShift(MultHi(y, 19077) + MultHi(u, 33050) - 17685);
+        for (int x = start; x < width; x++)
+        {
+            ConvertPixel(y[x], u[x], v[x], rgb.Slice(x * 3, 3));
+        }
     }
 
+    /// <summary>Converts a single sample triple. Kept as the readable definition of the arithmetic every tier reproduces, and as those tiers' test oracle.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void ConvertPixel(byte y, byte u, byte v, Span<byte> rgb)
+    {
+        rgb[0] = (byte)ClipToByteAfterShift(MultHi(y, YCoefficient) + MultHi(v, VToRed) + RedBias);
+        rgb[1] = (byte)ClipToByteAfterShift(MultHi(y, YCoefficient) - MultHi(u, UToGreen) - MultHi(v, VToGreen) + GreenBias);
+        rgb[2] = (byte)ClipToByteAfterShift(MultHi(y, YCoefficient) + MultHi(u, UToBlue) + BlueBias);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int MultHi(int v, int coeff) => (v * coeff) >> 8;
 
     /// <summary>Right-shifts by the YUV_FIX2 (6) descale and clamps to [0,255], matching libwebp's <c>VP8Clip8</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int ClipToByteAfterShift(int v)
     {
         int shifted = v >> 6;

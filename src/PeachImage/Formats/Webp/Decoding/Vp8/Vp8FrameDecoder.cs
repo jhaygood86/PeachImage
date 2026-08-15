@@ -492,26 +492,49 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         Func<int, int, int> yOff,
         Func<int, int, int> uOff)
     {
-        IVp8ColorConverter converter = Vp8ColorConverterSelector.Select();
+        IVp8ColorConverter converter = Vp8ColorConverterSelector.Instance;
         byte[] rgb = new byte[width * height * 3];
 
         int chromaWidth = mbCols * 8;
         int chromaHeight = mbRows * 8;
         int uBase = uOff(0, 0);
 
-        for (int y = 0; y < height; y++)
+        // Two full-width scratch rows for the upsampled chroma, rented rather than allocated: at most 16383
+        // bytes each, so they stay resident in L1 across the whole frame.
+        byte[] uRow = WebpBufferPool.Shared.Rent(width);
+        byte[] vRow = WebpBufferPool.Shared.Rent(width);
+
+        try
         {
-            int yRowOff = yOff(0, y);
-            int outRowOff = y * width * 3;
-
-            for (int x = 0; x < width; x++)
+            for (int y = 0; y < height; y++)
             {
-                byte yy = yPlane[yRowOff + x];
-                byte uu = Vp8ChromaUpsampler.Sample(uPlane.AsSpan(uBase), uvStride, chromaWidth, chromaHeight, x, y);
-                byte vv = Vp8ChromaUpsampler.Sample(vPlane.AsSpan(uBase), uvStride, chromaWidth, chromaHeight, x, y);
+                // Every output row interpolates between exactly two chroma rows: the one it sits closest to,
+                // and its neighbour on the side the output row leans toward (clamped at the plane edges,
+                // reproducing libwebp's edge replication). Resolving those once per row is what lets the
+                // upsampler and converter run as row kernels instead of per-pixel calls.
+                int nearRow = y >> 1;
+                int farRow = Clamp((y >> 1) + (((y & 1) == 1) ? 1 : -1), chromaHeight - 1);
 
-                converter.Convert(yy, uu, vv, rgb.AsSpan(outRowOff + (x * 3), 3));
+                var uNear = uPlane.AsSpan(uBase + (nearRow * uvStride), chromaWidth);
+                var uFar = uPlane.AsSpan(uBase + (farRow * uvStride), chromaWidth);
+                var vNear = vPlane.AsSpan(uBase + (nearRow * uvStride), chromaWidth);
+                var vFar = vPlane.AsSpan(uBase + (farRow * uvStride), chromaWidth);
+
+                Vp8ChromaUpsampler.UpsampleRow(uNear, uFar, uRow, width, chromaWidth);
+                Vp8ChromaUpsampler.UpsampleRow(vNear, vFar, vRow, width, chromaWidth);
+
+                converter.ConvertRow(
+                    yPlane.AsSpan(yOff(0, y), width),
+                    uRow,
+                    vRow,
+                    rgb.AsSpan(y * width * 3, width * 3),
+                    width);
             }
+        }
+        finally
+        {
+            WebpBufferPool.Shared.Return(uRow);
+            WebpBufferPool.Shared.Return(vRow);
         }
 
         return new Vp8DecodedFrame
@@ -521,4 +544,6 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
             Rgb24Pixels = rgb,
         };
     }
+
+    private static int Clamp(int value, int max) => value < 0 ? 0 : value > max ? max : value;
 }
