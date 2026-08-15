@@ -11,7 +11,12 @@ Targets .NET 10. No native interop — every codec is managed code, using modern
   chroma subsampling, restart markers) and encode (baseline sequential, grayscale/YCbCr) are implemented.
   SIMD-accelerated IDCT/FDCT and color conversion kernels are in place
   (`System.Runtime.Intrinsics.Vector128`/`Vector256`, dispatched at runtime by hardware support).
-- Other formats (PNG, WebP, GIF, BMP, ...) are not yet implemented. The public API
+- **BMP**: decode (OS/2 1.x/2.x and Windows BITMAPINFOHEADER through BITMAPV5HEADER variants, 1/4/8bpp
+  indexed color, 16/24/32bpp direct color, RLE4/RLE8 compression, arbitrary BI_BITFIELDS/BI_ALPHABITFIELDS
+  masks) and encode (24bpp truecolor, 8bpp indexed grayscale with optional RLE8, 32bpp with an explicit
+  alpha channel via BITMAPV4HEADER + BI_BITFIELDS) are implemented, including explicit alpha-channel
+  support on both sides.
+- Other formats (PNG, WebP, GIF, ...) are not yet implemented. The public API
   (`Image`, `IImageDecoder`/`IImageEncoder`, `ImageFormatManager`) is designed to support them without
   breaking changes when they're added.
 
@@ -35,10 +40,11 @@ dotnet build PeachImage.slnx
 dotnet test PeachImage.slnx
 ```
 
-The first `dotnet test` run automatically fetches JPEG test corpora (the Imazen `codec-corpus` conformance
-set and image-rs/jpeg-decoder's test assets) into the gitignored `tests/corpus/` directory — no separate
-script needed. Set `PEACHIMAGE_SKIP_CORPUS_FETCH=1` to skip network access; corpus-driven tests report as
-skipped rather than failing.
+The first `dotnet test` run automatically fetches JPEG and BMP test corpora (the Imazen `codec-corpus`
+conformance sets, image-rs/jpeg-decoder's test assets, and — for BMP — the `bmp-conformance` subset of
+`codec-corpus`, itself generated from Jason Summers' [bmpsuite](https://github.com/jsummers/bmpsuite)) into
+the gitignored `tests/corpus/` directory — no separate script needed. Set `PEACHIMAGE_SKIP_CORPUS_FETCH=1` to
+skip network access; corpus-driven tests report as skipped rather than failing.
 
 ## Benchmarking
 
@@ -48,7 +54,9 @@ dotnet run -c Release --project bench/PeachImage.Benchmarks
 
 Compares PeachImage's JPEG decode/encode throughput against real libjpeg-turbo (via
 `Quamotion.TurboJpegWrapper`, a dev-only dependency of the benchmark project only — never referenced by
-the shipped library).
+the shipped library) and PeachImage's BMP decode throughput against SkiaSharp (also a dev-only dependency).
+BMP encode has no real-world baseline here — SkiaSharp's encoder doesn't support BMP output — so
+`BmpEncodeBenchmarks` tracks PeachImage's own throughput only.
 
 ## License
 
