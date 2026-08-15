@@ -116,6 +116,57 @@ public class Vp8LBitReaderTests
         Assert.Equal(0xFFu, reader.ReadBits(8));
     }
 
+    /// <summary>
+    /// Drives long randomized sequences of interleaved <c>PeekBits</c>/<c>SkipBits</c>/<c>ReadBits</c> against
+    /// a bit-by-bit reference that tracks the same position independently, over buffers short enough that the
+    /// zero-padded tail is reached often.
+    /// </summary>
+    /// <remarks>
+    /// The targeted tests above each pin one path; this is what covers the *combinations* — in particular the
+    /// arbitrary, never-byte-aligned register states that arise when Huffman codes of odd lengths are skipped
+    /// one after another, which is exactly the regime the bulk refill has to be correct in and the regime the
+    /// old <c>_bitCount == 0</c>-gated bulk load never actually ran in.
+    /// </remarks>
+    [Fact]
+    public void MixedPeekSkipReadSequences_AgreeWithBitByBitReference()
+    {
+        for (int seed = 0; seed < 200; seed++)
+        {
+            var random = new Random(seed);
+            byte[] data = new byte[random.Next(1, 40)];
+            random.NextBytes(data);
+
+            var reader = new Vp8LBitReader(data, 0, data.Length);
+            int bitOffset = 0;
+
+            for (int step = 0; step < 400; step++)
+            {
+                int bitCount = random.Next(0, 33);
+                uint expected = ReadBitsReference(data, bitOffset, bitCount);
+
+                switch (random.Next(3))
+                {
+                    case 0:
+                        Assert.Equal(expected, reader.PeekBits(bitCount));
+                        break;
+
+                    case 1:
+                        Assert.Equal(expected, reader.PeekBits(bitCount));
+                        reader.SkipBits(bitCount);
+                        bitOffset += bitCount;
+                        break;
+
+                    default:
+                        Assert.Equal(expected, reader.ReadBits(bitCount));
+                        bitOffset += bitCount;
+                        break;
+                }
+
+                Assert.Equal(bitOffset > data.Length * 8, reader.IsOverBudget);
+            }
+        }
+    }
+
     private static uint ReadBitsReference(byte[] data, int bitOffset, int bitCount)
     {
         uint value = 0;

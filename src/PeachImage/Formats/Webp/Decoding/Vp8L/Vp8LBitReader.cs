@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8L;
 
@@ -48,6 +50,7 @@ internal sealed class Vp8LBitReader
     public bool IsOverBudget => _bitsConsumed > _totalBits;
 
     /// <summary>Returns the next <paramref name="bitCount"/> bits (0-32) without consuming them.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint PeekBits(int bitCount)
     {
         if (bitCount == 0)
@@ -60,6 +63,7 @@ internal sealed class Vp8LBitReader
     }
 
     /// <summary>Consumes <paramref name="bitCount"/> bits previously observed via <see cref="PeekBits"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void SkipBits(int bitCount)
     {
         _bitBuffer >>= bitCount;
@@ -68,6 +72,7 @@ internal sealed class Vp8LBitReader
     }
 
     /// <summary>Reads and consumes the next <paramref name="bitCount"/> bits (0-32), least-significant-bit-first.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint ReadBits(int bitCount)
     {
         uint value = PeekBits(bitCount);
@@ -75,20 +80,49 @@ internal sealed class Vp8LBitReader
         return value;
     }
 
+    /// <summary>The check that keeps <see cref="Refill"/> off the hot path; split so the common "already have enough bits" case inlines into the caller as a single compare.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void EnsureBits(int bitCount)
     {
-        if (_bitCount >= bitCount)
+        if (_bitCount < bitCount)
         {
-            return;
+            Refill(bitCount);
         }
+    }
 
-        // Fast bulk path: the shift register is empty and a full 8-byte-aligned chunk is available — load it
-        // in one shot rather than 8 individual byte ORs.
-        if (_bitCount == 0 && _bytePos + 8 <= _length)
+    /// <summary>
+    /// Tops the shift register up by a whole 32-bit word at a time.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The previous bulk path required <c>_bitCount == 0</c> <em>exactly</em>. Because <see cref="SkipBits"/>
+    /// consumes whatever a Huffman code happened to be worth, the register essentially never lands on exactly
+    /// empty, so in practice almost every refill fell through to the byte-at-a-time loop below — the bulk load
+    /// was close to dead code. Refilling 32 bits instead of 64 is what removes the precondition: the register
+    /// is 64 bits wide and a request is at most 32, so <c>_bitCount &lt;= 31</c> whenever this is reached and
+    /// the fresh word always fits above the bits already there. It also means a single refill is always
+    /// enough, since <c>_bitCount + 32 &gt;= 32 &gt;= bitCount</c>. This is the same 32-into-64 arrangement
+    /// libwebp's <c>VP8LDoFillBitWindow</c> uses.
+    /// </para>
+    /// <para>
+    /// The <c>|=</c> relies on an invariant maintained everywhere else in this type: bits at and above
+    /// <see cref="_bitCount"/> in <see cref="_bitBuffer"/> are always zero. The register starts zeroed,
+    /// <see cref="SkipBits"/> shifts right (which zero-fills from the top), and both paths here OR in at
+    /// exactly <see cref="_bitCount"/>.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void Refill(int bitCount)
+    {
+        Debug.Assert(bitCount is > 0 and <= 32, "VP8L never requests more than 32 bits at once.");
+        Debug.Assert(_bitCount < 32, "A refill below 32 buffered bits is what guarantees the 32-bit word fits.");
+        Debug.Assert(_bitCount == 64 || (_bitBuffer >> _bitCount) == 0, "Bits above _bitCount must be zero for the OR below to be lossless.");
+
+        if (_bytePos + 4 <= _length)
         {
-            _bitBuffer = BinaryPrimitives.ReadUInt64LittleEndian(_data.AsSpan(_bytePos, 8));
-            _bytePos += 8;
-            _bitCount = 64;
+            _bitBuffer |= (ulong)BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_bytePos, 4)) << _bitCount;
+            _bytePos += 4;
+            _bitCount += 32;
             return;
         }
 

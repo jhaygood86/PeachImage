@@ -30,11 +30,22 @@ internal sealed class Vp8LHuffmanTable
 
     public required int RootBits { get; init; }
 
+    /// <summary>The longest code VP8L permits, so one peek of this width always covers both levels of the lookup — every root entry's total <see cref="Vp8LHuffmanCode.Bits"/> is bounded by it, and <see cref="RootBits"/> (7 or 8) is well under it.</summary>
+    private const int MaxCodeLength = Internal.WebpDecodingLimits.MaxHuffmanCodeLength;
+
     /// <summary>Decodes the next symbol from <paramref name="reader"/>, consuming exactly as many bits as its code is long.</summary>
+    /// <remarks>
+    /// Peeks the maximum code length once and slices both levels out of that single window, rather than
+    /// peeking <see cref="RootBits"/> and then re-peeking a wider window for a second-level code. Peeking is
+    /// non-destructive — <see cref="Vp8LBitReader.SkipBits"/> alone decides what is actually consumed, and it
+    /// is also what drives <see cref="Vp8LBitReader.IsOverBudget"/> — so widening the peek changes nothing
+    /// observable. Mirrors libwebp's <c>VP8LPrefetchBits</c>/<c>VP8LGetBitsUnsafe</c> pairing.
+    /// </remarks>
     public int Decode(Vp8LBitReader reader)
     {
         int rootBits = RootBits;
-        uint low = reader.PeekBits(rootBits);
+        uint window = reader.PeekBits(MaxCodeLength);
+        uint low = window & ((1u << rootBits) - 1);
         var entries = Entries;
         var root = entries[low];
 
@@ -45,8 +56,7 @@ internal sealed class Vp8LHuffmanTable
         }
 
         int extraBits = root.Bits - rootBits;
-        uint fullWindow = reader.PeekBits(rootBits + extraBits);
-        uint secondaryOffset = fullWindow >> rootBits;
+        uint secondaryOffset = (window >> rootBits) & ((1u << extraBits) - 1);
         var second = entries[(int)low + root.Value + (int)secondaryOffset];
 
         reader.SkipBits(rootBits + second.Bits);
