@@ -32,9 +32,13 @@ internal static class Vp8NormalLoopFilter
     {
         for (int k = 1; k <= 3; k++)
         {
-            FilterInnerEdge(plane, origin + (4 * k), 1, stride, 16, thresh, interiorLimit, hevThresh);
+            FilterLeftEdgeInner16(plane, origin + (4 * k), stride, thresh, interiorLimit, hevThresh);
         }
     }
+
+    /// <summary>Filters a single 16-tall interior subblock edge. Split out of <see cref="FilterLeftEdgesInner16"/> so one edge can be exercised in isolation, mirroring <see cref="FilterTopEdgeInner16"/>.</summary>
+    public static void FilterLeftEdgeInner16(Span<byte> plane, int origin, int stride, int thresh, int interiorLimit, int hevThresh) =>
+        FilterInnerEdge(plane, origin, 1, stride, 16, thresh, interiorLimit, hevThresh);
 
     public static void FilterTopEdge8(Span<byte> plane, int origin, int stride, int thresh, int interiorLimit, int hevThresh) =>
         FilterMacroblockEdge(plane, origin, stride, 1, 8, thresh, interiorLimit, hevThresh);
@@ -50,11 +54,19 @@ internal static class Vp8NormalLoopFilter
 
     private static void FilterMacroblockEdge(Span<byte> plane, int origin, int acrossStep, int alongStep, int size, int thresh, int interiorLimit, int hevThresh)
     {
-        // alongStep == 1 means the lanes are adjacent bytes (a horizontal edge), which is the orientation
-        // Vp8VectorLoopFilter can load and store directly. See its remarks for why the other one stays scalar.
-        if (alongStep == 1 && Vp8VectorLoopFilter.CanFilter(size, origin, acrossStep, plane.Length))
+        // alongStep == 1 means the lanes are adjacent bytes (a horizontal edge); otherwise they are a stride
+        // apart (a vertical edge) and need a transpose. Vp8VectorLoopFilter handles both.
+        if (alongStep == 1)
         {
-            Vp8VectorLoopFilter.FilterContiguousEdge(plane, origin, acrossStep, thresh, interiorLimit, hevThresh, macroblockEdge: true);
+            if (Vp8VectorLoopFilter.CanFilter(size, origin, acrossStep, plane.Length))
+            {
+                Vp8VectorLoopFilter.FilterContiguousEdge(plane, origin, acrossStep, thresh, interiorLimit, hevThresh, macroblockEdge: true);
+                return;
+            }
+        }
+        else if (acrossStep == 1 && Vp8VectorLoopFilter.CanFilterStrided(size, origin, alongStep, plane.Length))
+        {
+            Vp8VectorLoopFilter.FilterStridedEdge(plane, origin, alongStep, thresh, interiorLimit, hevThresh, macroblockEdge: true);
             return;
         }
 
@@ -78,9 +90,17 @@ internal static class Vp8NormalLoopFilter
 
     private static void FilterInnerEdge(Span<byte> plane, int origin, int acrossStep, int alongStep, int size, int thresh, int interiorLimit, int hevThresh)
     {
-        if (alongStep == 1 && Vp8VectorLoopFilter.CanFilter(size, origin, acrossStep, plane.Length))
+        if (alongStep == 1)
         {
-            Vp8VectorLoopFilter.FilterContiguousEdge(plane, origin, acrossStep, thresh, interiorLimit, hevThresh, macroblockEdge: false);
+            if (Vp8VectorLoopFilter.CanFilter(size, origin, acrossStep, plane.Length))
+            {
+                Vp8VectorLoopFilter.FilterContiguousEdge(plane, origin, acrossStep, thresh, interiorLimit, hevThresh, macroblockEdge: false);
+                return;
+            }
+        }
+        else if (acrossStep == 1 && Vp8VectorLoopFilter.CanFilterStrided(size, origin, alongStep, plane.Length))
+        {
+            Vp8VectorLoopFilter.FilterStridedEdge(plane, origin, alongStep, thresh, interiorLimit, hevThresh, macroblockEdge: false);
             return;
         }
 

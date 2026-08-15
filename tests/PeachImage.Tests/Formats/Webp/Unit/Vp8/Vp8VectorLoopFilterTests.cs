@@ -1,4 +1,4 @@
-using PeachImage.Formats.Webp.Decoding.Vp8.LoopFilter;
+﻿using PeachImage.Formats.Webp.Decoding.Vp8.LoopFilter;
 
 namespace PeachImage.Tests.Formats.Webp.Unit.Vp8;
 
@@ -15,15 +15,19 @@ namespace PeachImage.Tests.Formats.Webp.Unit.Vp8;
 public class Vp8VectorLoopFilterTests
 {
     private const int Stride = 32;
-    private const int Rows = 16;
+    // Tall enough for 16 lanes a full stride apart (origin + 15*stride + 4 taps), which the strided
+    // orientation needs; the contiguous one fits comfortably inside the same buffer.
+    private const int Rows = 24;
     private const int Origin = 4 * Stride;
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void VectorFilter_MatchesScalarFilter_AcrossThresholdSweeps(bool macroblockEdge)
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public void VectorFilter_MatchesScalarFilter_AcrossThresholdSweeps(bool macroblockEdge, bool strided)
     {
-        Assert.SkipUnless(Vp8VectorLoopFilter.CanFilter(16, Origin, Stride, Stride * Rows), "Vector128 is not hardware accelerated here.");
+        SkipIfUnsupported(strided);
 
         foreach (int thresh in new[] { 0, 1, 2, 7, 8, 20, 63, 64, 100, 127, 128, 189, 193 })
         {
@@ -33,7 +37,7 @@ public class Vp8VectorLoopFilterTests
                 {
                     for (int seed = 0; seed < 6; seed++)
                     {
-                        AssertAgrees(MakePlane(seed, spread: seed % 3), thresh, interiorLimit, hevThreshold, macroblockEdge);
+                        AssertAgrees(MakePlane(seed, spread: seed % 3), thresh, interiorLimit, hevThreshold, macroblockEdge, strided);
                     }
                 }
             }
@@ -45,11 +49,13 @@ public class Vp8VectorLoopFilterTests
     /// interior gates are crossed one step at a time rather than by luck.
     /// </summary>
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void VectorFilter_MatchesScalarFilter_WhenDifferencesSitOnGateBoundaries(bool macroblockEdge)
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public void VectorFilter_MatchesScalarFilter_WhenDifferencesSitOnGateBoundaries(bool macroblockEdge, bool strided)
     {
-        Assert.SkipUnless(Vp8VectorLoopFilter.CanFilter(16, Origin, Stride, Stride * Rows), "Vector128 is not hardware accelerated here.");
+        SkipIfUnsupported(strided);
 
         for (int tap = 0; tap < 8; tap++)
         {
@@ -60,7 +66,9 @@ public class Vp8VectorLoopFilterTests
 
                 for (int lane = 0; lane < 16; lane++)
                 {
-                    int offset = Origin + ((tap - 4) * Stride) + lane;
+                    int offset = strided
+                        ? Origin + (tap - 4) + (lane * Stride)
+                        : Origin + ((tap - 4) * Stride) + lane;
                     plane[offset] = (byte)Math.Clamp(128 + delta + lane - 8, 0, 255);
                 }
 
@@ -70,7 +78,7 @@ public class Vp8VectorLoopFilterTests
                     {
                         foreach (int hevThreshold in new[] { 0, 1, 2 })
                         {
-                            AssertAgrees(plane, thresh, interiorLimit, hevThreshold, macroblockEdge);
+                            AssertAgrees(plane, thresh, interiorLimit, hevThreshold, macroblockEdge, strided);
                         }
                     }
                 }
@@ -80,11 +88,13 @@ public class Vp8VectorLoopFilterTests
 
     /// <summary>Saturating extremes: taps pinned at 0 and 255 drive every clamp in the filter arithmetic to its limit.</summary>
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void VectorFilter_MatchesScalarFilter_AtChannelExtremes(bool macroblockEdge)
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public void VectorFilter_MatchesScalarFilter_AtChannelExtremes(bool macroblockEdge, bool strided)
     {
-        Assert.SkipUnless(Vp8VectorLoopFilter.CanFilter(16, Origin, Stride, Stride * Rows), "Vector128 is not hardware accelerated here.");
+        SkipIfUnsupported(strided);
 
         var random = new Random(90210);
 
@@ -101,7 +111,7 @@ public class Vp8VectorLoopFilterTests
                 };
             }
 
-            AssertAgrees(plane, random.Next(190), random.Next(64), random.Next(3), macroblockEdge);
+            AssertAgrees(plane, random.Next(190), random.Next(64), random.Next(3), macroblockEdge, strided);
         }
     }
 
@@ -122,21 +132,54 @@ public class Vp8VectorLoopFilterTests
         return plane;
     }
 
-    private static void AssertAgrees(byte[] plane, int thresh, int interiorLimit, int hevThreshold, bool macroblockEdge)
+    private static void SkipIfUnsupported(bool strided)
+    {
+        Assert.SkipUnless(
+            strided
+                ? Vp8VectorLoopFilter.CanFilterStrided(16, Origin, Stride, Stride * Rows)
+                : Vp8VectorLoopFilter.CanFilter(16, Origin, Stride, Stride * Rows),
+            strided ? "SSE2 is not available here." : "Vector128 is not hardware accelerated here.");
+    }
+
+    /// <summary>
+    /// Drives the production filter and an independent scalar transliteration over the same plane and compares
+    /// the whole buffer. The two orientations differ only in which axis the taps run along, so the same
+    /// reference serves both — with <c>acrossStep</c> swapped between 1 and the stride.
+    /// </summary>
+    private static void AssertAgrees(byte[] plane, int thresh, int interiorLimit, int hevThreshold, bool macroblockEdge, bool strided)
     {
         byte[] fromVector = (byte[])plane.Clone();
         byte[] fromScalar = (byte[])plane.Clone();
 
         if (macroblockEdge)
         {
-            Vp8NormalLoopFilter.FilterTopEdge16(fromVector, Origin, Stride, thresh, interiorLimit, hevThreshold);
+            if (strided)
+            {
+                Vp8NormalLoopFilter.FilterLeftEdge16(fromVector, Origin, Stride, thresh, interiorLimit, hevThreshold);
+            }
+            else
+            {
+                Vp8NormalLoopFilter.FilterTopEdge16(fromVector, Origin, Stride, thresh, interiorLimit, hevThreshold);
+            }
+        }
+        else if (strided)
+        {
+            Vp8NormalLoopFilter.FilterLeftEdgeInner16(fromVector, Origin, Stride, thresh, interiorLimit, hevThreshold);
         }
         else
         {
             Vp8NormalLoopFilter.FilterTopEdgeInner16(fromVector, Origin, Stride, thresh, interiorLimit, hevThreshold);
         }
 
-        ScalarReference(fromScalar, Origin, Stride, thresh, interiorLimit, hevThreshold, macroblockEdge);
+        ScalarReference(
+            fromScalar,
+            Origin,
+            acrossStep: strided ? 1 : Stride,
+            alongStep: strided ? Stride : 1,
+            thresh,
+            interiorLimit,
+            hevThreshold,
+            macroblockEdge);
 
         Assert.Equal(fromScalar, fromVector);
     }
@@ -145,13 +188,14 @@ public class Vp8VectorLoopFilterTests
     /// A transliteration of the per-lane scalar filter, independent of the production code's dispatch so the
     /// vector path cannot accidentally be compared against itself.
     /// </summary>
-    private static void ScalarReference(byte[] p, int origin, int step, int thresh, int interiorLimit, int hevThresh, bool macroblockEdge)
+    private static void ScalarReference(byte[] p, int origin, int acrossStep, int alongStep, int thresh, int interiorLimit, int hevThresh, bool macroblockEdge)
     {
         int thresh2 = (2 * thresh) + 1;
 
         for (int i = 0; i < 16; i++)
         {
-            int pos = origin + i;
+            int pos = origin + (i * alongStep);
+            int step = acrossStep;
 
             int p3 = p[pos - (4 * step)], p2 = p[pos - (3 * step)], p1 = p[pos - (2 * step)], p0 = p[pos - step];
             int q0 = p[pos], q1 = p[pos + step], q2 = p[pos + (2 * step)], q3 = p[pos + (3 * step)];

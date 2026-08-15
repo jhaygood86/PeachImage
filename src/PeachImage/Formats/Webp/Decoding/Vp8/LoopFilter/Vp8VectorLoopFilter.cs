@@ -1,20 +1,23 @@
+﻿using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8.LoopFilter;
 
 /// <summary>
-/// Vectorized form of <see cref="Vp8NormalLoopFilter"/>'s per-lane work, for the edges whose lanes are
-/// contiguous in memory.
+/// Vectorized form of <see cref="Vp8NormalLoopFilter"/>'s per-lane work, for both edge orientations.
 /// </summary>
 /// <remarks>
 /// <para>
 /// The deblocking filter was measured at 32% of lossy decode — the single largest bucket, ahead of entropy
 /// decode. It splits roughly evenly between the two edge orientations. A "top" edge (a horizontal edge, filtered
 /// vertically) walks its 16 or 8 lanes with <c>alongStep == 1</c>, so the lanes are adjacent bytes and each
-/// lane's eight taps sit at fixed row offsets: eight plain vector loads, no gathering. A "left" edge is the
-/// transpose of that — its lanes are a row-stride apart — and vectorizing it needs a 16x8 transpose in and out,
-/// so it is left scalar here; only the contiguous orientation is handled.
+/// lane's eight taps sit at fixed row offsets: eight plain vector loads, no gathering
+/// (<see cref="FilterContiguousEdge"/>). A "left" edge is the transpose of that — its lanes are a row-stride
+/// apart, with each lane's eight taps contiguous instead — so it is gathered by transposing a 16x8 block in,
+/// filtering it identically, and transposing back (<see cref="FilterStridedEdge"/>). Both share
+/// <see cref="FilterHalf"/>, so there is one copy of the filter arithmetic.
 /// </para>
 /// <para>
 /// All arithmetic is done widened to 16-bit lanes, in two halves per 16-byte edge, rather than in the saturating
@@ -28,6 +31,27 @@ namespace PeachImage.Formats.Webp.Decoding.Vp8.LoopFilter;
 /// </remarks>
 internal static class Vp8VectorLoopFilter
 {
+    /// <summary>Taps each lane reads and writes: p3..p0, q0..q3.</summary>
+    private const int Taps = 8;
+
+    /// <summary>
+    /// Whether <see cref="FilterStridedEdge"/> can handle an edge with these dimensions and this hardware.
+    /// </summary>
+    /// <remarks>
+    /// Requires <see cref="Sse2"/> specifically, not just <see cref="Vector128"/> acceleration. The transpose
+    /// this orientation needs is built from two-vector interleaves, and .NET's portable vector API has no
+    /// equivalent of them — <c>Vector128.Shuffle</c> permutes within a single vector only. Expressing the
+    /// transpose portably would take roughly 120 shuffle/or operations against the ~24 interleaves used here,
+    /// which is the same reason Jpeg's <c>AanVectorButterfly.Transpose8x8</c> reaches for real intrinsics. An
+    /// <c>AdvSimd.Arm64.ZipLow</c>/<c>ZipHigh</c> path would be the direct Arm equivalent and is a
+    /// straightforward follow-up; until then Arm falls back to the scalar filter.
+    /// </remarks>
+    public static bool CanFilterStrided(int size, int origin, int stride, int planeLength) =>
+        Sse2.IsSupported
+        && size == Vector128<byte>.Count
+        && origin - Taps / 2 >= 0
+        && origin + ((size - 1) * stride) + (Taps / 2) <= planeLength;
+
     /// <summary>Whether <see cref="FilterContiguousEdge"/> can handle an edge with these dimensions and this hardware.</summary>
     public static bool CanFilter(int size, int origin, int stride, int planeLength) =>
         Vector128.IsHardwareAccelerated
@@ -87,6 +111,141 @@ internal static class Vp8VectorLoopFilter
         Store(plane, origin - stride, p0Lo, p0Hi);
         Store(plane, origin, q0Lo, q0Hi);
         Store(plane, origin + stride, q1Lo, q1Hi);
+    }
+
+    /// <summary>
+    /// Filters one vertical edge, whose <see cref="Vector128{T}.Count"/> lanes are a <paramref name="stride"/>
+    /// apart. Each lane's eight taps are contiguous, so the lanes are gathered by transposing a 16x8 block in,
+    /// filtering it exactly as the contiguous orientation does, and transposing back out.
+    /// </summary>
+    /// <remarks>
+    /// All eight taps are written back even though the widest filter only modifies six: p3 and q3 are returned
+    /// unchanged, so storing them costs a store and changes nothing, and it keeps the store path a single
+    /// uniform 8-byte write per lane.
+    /// </remarks>
+    public static void FilterStridedEdge(
+        Span<byte> plane,
+        int origin,
+        int stride,
+        int thresh,
+        int interiorLimit,
+        int hevThreshold,
+        bool macroblockEdge)
+    {
+        int first = origin - (Taps / 2);
+        Span<Vector128<byte>> taps = stackalloc Vector128<byte>[Taps];
+        Transpose16x8(plane, first, stride, taps);
+
+        var thresh2 = Vector128.Create((short)((2 * thresh) + 1));
+        var it = Vector128.Create((short)interiorLimit);
+        var hev = Vector128.Create((short)hevThreshold);
+
+        var (p2Lo, p1Lo, p0Lo, q0Lo, q1Lo, q2Lo) = FilterHalf(
+            Lower(taps[0]), Lower(taps[1]), Lower(taps[2]), Lower(taps[3]),
+            Lower(taps[4]), Lower(taps[5]), Lower(taps[6]), Lower(taps[7]),
+            thresh2, it, hev, macroblockEdge);
+
+        var (p2Hi, p1Hi, p0Hi, q0Hi, q1Hi, q2Hi) = FilterHalf(
+            Upper(taps[0]), Upper(taps[1]), Upper(taps[2]), Upper(taps[3]),
+            Upper(taps[4]), Upper(taps[5]), Upper(taps[6]), Upper(taps[7]),
+            thresh2, it, hev, macroblockEdge);
+
+        taps[1] = Vector128.Narrow(p2Lo, p2Hi).AsByte();
+        taps[2] = Vector128.Narrow(p1Lo, p1Hi).AsByte();
+        taps[3] = Vector128.Narrow(p0Lo, p0Hi).AsByte();
+        taps[4] = Vector128.Narrow(q0Lo, q0Hi).AsByte();
+        taps[5] = Vector128.Narrow(q1Lo, q1Hi).AsByte();
+        taps[6] = Vector128.Narrow(q2Lo, q2Hi).AsByte();
+
+        Transpose8x16(taps, plane, first, stride);
+    }
+
+    /// <summary>
+    /// Gathers <see cref="Taps"/> bytes from each of 16 rows into <see cref="Taps"/> vectors, one per tap
+    /// position, so lane <c>i</c> of every output holds row <c>i</c>'s value for that tap.
+    /// </summary>
+    /// <remarks>
+    /// Standard interleave-ladder transpose, run as two independent 8-row halves that are then stitched
+    /// together: byte interleaves pair adjacent rows, 16-bit interleaves group them into fours, and 32-bit
+    /// interleaves complete the eight, at which point each 64-bit half of a vector is one whole tap column.
+    /// </remarks>
+    private static void Transpose16x8(Span<byte> plane, int first, int stride, Span<Vector128<byte>> taps)
+    {
+        var (v0, v1, v2, v3) = TransposeEightRows(plane, first, stride);
+        var (w0, w1, w2, w3) = TransposeEightRows(plane, first + (8 * stride), stride);
+
+        taps[0] = Vector128.Create(v0.GetLower(), w0.GetLower());
+        taps[1] = Vector128.Create(v0.GetUpper(), w0.GetUpper());
+        taps[2] = Vector128.Create(v1.GetLower(), w1.GetLower());
+        taps[3] = Vector128.Create(v1.GetUpper(), w1.GetUpper());
+        taps[4] = Vector128.Create(v2.GetLower(), w2.GetLower());
+        taps[5] = Vector128.Create(v2.GetUpper(), w2.GetUpper());
+        taps[6] = Vector128.Create(v3.GetLower(), w3.GetLower());
+        taps[7] = Vector128.Create(v3.GetUpper(), w3.GetUpper());
+    }
+
+    /// <summary>Transposes eight rows of <see cref="Taps"/> bytes; each returned vector holds two tap columns, low half then high.</summary>
+    private static (Vector128<byte> C01, Vector128<byte> C23, Vector128<byte> C45, Vector128<byte> C67) TransposeEightRows(
+        Span<byte> plane, int first, int stride)
+    {
+        var t0 = Sse2.UnpackLow(LoadRow(plane, first), LoadRow(plane, first + stride));
+        var t1 = Sse2.UnpackLow(LoadRow(plane, first + (2 * stride)), LoadRow(plane, first + (3 * stride)));
+        var t2 = Sse2.UnpackLow(LoadRow(plane, first + (4 * stride)), LoadRow(plane, first + (5 * stride)));
+        var t3 = Sse2.UnpackLow(LoadRow(plane, first + (6 * stride)), LoadRow(plane, first + (7 * stride)));
+
+        var u0 = Sse2.UnpackLow(t0.AsUInt16(), t1.AsUInt16());
+        var u1 = Sse2.UnpackHigh(t0.AsUInt16(), t1.AsUInt16());
+        var u2 = Sse2.UnpackLow(t2.AsUInt16(), t3.AsUInt16());
+        var u3 = Sse2.UnpackHigh(t2.AsUInt16(), t3.AsUInt16());
+
+        return (
+            Sse2.UnpackLow(u0.AsUInt32(), u2.AsUInt32()).AsByte(),
+            Sse2.UnpackHigh(u0.AsUInt32(), u2.AsUInt32()).AsByte(),
+            Sse2.UnpackLow(u1.AsUInt32(), u3.AsUInt32()).AsByte(),
+            Sse2.UnpackHigh(u1.AsUInt32(), u3.AsUInt32()).AsByte());
+    }
+
+    /// <summary>The inverse of <see cref="Transpose16x8"/>: scatters the tap columns back out as 16 rows of <see cref="Taps"/> bytes.</summary>
+    private static void Transpose8x16(ReadOnlySpan<Vector128<byte>> taps, Span<byte> plane, int first, int stride)
+    {
+        var a0 = Sse2.UnpackLow(taps[0], taps[1]);
+        var a1 = Sse2.UnpackLow(taps[2], taps[3]);
+        var a2 = Sse2.UnpackLow(taps[4], taps[5]);
+        var a3 = Sse2.UnpackLow(taps[6], taps[7]);
+
+        var b0 = Sse2.UnpackHigh(taps[0], taps[1]);
+        var b1 = Sse2.UnpackHigh(taps[2], taps[3]);
+        var b2 = Sse2.UnpackHigh(taps[4], taps[5]);
+        var b3 = Sse2.UnpackHigh(taps[6], taps[7]);
+
+        StoreEightRows(a0, a1, a2, a3, plane, first, stride);
+        StoreEightRows(b0, b1, b2, b3, plane, first + (8 * stride), stride);
+    }
+
+    private static void StoreEightRows(
+        Vector128<byte> a0, Vector128<byte> a1, Vector128<byte> a2, Vector128<byte> a3,
+        Span<byte> plane, int first, int stride)
+    {
+        var d0 = Sse2.UnpackLow(a0.AsUInt16(), a1.AsUInt16());
+        var d1 = Sse2.UnpackHigh(a0.AsUInt16(), a1.AsUInt16());
+        var e0 = Sse2.UnpackLow(a2.AsUInt16(), a3.AsUInt16());
+        var e1 = Sse2.UnpackHigh(a2.AsUInt16(), a3.AsUInt16());
+
+        StoreRowPair(Sse2.UnpackLow(d0.AsUInt32(), e0.AsUInt32()).AsUInt64(), plane, first, stride);
+        StoreRowPair(Sse2.UnpackHigh(d0.AsUInt32(), e0.AsUInt32()).AsUInt64(), plane, first + (2 * stride), stride);
+        StoreRowPair(Sse2.UnpackLow(d1.AsUInt32(), e1.AsUInt32()).AsUInt64(), plane, first + (4 * stride), stride);
+        StoreRowPair(Sse2.UnpackHigh(d1.AsUInt32(), e1.AsUInt32()).AsUInt64(), plane, first + (6 * stride), stride);
+    }
+
+    /// <summary>Reads one lane's <see cref="Taps"/> taps into the low half of a vector; the high half is unused by the interleave ladder.</summary>
+    private static Vector128<byte> LoadRow(Span<byte> plane, int offset) =>
+        Vector128.CreateScalar(BinaryPrimitives.ReadUInt64LittleEndian(plane.Slice(offset, Taps))).AsByte();
+
+    /// <summary>Writes the two lanes packed into <paramref name="rows"/> back to consecutive strided rows.</summary>
+    private static void StoreRowPair(Vector128<ulong> rows, Span<byte> plane, int first, int stride)
+    {
+        BinaryPrimitives.WriteUInt64LittleEndian(plane.Slice(first, Taps), rows.ToScalar());
+        BinaryPrimitives.WriteUInt64LittleEndian(plane.Slice(first + stride, Taps), rows.GetElement(1));
     }
 
     /// <summary>Filters eight lanes, returning the six taps the widest filter can modify (the caller stores only the ones its filter actually writes).</summary>
