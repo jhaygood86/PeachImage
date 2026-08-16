@@ -1,3 +1,5 @@
+using System.Buffers;
+
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
 /// <summary>
@@ -162,7 +164,19 @@ internal static class Av1FrameDecoder
             int subY = plane > 0 && sequence.SubsamplingY ? 1 : 0;
             planeWidths[plane] = plane < numPlanes ? alignedLumaW >> subX : 0;
             planeHeights[plane] = plane < numPlanes ? alignedLumaH >> subY : 0;
-            planes[plane] = new int[planeWidths[plane] * planeHeights[plane]];
+
+            // Rented, not `new`'d, and explicitly cleared to match `new int[]`'s zero-init guarantee --
+            // ArrayPool.Rent does not provide one. Every sample within [0, MiCols*4) x [0, MiRows*4) is
+            // unconditionally written during tile decode (prediction always runs, even for skip blocks --
+            // only the residual add is skipped), but the array itself is sized to the superblock-*aligned*
+            // canvas, usually larger than that; a source tile smaller than a grid's declared output size
+            // (a mismatched/reused tile item) can make Av1TileComposer.CopyRegion legitimately read into
+            // that aligned padding, so it can't be left uninitialized. Ownership passes down the filter
+            // pipeline via the same swap-and-return convention Av1Cdef/Av1LoopRestoration use for their own
+            // output buffers; whichever generation survives the whole pipeline is finally returned by
+            // Av1TileComposer.Composite once it's done reading from it.
+            planes[plane] = ArrayPool<int>.Shared.Rent(planeWidths[plane] * planeHeights[plane]);
+            Array.Clear(planes[plane], 0, planeWidths[plane] * planeHeights[plane]);
         }
 
         var deltaLfs = new int[4][];
@@ -263,12 +277,16 @@ internal static class Av1FrameDecoder
         // Only loop restoration ever reads this pre-CDEF snapshot (spec §7.17.1's stripe-boundary rule);
         // Av1LoopRestoration.Apply returns immediately when UsesLr is false without touching it, so
         // cloning three full planes (~12MB at 1080p) here would be pure waste for the (common) no-LR case.
+        // Rented rather than Clone()'d (which would copy an oversized pooled source's full backing
+        // Length); Av1LoopRestoration.Apply owns returning this once it's done reading from it.
         var deblockedPlanes = frame.LoopRestoration.UsesLr ? new int[3][] : [];
         if (frame.LoopRestoration.UsesLr)
         {
             for (int plane = 0; plane < numPlanes; plane++)
             {
-                deblockedPlanes[plane] = (int[])result.Planes[plane].Clone();
+                int length = planeWidths[plane] * planeHeights[plane];
+                deblockedPlanes[plane] = ArrayPool<int>.Shared.Rent(length);
+                Array.Copy(result.Planes[plane], deblockedPlanes[plane], length);
             }
         }
 

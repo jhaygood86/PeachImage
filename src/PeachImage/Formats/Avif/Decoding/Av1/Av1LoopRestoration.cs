@@ -1,3 +1,5 @@
+using System.Buffers;
+
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
 /// <summary>
@@ -27,10 +29,14 @@ internal static class Av1LoopRestoration
             return;
         }
 
+        // Rented (explicit width*height, not Clone()'s implicit "copy the source's whole backing Length",
+        // since that source may itself be a larger-than-requested rented array) rather than `new`'d.
         var lrPlanes = new int[3][];
         for (int plane = 0; plane < result.Sequence.NumPlanes; plane++)
         {
-            lrPlanes[plane] = (int[])result.Planes[plane].Clone();
+            int length = result.PlaneWidths[plane] * result.PlaneHeights[plane];
+            lrPlanes[plane] = ArrayPool<int>.Shared.Rent(length);
+            Array.Copy(result.Planes[plane], lrPlanes[plane], length);
         }
 
         var state = new State(result, deblockedPlanes, lrPlanes);
@@ -53,8 +59,13 @@ internal static class Av1LoopRestoration
             }
         }
 
+        // deblockedPlanes (state.CurrPlanes) is read only by GetSourceSample calls within the loop above --
+        // its life ends here. The array being replaced below (whatever Av1Cdef left behind, or the
+        // original tile-decode reconstruction target if CDEF didn't run) is likewise dead once superseded.
         for (int plane = 0; plane < result.Sequence.NumPlanes; plane++)
         {
+            ArrayPool<int>.Shared.Return(deblockedPlanes[plane]);
+            ArrayPool<int>.Shared.Return(result.Planes[plane]);
             result.Planes[plane] = lrPlanes[plane];
         }
     }

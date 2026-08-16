@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Runtime.CompilerServices;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
@@ -46,14 +47,20 @@ internal static class Av1Cdef
             return;
         }
 
-        // No Clone() needed here: the r/c loop below visits every 8x8 block in the frame exactly once, and
-        // CdefBlock's first action for every block is an unconditional CopyBlock() from result.Planes into
-        // this array (identity-copied for skip/unfiltered blocks, then selectively overwritten by
-        // CdefFilter for filtered ones) -- so every element gets written before CDEF ever reads it back.
+        // The r/c loop below (bounded by frame.MiRows/MiCols, the true coded size) visits every 8x8 block
+        // exactly once, and CdefBlock's first action for every block is an unconditional CopyBlock() from
+        // result.Planes into this array -- so that region is fully overwritten before CDEF reads it back
+        // and needs no explicit initialization. But the array itself is rented to PlaneWidths x
+        // PlaneHeights, the superblock-*aligned* canvas, which is usually larger than MiRows*4 x MiCols*4
+        // -- and unlike `new int[]`, ArrayPool.Rent does NOT zero that padding. A downstream consumer
+        // (Av1TileComposer.CopyRegion's mismatched-tile-size clamp) can legitimately read into it for an
+        // undersized/reused tile item, so it's cleared explicitly here to match `new int[]`'s guarantee.
         var cdefPlanes = new int[3][];
         for (int plane = 0; plane < seq.NumPlanes; plane++)
         {
-            cdefPlanes[plane] = new int[result.Planes[plane].Length];
+            int length = result.PlaneWidths[plane] * result.PlaneHeights[plane];
+            cdefPlanes[plane] = ArrayPool<int>.Shared.Rent(length);
+            Array.Clear(cdefPlanes[plane], 0, length);
         }
 
         var state = new State(result, cdefPlanes);
@@ -73,8 +80,13 @@ internal static class Av1Cdef
             }
         }
 
+        // The array being replaced here (whatever Av1FrameDecoder rented as the tile-decode reconstruction
+        // target -- deblocking filters in place, so it's still the same object) has now been fully
+        // superseded and is safe to return: cdefPlanes was seeded from it (see the CopyBlock note above)
+        // and nothing else in the pipeline retains a separate reference to it.
         for (int plane = 0; plane < seq.NumPlanes; plane++)
         {
+            ArrayPool<int>.Shared.Return(result.Planes[plane]);
             result.Planes[plane] = cdefPlanes[plane];
         }
     }

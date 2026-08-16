@@ -40,13 +40,13 @@ Targets .NET 10. No native interop — every codec is managed code, using modern
   Animated AVIF, film grain synthesis, gain maps, 12-bit depth, and palette/IntraBC mode remain
   unimplemented and throw a clear `AvifUnsupportedFeatureException` rather than a silently wrong
   result. Performance is an explicitly aspirational, longer-term goal here (see
-  `LIBRARY_COMPARISON.md`) rather than a merge gate — three profile-guided passes (CDEF's per-tap
+  `LIBRARY_COMPARISON.md`) rather than a merge gate — four profile-guided passes (CDEF's per-tap
   availability check skipped for the common interior-block case; a redundant full-buffer clear in
   reconstruction removed; the inverse transform's `cos128`/`sin128`/`brev` computations replaced with
-  lookup tables; and a dedicated allocation pass that cut per-decode allocation on a 1080p photo from
-  175.5 MB to 54.4 MB by reusing scratch buffers instead of reallocating them per block and eliminating
-  a redundant full-plane clone) have closed roughly 40% of the initial time gap to `ffmpeg`, and the
-  YUV→RGB color conversion is vectorized
+  lookup tables; a dedicated allocation pass reusing scratch buffers instead of reallocating them per
+  block; and an `ArrayPool`-backed buffer pooling pass threaded through the whole filter pipeline) have
+  together cut per-decode allocation on a 1080p photo from 175.5 MB to 17.8 MB and closed roughly 45% of
+  the initial time gap to `ffmpeg`, and the YUV→RGB color conversion is vectorized
   (`Vector128<double>`); the transforms' own arithmetic, intra prediction, entropy decode, and most of
   the in-loop filters are still scalar. Targeted correctness oracle is `ffmpeg` (test-only, never a
   shipped dependency)

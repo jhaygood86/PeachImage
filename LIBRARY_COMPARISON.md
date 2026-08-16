@@ -272,12 +272,12 @@ benchmark.
 
 | Scenario | PeachImage | `ffmpeg` (process-spawn, context only) | Allocated (PeachImage) |
 |---|---:|---:|---:|
-| Photographic, 8-bit 4:2:0 | 260.6 ms | 68.6 ms | 54.4 MB |
-| Photographic, 8-bit 4:2:0 + alpha | 277.3 ms | — | 55.1 MB |
-| Small image (32×24) | 127.3 µs | — | 265 KB |
+| Photographic, 8-bit 4:2:0 | 253.8 ms | 68.6 ms | 17.8 MB |
+| Photographic, 8-bit 4:2:0 + alpha | 275.5 ms | — | 19.8 MB |
+| Small image (32×24) | 126.9 µs | — | 213 KB |
 
-PeachImage is roughly **3.8×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario — still a
-real gap, and an expected one at this stage, but down from an initial 6.1× after three profile-guided
+PeachImage is roughly **3.7×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario — still a
+real gap, and an expected one at this stage, but down from an initial 6.1× after four profile-guided
 passes (below). Per the project plan, AV1/AVIF performance is an explicitly aspirational, long-term goal
 here, not a merge gate the way it is for the more mature formats above — WebP's own optimization arc
 (4.11× → 2.13× on its worst scenario, over several profile-guided passes) is the expected shape of
@@ -370,6 +370,55 @@ Every change was verified bit-identical to the pre-change output via `AvifDecode
 accepted, same as the prior two passes. Together they took the 1080p scenario's allocation from
 175.5 MB to 54.4 MB (69%) and its time from 282.0 ms to 260.6 ms.
 
+### Buffer pooling pass
+
+What remained after the allocation-reduction pass was no longer hot-loop waste — it was a handful of
+full-plane buffers (the reconstruction target, CDEF's write buffer, the tile compositor's output
+canvas, the final YUV→RGB output) allocated once per decode. Each is large *because* it's a whole
+plane's worth of samples, not because it's wasteful, so eliminating any of them outright wasn't an
+option — spec-mandated separation between `CurrFrame`/`CdefFrame`/`LrFrame` means CDEF and loop
+restoration genuinely need their own distinct buffer, not an in-place update. What they don't need is a
+*fresh* buffer every decode: `ArrayPool<int>.Shared` was threaded through the whole pipeline (tile
+decode → deblock → CDEF → loop restoration → grid compositing → the color and alpha composites in
+`AvifDecoder.Decode`), with each stage renting a buffer, using it, and returning whatever it superseded
+back to the pool once nothing else in the pipeline still needed it.
+
+Getting the hand-off right across five files (`Av1FrameDecoder`, `Av1Cdef`, `Av1LoopRestoration`,
+`Av1TileComposer`, `AvifDecoder`) took real care — a buffer can only be returned once the *last* reader
+is done with it, which for the reconstruction target means "right after CDEF copies from it and swaps
+in its own output," and for the pre-CDEF loop-restoration snapshot means "only after the whole
+restoration pass finishes reading it." One genuine latent bug surfaced along the way in
+`Av1TileComposer.CopyRegion`, which defensively clamps its copy region against each array's *actual*
+length to survive a shared/reused grid tile item whose decoded dimensions don't match what the
+destination expects (`color_grid_alpha_grid_tile_shared_in_dimg.avif` in the corpus, the adversarial
+file this exists for) — a rented array can be larger than requested, so that clamp had to switch to the
+caller-tracked logical width/height instead of `Length`, which the code already relied on elsewhere but
+this one function didn't.
+
+**A second, subtler bug took real bisection to pin down.** After wiring up the pool, the full test
+suite failed on that same adversarial file — but non-deterministically, a different wrong hash on
+every run, which ruled out the first suspects (a double-return, a stale reference read after return).
+Disabling every `Return()` call while keeping every `Rent()` call still reproduced it, which eliminated
+cross-decode buffer reuse as the cause entirely. The actual issue: unlike `new int[]`, which the CLR
+always zero-initializes, `ArrayPool<T>.Rent` makes no such guarantee — and several buffers had a
+padding region (the superblock-aligned canvas extends past a tile's true coded content, and a
+mismatched/undersized tile's copy region can extend past its own true content within that canvas) that
+was never explicitly written but had always been implicitly zero because `new int[]` provided it for
+free. Once the backing array stopped being freshly OS-allocated (memory the pool had genuinely handed
+back from an earlier, larger rental, containing whatever a previous decode had left there), that
+padding surfaced as real garbage instead of harmless zero — for one specific adversarial file where the
+copy region actually reaches into it. Fixed by explicitly `Array.Clear`-ing exactly the regions `new
+int[]` used to zero for free (CDEF's write buffer and the tile compositor's output canvas), restoring
+the same guarantee at the cost of a cheap linear clear instead of a fresh allocation. Confirmed by
+running the full corpus suite three additional times after the fix (this class of bug is inherently
+easy for a single green run to miss).
+
+This pass didn't touch a single kernel's arithmetic — only where buffers come from — and dropped the
+1080p scenario's allocation from 54.4 MB to **17.8 MB** (67% further, 90% cumulative from the session's
+175.5 MB starting point), with Gen0/Gen1 GC collections during the benchmark dropping to effectively
+zero once the pool warms up. Time held roughly flat (260.6 ms → 253.8 ms) as expected — this pass
+targeted allocation, not CPU time.
+
 #### Remaining gap
 
 CDEF's own filtering arithmetic and the inverse transform's butterfly network remain the two largest
@@ -379,14 +428,15 @@ chain (AV1's inverse DCT is a size-parameterized 31-step network, not the single
 WebP's own biggest DCT win vectorized) — a materially larger undertaking than any pass so far, deferred
 rather than attempted without profiling data to justify the specific approach.
 
-What's left of allocation is now concentrated in state that's genuinely per-frame rather than
-per-block: the reconstructed plane buffers and per-mi-position neighbor-context arrays (allocated once
-per decode, sized to the frame), and CDEF's/loop restoration's own full-plane snapshot buffers (each
-reads-while-writes a distinct frame state per spec, so eliminating them outright isn't an option the
-way the dead upfront clone above was — only pooling them across repeated decodes remains open). `int[]`-
-per-sample plane storage throughout the pipeline (chosen for implementation simplicity across every
-intra-prediction and reconstruction kernel while the format was being built out) rather than packed
-`byte`/`ushort` buffers is the other standing simplification.
+What's left of allocation is now the per-mi-position neighbor-context arrays (mode/skip/segment/
+delta-LF/CDEF-index, still freshly allocated every decode — not yet pooled) and the first-ever rental
+of each buffer size the pool hasn't warmed up yet (irreducible for a one-off single decode, though
+irrelevant for the repeated-decode/server-workload case this pass targeted). `int[]`-per-sample plane
+storage throughout the pipeline (chosen for implementation simplicity across every intra-prediction and
+reconstruction kernel while the format was being built out) rather than packed `byte`/`ushort` buffers
+is the other standing simplification — it would shrink every pooled buffer by 2-4×, but touches nearly
+every kernel in the decoder rather than just where its buffers come from, and is a materially larger,
+riskier undertaking than this pass.
 
 ## Summary
 
@@ -396,7 +446,7 @@ intra-prediction and reconstruction kernel while the format was being built out)
 | BMP | 0.40×–1.05× | no baseline (PeachImage-only) |
 | PNG | 1.08×–1.63× | 0.65×–1.27× |
 | WebP | 1.15×–2.13× | not yet implemented |
-| AVIF | ~3.8× vs. `ffmpeg` (no SkiaSharp baseline available) | not yet implemented |
+| AVIF | ~3.7× vs. `ffmpeg` (no SkiaSharp baseline available) | not yet implemented |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
 and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the
