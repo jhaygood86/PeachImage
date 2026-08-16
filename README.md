@@ -24,7 +24,7 @@ Targets .NET 10. No native interop — every codec is managed code, using modern
   Encoding doesn't yet build an indexed palette from an arbitrary truecolor source (no automatic
   quantization) — non-palette sources always encode as grayscale/truecolor(+alpha).
 - **GIF**: decode (GIF87a/GIF89a, interlacing, transparency, multi-frame animation with per-frame
-  disposal methods and the NETSCAPE2.0 loop count via `GifDecoder.DecodeAnimation`) and encode
+  disposal methods and the NETSCAPE2.0 loop count via `AnimatedImage.Load`) and encode
   (median-cut palette quantization, optional Floyd-Steinberg dithering, animation) are implemented.
 - **WebP**: decode is implemented for both of WebP's bitstream codecs — VP8 (lossy) and VP8L
   (lossless) — including alpha (`ALPH` chunk / VP8L's own alpha) in the RIFF "simple" and "extended"
@@ -32,9 +32,9 @@ Targets .NET 10. No native interop — every codec is managed code, using modern
   the furthest of any format here from the 10%-of-SkiaSharp target on large images (see
   `LIBRARY_COMPARISON.md`), though a profile-guided pass has closed roughly a third of that gap; what
   remains is concentrated in entropy decode, which is inherently sequential.
-- Other formats (AVIF, ...) are not yet implemented. The public API
-  (`Image`, `IImageDecoder`/`IImageEncoder`, `ImageFormatManager`) is designed to support them without
-  breaking changes when they're added.
+- Other formats (AVIF, ...) are not yet implemented. The public API (`Image`, `AnimatedImage` for
+  multi-frame formats like GIF) is designed to support them without breaking changes when they're added.
+  Codec selection is internal — there's no format-specific type or registration step in the public API.
 
 ## Usage
 
@@ -42,11 +42,24 @@ Targets .NET 10. No native interop — every codec is managed code, using modern
 using PeachImage;
 using PeachImage.Formats.Jpeg;
 
-// Codecs are registered automatically — no setup call needed.
+// The format is auto-detected from the file's contents — no setup call needed.
 using var image = Image.Load("photo.jpg");
 
 using var output = File.Create("resaved.jpg");
 image.Save(output, "jpeg", new JpegEncoderOptions { Quality = 85 });
+```
+
+Multi-frame formats (GIF today) use `AnimatedImage` instead, the same way across every format that
+supports it:
+
+```csharp
+using PeachImage;
+using PeachImage.Formats.Gif;
+
+using var animation = AnimatedImage.Load("clip.gif");
+
+using var output = File.Create("resaved.gif");
+animation.Save(output, "gif", new GifEncoderOptions { MaxColors = 128 });
 ```
 
 ## Building & testing

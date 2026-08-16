@@ -56,7 +56,7 @@ public class FrameDecoderScanLimitTests
         }
 
         using var ms = new MemoryStream();
-        new JpegEncoder().Encode(source, ms, new JpegEncoderOptions { Quality = 90 });
+        JpegEncoder.Encode(source, ms, new JpegEncoderOptions { Quality = 90 });
         return ms.ToArray();
     }
 

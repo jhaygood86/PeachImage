@@ -2,20 +2,11 @@ using PeachImage.Formats.Jpeg.Encoding;
 
 namespace PeachImage.Formats.Jpeg;
 
-/// <summary>Encodes images as baseline sequential JPEG. Supports grayscale and RGB(A) (encoded as YCbCr) sources; CMYK is not yet supported.</summary>
-public sealed class JpegEncoder : IImageEncoder
+/// <summary>Encodes images as baseline sequential JPEG. Supports grayscale and RGB(A) (encoded as YCbCr) sources; CMYK is not yet supported. Used internally by <see cref="JpegCodec"/>.</summary>
+internal static class JpegEncoder
 {
-    /// <inheritdoc/>
-    public string FormatName => "jpeg";
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> FileExtensions { get; } = ["jpg", "jpeg", "jpe", "jfif"];
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> MimeTypes { get; } = ["image/jpeg"];
-
-    /// <inheritdoc/>
-    public void Encode(Image image, Stream stream, EncoderOptions? options = null)
+    /// <summary>Encodes <paramref name="image"/> and writes the result to <paramref name="stream"/>.</summary>
+    public static void Encode(Image image, Stream stream, EncoderOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(stream);

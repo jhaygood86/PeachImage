@@ -62,7 +62,7 @@ public class JpegMarkerReaderTests
     {
         // Bytes that never start with FFD8 at all: FrameDecoder should reject immediately, not hang.
         using var stream = new MemoryStream([0x00, 0x01, 0x02, 0x03]);
-        Assert.Throws<JpegDecodingException>(() => new JpegDecoder().Decode(stream));
+        Assert.Throws<JpegDecodingException>(() => JpegDecoder.Decode(stream));
     }
 
     [Fact]
@@ -70,6 +70,6 @@ public class JpegMarkerReaderTests
     {
         // Just SOI, nothing else: should fail cleanly with "missing EOI", not throw an unrelated exception or hang.
         using var stream = new MemoryStream([0xFF, 0xD8]);
-        Assert.Throws<JpegDecodingException>(() => new JpegDecoder().Decode(stream));
+        Assert.Throws<JpegDecodingException>(() => JpegDecoder.Decode(stream));
     }
 }

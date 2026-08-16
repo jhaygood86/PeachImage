@@ -6,34 +6,18 @@ namespace PeachImage.Formats.Gif;
 /// <summary>
 /// Decodes Graphic Interchange Format (GIF) images, including GIF87a/GIF89a, interlacing, transparency,
 /// and multi-frame animation (disposal methods, per-frame delay, NETSCAPE2.0 loop count) via
-/// <see cref="DecodeAnimation"/>.
+/// <see cref="DecodeAnimation"/>. Used internally by <see cref="GifCodec"/>; animation is exposed publicly
+/// through the codec-agnostic <see cref="AnimatedImage"/>, not through this type.
 /// </summary>
-public sealed class GifDecoder : IImageDecoder
+internal static class GifDecoder
 {
+    private const string FormatName = "gif";
     private const byte ExtensionIntroducer = 0x21;
     private const byte ImageSeparator = 0x2C;
     private const byte Trailer = 0x3B;
 
-    /// <inheritdoc/>
-    public string FormatName => "gif";
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> FileExtensions { get; } = ["gif"];
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> MimeTypes { get; } = ["image/gif"];
-
-    /// <inheritdoc/>
-    public int HeaderSize => 6;
-
-    /// <inheritdoc/>
-    public bool IsSupportedFileFormat(ReadOnlySpan<byte> header) =>
-        header.Length >= 6
-        && header[0] == (byte)'G' && header[1] == (byte)'I' && header[2] == (byte)'F' && header[3] == (byte)'8'
-        && (header[4] == (byte)'7' || header[4] == (byte)'9') && header[5] == (byte)'a';
-
-    /// <inheritdoc/>
-    public ImageInfo Identify(Stream stream)
+    /// <summary>Reads image dimensions and format information from <paramref name="stream"/> without fully decoding pixel data.</summary>
+    public static ImageInfo Identify(Stream stream)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
@@ -45,7 +29,7 @@ public sealed class GifDecoder : IImageDecoder
     }
 
     /// <summary>Decodes just the first frame (equivalent to how most viewers render a GIF as a static image).</summary>
-    public Image Decode(Stream stream, DecoderOptions? options = null)
+    public static Image Decode(Stream stream, DecoderOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
@@ -54,14 +38,28 @@ public sealed class GifDecoder : IImageDecoder
     }
 
     /// <summary>Decodes every frame of the animation, fully composited, with per-frame timing/disposal metadata and the NETSCAPE2.0 loop count.</summary>
-    public static GifImage DecodeAnimation(Stream stream, GifDecoderOptions? options = null)
+    public static AnimatedImage DecodeAnimation(Stream stream, GifDecoderOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
         _ = options;
 
         var (frames, loopCount) = GifImageDecoder.Decode(stream, maxFrames: GifDecodingLimits.MaxFrameCount);
-        return new GifImage(frames, loopCount);
+        var animatedFrames = new List<AnimatedImageFrame>(frames.Count);
+        foreach (var frame in frames)
+        {
+            animatedFrames.Add(new AnimatedImageFrame(frame.Image, frame.Duration, ToFrameDisposalMethod(frame.Disposal)));
+        }
+
+        return new AnimatedImage(animatedFrames, loopCount);
     }
+
+    private static FrameDisposalMethod ToFrameDisposalMethod(GifDisposalMethod disposal) => disposal switch
+    {
+        GifDisposalMethod.DoNotDispose => FrameDisposalMethod.DoNotDispose,
+        GifDisposalMethod.RestoreToBackground => FrameDisposalMethod.RestoreToBackground,
+        GifDisposalMethod.RestoreToPrevious => FrameDisposalMethod.RestoreToPrevious,
+        _ => FrameDisposalMethod.None,
+    };
 
     private static bool ScanForTransparency(Stream stream)
     {

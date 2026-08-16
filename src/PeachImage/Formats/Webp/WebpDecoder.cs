@@ -12,29 +12,14 @@ namespace PeachImage.Formats.Webp;
 /// <see cref="Decode"/> to throw rather than silently decoding a single sub-frame as if it were the whole
 /// canvas — a WebP animation frame is frequently a partial-canvas sub-rectangle meant to be composited with
 /// blend/dispose semantics, so treating it alone as the full image would produce a silently wrong result.
+/// Used internally by <see cref="WebpCodec"/>.
 /// </summary>
-public sealed class WebpDecoder : IImageDecoder
+internal static class WebpDecoder
 {
-    /// <inheritdoc/>
-    public string FormatName => "webp";
+    private const string FormatName = "webp";
 
-    /// <inheritdoc/>
-    public IReadOnlyList<string> FileExtensions { get; } = ["webp"];
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> MimeTypes { get; } = ["image/webp"];
-
-    /// <inheritdoc/>
-    public int HeaderSize => 12;
-
-    /// <inheritdoc/>
-    public bool IsSupportedFileFormat(ReadOnlySpan<byte> header) =>
-        header.Length >= 12
-        && header[0] == (byte)'R' && header[1] == (byte)'I' && header[2] == (byte)'F' && header[3] == (byte)'F'
-        && header[8] == (byte)'W' && header[9] == (byte)'E' && header[10] == (byte)'B' && header[11] == (byte)'P';
-
-    /// <inheritdoc/>
-    public ImageInfo Identify(Stream stream)
+    /// <summary>Reads image dimensions and format information from <paramref name="stream"/> without fully decoding pixel data.</summary>
+    public static ImageInfo Identify(Stream stream)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
@@ -65,8 +50,8 @@ public sealed class WebpDecoder : IImageDecoder
         return new ImageInfo(width, height, pixelFormat, FormatName);
     }
 
-    /// <inheritdoc/>
-    public Image Decode(Stream stream, DecoderOptions? options = null)
+    /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>
+    public static Image Decode(Stream stream, DecoderOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
 

@@ -91,7 +91,7 @@ internal static class WebpDecodeHashBaseline
         try
         {
             using var stream = new MemoryStream(bytes);
-            using var image = new WebpDecoder().Decode(stream);
+            using var image = WebpDecoder.Decode(stream);
             return new WebpDecodeHashRecord(inputHash, $"{image.Width}x{image.Height}:{image.PixelFormat}:{HashPixels(image)}");
         }
         catch (WebpDecodingException)

@@ -1,7 +1,11 @@
 namespace PeachImage.Formats.Gif;
 
-/// <summary>A single decoded (or to-be-encoded) frame of an animated GIF: a fully composited canvas plus timing/disposal metadata.</summary>
-public sealed class GifFrame : IDisposable
+/// <summary>
+/// A single decoded (or to-be-encoded) frame of an animated GIF bitstream: a fully composited canvas plus
+/// timing/disposal metadata. Purely internal decode/encode plumbing for <see cref="GifDecoder"/>/
+/// <see cref="GifEncoder"/> — the codec-agnostic public equivalent is <see cref="AnimatedImageFrame"/>.
+/// </summary>
+internal sealed class GifFrame : IDisposable
 {
     /// <summary>Initializes a new instance of <see cref="GifFrame"/>.</summary>
     public GifFrame(Image image, TimeSpan duration, GifDisposalMethod disposal)

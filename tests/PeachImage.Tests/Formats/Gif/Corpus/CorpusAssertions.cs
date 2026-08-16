@@ -46,7 +46,7 @@ internal static class CorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            peachImage = new GifDecoder().Decode(stream);
+            peachImage = GifDecoder.Decode(stream);
         }
         catch (GifDecodingException)
         {
@@ -81,7 +81,7 @@ internal static class CorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            using var image = new GifDecoder().Decode(stream);
+            using var image = GifDecoder.Decode(stream);
             return (true, null);
         }
         catch (Exception ex)

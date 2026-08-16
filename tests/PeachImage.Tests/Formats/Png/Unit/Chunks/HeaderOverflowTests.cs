@@ -14,7 +14,7 @@ public class HeaderOverflowTests
         byte[] file = PngTestFileBuilder.Build(width: int.MinValue, height: 1, bitDepth: 8, colorType: 0,
             palette: null, trns: null, scanlines: [[0, 10]]);
 
-        Assert.Throws<PngDecodingException>(() => new PngDecoder().Decode(new MemoryStream(file)));
+        Assert.Throws<PngDecodingException>(() => PngDecoder.Decode(new MemoryStream(file)));
     }
 
     [Fact]
@@ -29,7 +29,7 @@ public class HeaderOverflowTests
         byte[] file = PngTestFileBuilder.Build(width: 16384, height: 16384, bitDepth: 16, colorType: 0,
             palette: null, trns: [0, 0], scanlines: [[0]]);
 
-        Assert.Throws<PngDecodingException>(() => new PngDecoder().Decode(new MemoryStream(file)));
+        Assert.Throws<PngDecodingException>(() => PngDecoder.Decode(new MemoryStream(file)));
     }
 
     [Fact]
@@ -38,7 +38,7 @@ public class HeaderOverflowTests
         byte[] file = PngTestFileBuilder.Build(width: 2, height: 2, bitDepth: 8, colorType: 0,
             palette: null, trns: null, scanlines: [[0, 10, 20], [0, 30, 40]]);
 
-        using var image = new PngDecoder().Decode(new MemoryStream(file));
+        using var image = PngDecoder.Decode(new MemoryStream(file));
 
         Assert.Equal(2, image.Width);
         Assert.Equal(2, image.Height);

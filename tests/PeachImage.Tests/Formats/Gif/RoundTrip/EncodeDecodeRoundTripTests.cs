@@ -64,25 +64,25 @@ public class EncodeDecodeRoundTripTests
         using var source = Image.Create(4, 4, PixelFormat.Cmyk32);
         using var ms = new MemoryStream();
 
-        Assert.Throws<GifEncodingException>(() => new GifEncoder().Encode(source, ms));
+        Assert.Throws<GifEncodingException>(() => GifEncoder.Encode(source, ms));
     }
 
     [Fact]
     public void AnimatedOpaqueFrames_RoundTrip_Exactly()
     {
-        var frames = new List<GifFrame>
+        var frames = new List<AnimatedImageFrame>
         {
-            new(CreateTiledImageRgba(32, 24, colorCount: 8, colorOffset: 0), TimeSpan.FromMilliseconds(50), GifDisposalMethod.DoNotDispose),
-            new(CreateTiledImageRgba(32, 24, colorCount: 8, colorOffset: 3), TimeSpan.FromMilliseconds(100), GifDisposalMethod.RestoreToBackground),
-            new(CreateTiledImageRgba(32, 24, colorCount: 8, colorOffset: 5), TimeSpan.FromMilliseconds(150), GifDisposalMethod.RestoreToPrevious),
+            new(CreateTiledImageRgba(32, 24, colorCount: 8, colorOffset: 0), TimeSpan.FromMilliseconds(50), FrameDisposalMethod.DoNotDispose),
+            new(CreateTiledImageRgba(32, 24, colorCount: 8, colorOffset: 3), TimeSpan.FromMilliseconds(100), FrameDisposalMethod.RestoreToBackground),
+            new(CreateTiledImageRgba(32, 24, colorCount: 8, colorOffset: 5), TimeSpan.FromMilliseconds(150), FrameDisposalMethod.RestoreToPrevious),
         };
-        using var source = new GifImage(frames, loopCount: 7);
+        using var source = new AnimatedImage(frames, loopCount: 7);
 
         using var ms = new MemoryStream();
-        GifEncoder.EncodeAnimation(source, ms, new GifEncoderOptions());
+        source.Save(ms, "gif", new GifEncoderOptions());
         ms.Position = 0;
 
-        using var decoded = GifDecoder.DecodeAnimation(ms);
+        using var decoded = AnimatedImage.Load(ms);
 
         Assert.Equal(3, decoded.Frames.Count);
         Assert.Equal(7, decoded.LoopCount);
@@ -111,18 +111,18 @@ public class EncodeDecodeRoundTripTests
             row[(5 * 4)..(15 * 4)].Clear();
         }
 
-        var frames = new List<GifFrame>
+        var frames = new List<AnimatedImageFrame>
         {
-            new(opaqueFrame, TimeSpan.FromMilliseconds(30), GifDisposalMethod.RestoreToBackground),
-            new(holeFrame, TimeSpan.FromMilliseconds(30), GifDisposalMethod.None),
+            new(opaqueFrame, TimeSpan.FromMilliseconds(30), FrameDisposalMethod.RestoreToBackground),
+            new(holeFrame, TimeSpan.FromMilliseconds(30), FrameDisposalMethod.None),
         };
-        using var source = new GifImage(frames, loopCount: 0);
+        using var source = new AnimatedImage(frames, loopCount: 0);
 
         using var ms = new MemoryStream();
-        GifEncoder.EncodeAnimation(source, ms, new GifEncoderOptions());
+        source.Save(ms, "gif", new GifEncoderOptions());
         ms.Position = 0;
 
-        using var decoded = GifDecoder.DecodeAnimation(ms);
+        using var decoded = AnimatedImage.Load(ms);
 
         Assert.Equal(2, decoded.Frames.Count);
         Assert.True(frames[0].Image.GetPixelSpan().SequenceEqual(decoded.Frames[0].Image.GetPixelSpan()));
@@ -132,10 +132,10 @@ public class EncodeDecodeRoundTripTests
     private static Image EncodeThenDecode(Image source, GifEncoderOptions encoderOptions)
     {
         using var ms = new MemoryStream();
-        new GifEncoder().Encode(source, ms, encoderOptions);
+        GifEncoder.Encode(source, ms, encoderOptions);
 
         ms.Position = 0;
-        return new GifDecoder().Decode(ms);
+        return GifDecoder.Decode(ms);
     }
 
     private static Image CreateTiledImage(int width, int height, int colorCount)

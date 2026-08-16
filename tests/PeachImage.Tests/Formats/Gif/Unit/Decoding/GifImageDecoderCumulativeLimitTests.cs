@@ -50,7 +50,7 @@ public class GifImageDecoderCumulativeLimitTests
 
     private static byte[] EncodeAnimation(int canvasWidth, int canvasHeight, int frameCount)
     {
-        var frames = new List<GifFrame>();
+        var frames = new List<AnimatedImageFrame>();
         for (int i = 0; i < frameCount; i++)
         {
             var image = Image.Create(canvasWidth, canvasHeight, PixelFormat.Rgb24);
@@ -63,12 +63,12 @@ public class GifImageDecoderCumulativeLimitTests
                 pixels[p + 2] = shade;
             }
 
-            frames.Add(new GifFrame(image, TimeSpan.FromMilliseconds(50), GifDisposalMethod.None));
+            frames.Add(new AnimatedImageFrame(image, TimeSpan.FromMilliseconds(50), FrameDisposalMethod.None));
         }
 
-        using var source = new GifImage(frames, loopCount: 0);
+        using var source = new AnimatedImage(frames, loopCount: 0);
         using var ms = new MemoryStream();
-        GifEncoder.EncodeAnimation(source, ms, new GifEncoderOptions());
+        source.Save(ms, "gif", new GifEncoderOptions());
         return ms.ToArray();
     }
 }

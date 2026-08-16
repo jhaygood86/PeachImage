@@ -15,7 +15,7 @@ public class PlteAndTrnsSizeCapTests
         // is attempted (which is why this test can omit the declared bytes entirely).
         byte[] file = BuildFileWithBareChunkHeader("PLTE", declaredLength: 100_000_000, colorType: 3);
 
-        var ex = Assert.Throws<PngDecodingException>(() => new PngDecoder().Decode(new MemoryStream(file)));
+        var ex = Assert.Throws<PngDecodingException>(() => PngDecoder.Decode(new MemoryStream(file)));
         Assert.Contains("PLTE", ex.Message);
     }
 
@@ -26,7 +26,7 @@ public class PlteAndTrnsSizeCapTests
         // entries); grayscale/truecolor need only 2/6 bytes. Same gap as PLTE above.
         byte[] file = BuildFileWithBareChunkHeader("tRNS", declaredLength: 100_000_000, colorType: 0);
 
-        var ex = Assert.Throws<PngDecodingException>(() => new PngDecoder().Decode(new MemoryStream(file)));
+        var ex = Assert.Throws<PngDecodingException>(() => PngDecoder.Decode(new MemoryStream(file)));
         Assert.Contains("tRNS", ex.Message);
     }
 
@@ -39,7 +39,7 @@ public class PlteAndTrnsSizeCapTests
         byte[] file = PngTestFileBuilder.Build(2, 2, bitDepth: 8, colorType: 3, palette, trns,
             scanlines: [[0, 0, 1], [0, 2, 3]]);
 
-        using var image = new PngDecoder().Decode(new MemoryStream(file));
+        using var image = PngDecoder.Decode(new MemoryStream(file));
 
         Assert.Equal(PixelFormat.Rgba32, image.PixelFormat);
     }

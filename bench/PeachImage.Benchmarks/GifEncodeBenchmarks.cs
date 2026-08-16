@@ -17,7 +17,7 @@ public class GifEncodeBenchmarks
 {
     private Image _lowColorGraphic = null!;
     private Image _photographicSource = null!;
-    private GifImage _animatedSource = null!;
+    private AnimatedImage _animatedSource = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -26,17 +26,17 @@ public class GifEncodeBenchmarks
 
         using (var stream = File.OpenRead(Path.Combine(assetsDir, "graphic_640x480_16color.gif")))
         {
-            _lowColorGraphic = new GifDecoder().Decode(stream);
+            _lowColorGraphic = GifDecoder.Decode(stream);
         }
 
         using (var stream = File.OpenRead(Path.Combine(assetsDir, "photo_1920x1080_dithered.gif")))
         {
-            _photographicSource = new GifDecoder().Decode(stream);
+            _photographicSource = GifDecoder.Decode(stream);
         }
 
         using (var stream = File.OpenRead(Path.Combine(assetsDir, "animated_320x240_24frames.gif")))
         {
-            _animatedSource = GifDecoder.DecodeAnimation(stream);
+            _animatedSource = AnimatedImage.Load(stream);
         }
     }
 
@@ -53,7 +53,7 @@ public class GifEncodeBenchmarks
     public MemoryStream PeachImage_Encode_LowColorGraphic()
     {
         var stream = new MemoryStream();
-        new GifEncoder().Encode(_lowColorGraphic, stream, new GifEncoderOptions { MaxColors = 16 });
+        GifEncoder.Encode(_lowColorGraphic, stream, new GifEncoderOptions { MaxColors = 16 });
         return stream;
     }
 
@@ -62,7 +62,7 @@ public class GifEncodeBenchmarks
     public MemoryStream PeachImage_Encode_PhotographicNoDither()
     {
         var stream = new MemoryStream();
-        new GifEncoder().Encode(_photographicSource, stream, new GifEncoderOptions { MaxColors = 256, Dither = false });
+        GifEncoder.Encode(_photographicSource, stream, new GifEncoderOptions { MaxColors = 256, Dither = false });
         return stream;
     }
 
@@ -71,7 +71,7 @@ public class GifEncodeBenchmarks
     public MemoryStream PeachImage_Encode_PhotographicDithered()
     {
         var stream = new MemoryStream();
-        new GifEncoder().Encode(_photographicSource, stream, new GifEncoderOptions { MaxColors = 256, Dither = true });
+        GifEncoder.Encode(_photographicSource, stream, new GifEncoderOptions { MaxColors = 256, Dither = true });
         return stream;
     }
 
@@ -80,7 +80,7 @@ public class GifEncodeBenchmarks
     public MemoryStream PeachImage_Encode_AnimatedAllFrames()
     {
         var stream = new MemoryStream();
-        GifEncoder.EncodeAnimation(_animatedSource, stream, new GifEncoderOptions { MaxColors = 64 });
+        _animatedSource.Save(stream, "gif", new GifEncoderOptions { MaxColors = 64 });
         return stream;
     }
 }

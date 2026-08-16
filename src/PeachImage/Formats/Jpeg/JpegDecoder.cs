@@ -2,27 +2,13 @@ using PeachImage.Formats.Jpeg.Decoding;
 
 namespace PeachImage.Formats.Jpeg;
 
-/// <summary>Decodes baseline sequential and progressive JPEG images.</summary>
-public sealed class JpegDecoder : IImageDecoder
+/// <summary>Decodes baseline sequential and progressive JPEG images. Used internally by <see cref="JpegCodec"/>.</summary>
+internal static class JpegDecoder
 {
-    /// <inheritdoc/>
-    public string FormatName => "jpeg";
+    private const string FormatName = "jpeg";
 
-    /// <inheritdoc/>
-    public IReadOnlyList<string> FileExtensions { get; } = ["jpg", "jpeg", "jpe", "jfif"];
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> MimeTypes { get; } = ["image/jpeg"];
-
-    /// <inheritdoc/>
-    public int HeaderSize => 3;
-
-    /// <inheritdoc/>
-    public bool IsSupportedFileFormat(ReadOnlySpan<byte> header) =>
-        header.Length >= 3 && header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF;
-
-    /// <inheritdoc/>
-    public ImageInfo Identify(Stream stream)
+    /// <summary>Reads image dimensions and format information from <paramref name="stream"/> without fully decoding pixel data.</summary>
+    public static ImageInfo Identify(Stream stream)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
@@ -38,8 +24,8 @@ public sealed class JpegDecoder : IImageDecoder
         return new ImageInfo(frameHeader.Width, frameHeader.Height, pixelFormat, FormatName);
     }
 
-    /// <inheritdoc/>
-    public Image Decode(Stream stream, DecoderOptions? options = null)
+    /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>
+    public static Image Decode(Stream stream, DecoderOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
 

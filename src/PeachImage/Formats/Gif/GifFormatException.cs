@@ -32,7 +32,7 @@ public sealed class GifDecodingException : GifFormatException
     }
 }
 
-/// <summary>Thrown when an <see cref="Image"/> or <see cref="GifImage"/> cannot be encoded as GIF.</summary>
+/// <summary>Thrown when an <see cref="Image"/> or <see cref="AnimatedImage"/> cannot be encoded as GIF.</summary>
 public sealed class GifEncodingException : GifFormatException
 {
     /// <summary>Initializes a new instance of <see cref="GifEncodingException"/>.</summary>

@@ -51,7 +51,7 @@ internal static class PngCorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            peachImage = new PngDecoder().Decode(stream);
+            peachImage = PngDecoder.Decode(stream);
         }
         catch (PngFormatException)
         {
@@ -86,7 +86,7 @@ internal static class PngCorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            using var image = new PngDecoder().Decode(stream);
+            using var image = PngDecoder.Decode(stream);
             return (true, null);
         }
         catch (Exception ex)

@@ -2,8 +2,8 @@ namespace PeachImage.Formats.Webp.Decoding;
 
 /// <summary>
 /// Reads just the width/height/alpha-flag header fields of a VP8/VP8L chunk's payload without running the
-/// full pixel decode pipeline — used by <see cref="WebpDecoder.Identify"/>, which per <see cref="IImageDecoder"/>'s
-/// contract must report dimensions without fully decoding pixel data.
+/// full pixel decode pipeline — used by <see cref="WebpDecoder.Identify"/>, which must report dimensions
+/// without fully decoding pixel data.
 /// </summary>
 internal static class WebpBitstreamHeaderPeek
 {

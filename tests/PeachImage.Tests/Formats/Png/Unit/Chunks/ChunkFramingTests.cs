@@ -9,7 +9,7 @@ public class ChunkFramingTests
     {
         byte[] file = BuildMinimalGrayscaleFile();
 
-        using var image = new PngDecoder().Decode(new MemoryStream(file));
+        using var image = PngDecoder.Decode(new MemoryStream(file));
 
         Assert.Equal(2, image.Width);
         Assert.Equal(2, image.Height);
@@ -24,7 +24,7 @@ public class ChunkFramingTests
         int crcOffset = 8 + 8 + 13;
         file[crcOffset] ^= 0xFF;
 
-        Assert.Throws<PngDecodingException>(() => new PngDecoder().Decode(new MemoryStream(file)));
+        Assert.Throws<PngDecodingException>(() => PngDecoder.Decode(new MemoryStream(file)));
     }
 
     [Fact]
@@ -33,7 +33,7 @@ public class ChunkFramingTests
         byte[] file = BuildMinimalGrayscaleFile();
         byte[] truncated = file[..(file.Length - 10)];
 
-        Assert.Throws<PngDecodingException>(() => new PngDecoder().Decode(new MemoryStream(truncated)));
+        Assert.Throws<PngDecodingException>(() => PngDecoder.Decode(new MemoryStream(truncated)));
     }
 
     [Fact]
@@ -44,7 +44,7 @@ public class ChunkFramingTests
         PngTestFileBuilder.WriteChunk(ms, "IHDR", BuildIhdr(1, 1, 8, 0));
         PngTestFileBuilder.WriteChunk(ms, "XxXx", []); // uppercase first letter = critical, per spec bit-5 convention.
 
-        Assert.Throws<PngDecodingException>(() => new PngDecoder().Decode(new MemoryStream(ms.ToArray())));
+        Assert.Throws<PngDecodingException>(() => PngDecoder.Decode(new MemoryStream(ms.ToArray())));
     }
 
     [Fact]
@@ -59,7 +59,7 @@ public class ChunkFramingTests
         PngTestFileBuilder.WriteChunk(ms, "IDAT", onePixelIdat);
         PngTestFileBuilder.WriteChunk(ms, "IEND", []);
 
-        using var image = new PngDecoder().Decode(new MemoryStream(ms.ToArray()));
+        using var image = PngDecoder.Decode(new MemoryStream(ms.ToArray()));
         Assert.Equal(128, image.GetPixelSpan()[0]);
     }
 
@@ -67,7 +67,7 @@ public class ChunkFramingTests
     public void NotStartingWithPngSignature_Throws()
     {
         byte[] notPng = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        Assert.Throws<PngDecodingException>(() => new PngDecoder().Decode(new MemoryStream(notPng)));
+        Assert.Throws<PngDecodingException>(() => PngDecoder.Decode(new MemoryStream(notPng)));
     }
 
     private static byte[] BuildMinimalGrayscaleFile() =>

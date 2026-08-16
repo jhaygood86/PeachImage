@@ -35,7 +35,7 @@ public class JpegDecodeBenchmarks
     public Image PeachImage_Decode_1080p_420()
     {
         using var stream = new MemoryStream(_photo1080p420);
-        return new JpegDecoder().Decode(stream);
+        return JpegDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -47,7 +47,7 @@ public class JpegDecodeBenchmarks
     public Image PeachImage_Decode_1080p_444()
     {
         using var stream = new MemoryStream(_photo1080p444);
-        return new JpegDecoder().Decode(stream);
+        return JpegDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -59,7 +59,7 @@ public class JpegDecodeBenchmarks
     public Image PeachImage_Decode_12Mp_420()
     {
         using var stream = new MemoryStream(_photo12Mp420);
-        return new JpegDecoder().Decode(stream);
+        return JpegDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -71,7 +71,7 @@ public class JpegDecodeBenchmarks
     public Image PeachImage_Decode_Grayscale()
     {
         using var stream = new MemoryStream(_grayscale1080p);
-        return new JpegDecoder().Decode(stream);
+        return JpegDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]

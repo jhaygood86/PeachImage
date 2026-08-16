@@ -4,9 +4,10 @@ namespace PeachImage.Formats.Gif;
 /// How a frame's canvas region should be treated before the next frame is drawn, mirroring the GIF Graphic
 /// Control Extension's disposal method (values 0-3; 0 "unspecified" and 1 "do not dispose" both mean "leave
 /// as-is" in practice, so they share <see cref="DoNotDispose"/>/<see cref="None"/> here for the raw distinction
-/// while behaving identically).
+/// while behaving identically). Purely internal decode/encode plumbing for <see cref="GifDecoder"/>/
+/// <see cref="GifEncoder"/> — the codec-agnostic public equivalent is <see cref="FrameDisposalMethod"/>.
 /// </summary>
-public enum GifDisposalMethod
+internal enum GifDisposalMethod
 {
     /// <summary>No disposal specified (value 0). Treated the same as <see cref="DoNotDispose"/>.</summary>
     None,

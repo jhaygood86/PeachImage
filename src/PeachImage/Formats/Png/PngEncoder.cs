@@ -7,21 +7,12 @@ namespace PeachImage.Formats.Png;
 /// grayscale (color type 0); <see cref="PixelFormat.Rgb24"/>/<see cref="PixelFormat.Rgb48"/> write
 /// truecolor (color type 2); <see cref="PixelFormat.Rgba32"/>/<see cref="PixelFormat.Rgba64"/> write
 /// truecolor-with-alpha (color type 6). No automatic palette quantization — indexed (color type 3)
-/// output is not produced in v1. CMYK is not supported.
+/// output is not produced in v1. CMYK is not supported. Used internally by <see cref="PngCodec"/>.
 /// </summary>
-public sealed class PngEncoder : IImageEncoder
+internal static class PngEncoder
 {
-    /// <inheritdoc/>
-    public string FormatName => "png";
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> FileExtensions { get; } = ["png"];
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> MimeTypes { get; } = ["image/png"];
-
-    /// <inheritdoc/>
-    public void Encode(Image image, Stream stream, EncoderOptions? options = null)
+    /// <summary>Encodes <paramref name="image"/> and writes the result to <paramref name="stream"/>.</summary>
+    public static void Encode(Image image, Stream stream, EncoderOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(stream);

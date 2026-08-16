@@ -38,7 +38,7 @@ internal static class CorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            peachImage = new JpegDecoder().Decode(stream);
+            peachImage = JpegDecoder.Decode(stream);
         }
         catch (JpegFormatException)
         {
@@ -75,7 +75,7 @@ internal static class CorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            using var image = new JpegDecoder().Decode(stream);
+            using var image = JpegDecoder.Decode(stream);
             return (true, null);
         }
         catch (Exception ex)

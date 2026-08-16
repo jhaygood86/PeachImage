@@ -25,7 +25,7 @@ public class JpegEncodeBenchmarks
         string sourcePath = Path.Combine(assetsDir, "photo_1920x1080_444.jpg");
 
         using var stream = File.OpenRead(sourcePath);
-        _sourceImage = new JpegDecoder().Decode(stream);
+        _sourceImage = JpegDecoder.Decode(stream);
         _skiaSource = SKBitmap.Decode(sourcePath);
     }
 
@@ -41,7 +41,7 @@ public class JpegEncodeBenchmarks
     public MemoryStream PeachImage_Encode_1080p_420()
     {
         var stream = new MemoryStream();
-        new JpegEncoder().Encode(_sourceImage, stream, new JpegEncoderOptions { Quality = Quality, Subsampling = JpegChromaSubsampling.Yuv420 });
+        JpegEncoder.Encode(_sourceImage, stream, new JpegEncoderOptions { Quality = Quality, Subsampling = JpegChromaSubsampling.Yuv420 });
         return stream;
     }
 
@@ -54,7 +54,7 @@ public class JpegEncodeBenchmarks
     public MemoryStream PeachImage_Encode_1080p_444()
     {
         var stream = new MemoryStream();
-        new JpegEncoder().Encode(_sourceImage, stream, new JpegEncoderOptions { Quality = Quality, Subsampling = JpegChromaSubsampling.Yuv444 });
+        JpegEncoder.Encode(_sourceImage, stream, new JpegEncoderOptions { Quality = Quality, Subsampling = JpegChromaSubsampling.Yuv444 });
         return stream;
     }
 
