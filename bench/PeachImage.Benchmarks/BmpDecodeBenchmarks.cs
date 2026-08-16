@@ -34,7 +34,7 @@ public class BmpDecodeBenchmarks
     public Image PeachImage_Decode_24bpp()
     {
         using var stream = new MemoryStream(_truecolor24Bpp);
-        return new BmpDecoder().Decode(stream);
+        return BmpDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -46,7 +46,7 @@ public class BmpDecodeBenchmarks
     public Image PeachImage_Decode_32bppAlpha()
     {
         using var stream = new MemoryStream(_alpha32Bpp);
-        return new BmpDecoder().Decode(stream);
+        return BmpDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -58,7 +58,7 @@ public class BmpDecodeBenchmarks
     public Image PeachImage_Decode_8bppIndexed()
     {
         using var stream = new MemoryStream(_indexed8Bpp);
-        return new BmpDecoder().Decode(stream);
+        return BmpDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -70,7 +70,7 @@ public class BmpDecodeBenchmarks
     public Image PeachImage_Decode_8bppIndexedRle()
     {
         using var stream = new MemoryStream(_indexed8BppRle);
-        return new BmpDecoder().Decode(stream);
+        return BmpDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]

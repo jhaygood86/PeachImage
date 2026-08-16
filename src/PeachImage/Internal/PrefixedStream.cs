@@ -3,7 +3,7 @@ namespace PeachImage.Internal;
 /// <summary>
 /// A forward-only, non-seekable stream that first replays a buffered prefix (bytes already consumed
 /// while sniffing a format's magic header) before continuing to read from the underlying stream.
-/// Used so non-seekable input streams can still be sniffed by <see cref="ImageFormatManager"/>.
+/// Used so non-seekable input streams can still be sniffed by <see cref="Image"/>/<see cref="AnimatedImage"/>.
 /// </summary>
 internal sealed class PrefixedStream(byte[] prefix, Stream inner) : Stream
 {

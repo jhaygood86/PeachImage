@@ -6,29 +6,14 @@ namespace PeachImage.Formats.Png;
 /// <summary>
 /// Decodes PNG images: all 5 color types at their valid bit depths (1/2/4/8/16), Adam7 interlacing,
 /// palette + tRNS transparency, and the common ancillary chunks (gAMA/cHRM/sRGB/iCCP/pHYs/tEXt/zTXt/iTXt/tIME/bKGD).
+/// Used internally by <see cref="PngCodec"/>.
 /// </summary>
-public sealed class PngDecoder : IImageDecoder
+internal static class PngDecoder
 {
-    private static readonly byte[] Signature = [137, 80, 78, 71, 13, 10, 26, 10];
+    private const string FormatName = "png";
 
-    /// <inheritdoc/>
-    public string FormatName => "png";
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> FileExtensions { get; } = ["png"];
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> MimeTypes { get; } = ["image/png"];
-
-    /// <inheritdoc/>
-    public int HeaderSize => 8;
-
-    /// <inheritdoc/>
-    public bool IsSupportedFileFormat(ReadOnlySpan<byte> header) =>
-        header.Length >= 8 && header[..8].SequenceEqual(Signature);
-
-    /// <inheritdoc/>
-    public ImageInfo Identify(Stream stream)
+    /// <summary>Reads image dimensions and format information from <paramref name="stream"/> without fully decoding pixel data.</summary>
+    public static ImageInfo Identify(Stream stream)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
@@ -57,8 +42,8 @@ public sealed class PngDecoder : IImageDecoder
         return new ImageInfo(header.Width, header.Height, pixelFormat, FormatName);
     }
 
-    /// <inheritdoc/>
-    public Image Decode(Stream stream, DecoderOptions? options = null)
+    /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>
+    public static Image Decode(Stream stream, DecoderOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
 

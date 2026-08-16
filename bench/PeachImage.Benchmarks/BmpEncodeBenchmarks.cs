@@ -25,13 +25,13 @@ public class BmpEncodeBenchmarks
     {
         string assetsDir = Path.Combine(AppContext.BaseDirectory, "Assets");
         using var jpegStream = File.OpenRead(Path.Combine(assetsDir, "photo_1920x1080_444.jpg"));
-        _rgb24Source = new JpegDecoder().Decode(jpegStream);
+        _rgb24Source = JpegDecoder.Decode(jpegStream);
 
         using var alphaStream = File.OpenRead(Path.Combine(assetsDir, "photo_1920x1080_32bpp_alpha.bmp"));
-        _rgba32Source = new BmpDecoder().Decode(alphaStream);
+        _rgba32Source = BmpDecoder.Decode(alphaStream);
 
         using var grayStream = File.OpenRead(Path.Combine(assetsDir, "photo_1920x1080_8bpp_indexed.bmp"));
-        _gray8Source = new BmpDecoder().Decode(grayStream, new BmpDecoderOptions { TargetPixelFormat = PixelFormat.Gray8 });
+        _gray8Source = BmpDecoder.Decode(grayStream, new BmpDecoderOptions { TargetPixelFormat = PixelFormat.Gray8 });
     }
 
     [GlobalCleanup]
@@ -47,7 +47,7 @@ public class BmpEncodeBenchmarks
     public MemoryStream PeachImage_Encode_24bpp()
     {
         var stream = new MemoryStream();
-        new BmpEncoder().Encode(_rgb24Source, stream);
+        BmpEncoder.Encode(_rgb24Source, stream);
         return stream;
     }
 
@@ -56,7 +56,7 @@ public class BmpEncodeBenchmarks
     public MemoryStream PeachImage_Encode_32bppAlpha()
     {
         var stream = new MemoryStream();
-        new BmpEncoder().Encode(_rgba32Source, stream);
+        BmpEncoder.Encode(_rgba32Source, stream);
         return stream;
     }
 
@@ -65,7 +65,7 @@ public class BmpEncodeBenchmarks
     public MemoryStream PeachImage_Encode_8bppIndexed()
     {
         var stream = new MemoryStream();
-        new BmpEncoder().Encode(_gray8Source, stream);
+        BmpEncoder.Encode(_gray8Source, stream);
         return stream;
     }
 
@@ -74,7 +74,7 @@ public class BmpEncodeBenchmarks
     public MemoryStream PeachImage_Encode_8bppIndexedRle()
     {
         var stream = new MemoryStream();
-        new BmpEncoder().Encode(_gray8Source, stream, new BmpEncoderOptions { UseRunLengthEncoding = true });
+        BmpEncoder.Encode(_gray8Source, stream, new BmpEncoderOptions { UseRunLengthEncoding = true });
         return stream;
     }
 }

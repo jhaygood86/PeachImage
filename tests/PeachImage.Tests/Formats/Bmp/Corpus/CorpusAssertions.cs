@@ -47,7 +47,7 @@ internal static class CorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            peachImage = new BmpDecoder().Decode(stream);
+            peachImage = BmpDecoder.Decode(stream);
         }
         catch (BmpFormatException)
         {
@@ -82,7 +82,7 @@ internal static class CorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            using var image = new BmpDecoder().Decode(stream);
+            using var image = BmpDecoder.Decode(stream);
             return (true, null);
         }
         catch (Exception ex)

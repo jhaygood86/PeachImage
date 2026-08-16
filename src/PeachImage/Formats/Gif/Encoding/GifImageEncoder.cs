@@ -11,16 +11,24 @@ internal static class GifImageEncoder
         EncodeFrames(stream, [(image, TimeSpan.Zero, GifDisposalMethod.None)], loopCount: null, options);
     }
 
-    public static void EncodeAnimation(GifImage gifImage, Stream stream, GifEncoderOptions options)
+    public static void EncodeAnimation(AnimatedImage image, Stream stream, GifEncoderOptions options)
     {
-        var frames = new List<(Image, TimeSpan, GifDisposalMethod)>(gifImage.Frames.Count);
-        foreach (var frame in gifImage.Frames)
+        var frames = new List<(Image, TimeSpan, GifDisposalMethod)>(image.Frames.Count);
+        foreach (var frame in image.Frames)
         {
-            frames.Add((frame.Image, frame.Duration, frame.Disposal));
+            frames.Add((frame.Image, frame.Duration, ToGifDisposalMethod(frame.Disposal)));
         }
 
-        EncodeFrames(stream, frames, gifImage.LoopCount, options);
+        EncodeFrames(stream, frames, image.LoopCount, options);
     }
+
+    private static GifDisposalMethod ToGifDisposalMethod(FrameDisposalMethod disposal) => disposal switch
+    {
+        FrameDisposalMethod.DoNotDispose => GifDisposalMethod.DoNotDispose,
+        FrameDisposalMethod.RestoreToBackground => GifDisposalMethod.RestoreToBackground,
+        FrameDisposalMethod.RestoreToPrevious => GifDisposalMethod.RestoreToPrevious,
+        _ => GifDisposalMethod.None,
+    };
 
     private static void EncodeFrames(Stream stream, List<(Image Image, TimeSpan Duration, GifDisposalMethod Disposal)> frames, int? loopCount, GifEncoderOptions options)
     {

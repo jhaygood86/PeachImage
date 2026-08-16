@@ -14,12 +14,10 @@ public class EncodeDecodeRoundTripTests
         using var source = CreateGradientImage(64, 48);
 
         using var ms = new MemoryStream();
-        var encoder = new JpegEncoder();
-        encoder.Encode(source, ms, new JpegEncoderOptions { Quality = 90, Subsampling = subsampling });
+        JpegEncoder.Encode(source, ms, new JpegEncoderOptions { Quality = 90, Subsampling = subsampling });
 
         ms.Position = 0;
-        var decoder = new JpegDecoder();
-        using var decoded = decoder.Decode(ms);
+        using var decoded = JpegDecoder.Decode(ms);
 
         Assert.Equal(source.Width, decoded.Width);
         Assert.Equal(source.Height, decoded.Height);
@@ -44,12 +42,10 @@ public class EncodeDecodeRoundTripTests
         using var source = CreateGradientImage(width, height);
 
         using var ms = new MemoryStream();
-        var encoder = new JpegEncoder();
-        encoder.Encode(source, ms, new JpegEncoderOptions { Quality = 90, Subsampling = subsampling });
+        JpegEncoder.Encode(source, ms, new JpegEncoderOptions { Quality = 90, Subsampling = subsampling });
 
         ms.Position = 0;
-        var decoder = new JpegDecoder();
-        using var decoded = decoder.Decode(ms);
+        using var decoded = JpegDecoder.Decode(ms);
 
         Assert.Equal(source.Width, decoded.Width);
         Assert.Equal(source.Height, decoded.Height);
@@ -65,12 +61,10 @@ public class EncodeDecodeRoundTripTests
         using var source = CreateGrayscaleImage(32, 32);
 
         using var ms = new MemoryStream();
-        var encoder = new JpegEncoder();
-        encoder.Encode(source, ms, new JpegEncoderOptions { Quality = 95 });
+        JpegEncoder.Encode(source, ms, new JpegEncoderOptions { Quality = 95 });
 
         ms.Position = 0;
-        var decoder = new JpegDecoder();
-        using var decoded = decoder.Decode(ms);
+        using var decoded = JpegDecoder.Decode(ms);
 
         Assert.Equal(PixelFormat.Gray8, decoded.PixelFormat);
         double psnr = ComputePsnr(source.GetPixelSpan(), decoded.GetPixelSpan());
@@ -94,16 +88,16 @@ public class EncodeDecodeRoundTripTests
         using var source = CreateGradientImage(80, 64);
 
         using var withoutRestarts = new MemoryStream();
-        new JpegEncoder().Encode(source, withoutRestarts, new JpegEncoderOptions { Quality = 90, RestartInterval = 0 });
+        JpegEncoder.Encode(source, withoutRestarts, new JpegEncoderOptions { Quality = 90, RestartInterval = 0 });
 
         using var withRestarts = new MemoryStream();
-        new JpegEncoder().Encode(source, withRestarts, new JpegEncoderOptions { Quality = 90, RestartInterval = 2 });
+        JpegEncoder.Encode(source, withRestarts, new JpegEncoderOptions { Quality = 90, RestartInterval = 2 });
 
         withoutRestarts.Position = 0;
         withRestarts.Position = 0;
 
-        using var decodedWithout = new JpegDecoder().Decode(withoutRestarts);
-        using var decodedWith = new JpegDecoder().Decode(withRestarts);
+        using var decodedWithout = JpegDecoder.Decode(withoutRestarts);
+        using var decodedWith = JpegDecoder.Decode(withRestarts);
 
         Assert.True(decodedWithout.GetPixelSpan().SequenceEqual(decodedWith.GetPixelSpan()));
     }
@@ -111,9 +105,9 @@ public class EncodeDecodeRoundTripTests
     private static double EncodeDecodeAndMeasurePsnr(Image source, int quality)
     {
         using var ms = new MemoryStream();
-        new JpegEncoder().Encode(source, ms, new JpegEncoderOptions { Quality = quality });
+        JpegEncoder.Encode(source, ms, new JpegEncoderOptions { Quality = quality });
         ms.Position = 0;
-        using var decoded = new JpegDecoder().Decode(ms);
+        using var decoded = JpegDecoder.Decode(ms);
         return ComputePsnr(source.GetPixelSpan(), decoded.GetPixelSpan());
     }
 

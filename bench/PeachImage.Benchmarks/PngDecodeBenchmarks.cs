@@ -40,7 +40,7 @@ public class PngDecodeBenchmarks
     public Image PeachImage_Decode_24bpp()
     {
         using var stream = new MemoryStream(_truecolor24Bpp);
-        return new PngDecoder().Decode(stream);
+        return PngDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -52,7 +52,7 @@ public class PngDecodeBenchmarks
     public Image PeachImage_Decode_32bppRgba()
     {
         using var stream = new MemoryStream(_rgba32Bpp);
-        return new PngDecoder().Decode(stream);
+        return PngDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -64,7 +64,7 @@ public class PngDecodeBenchmarks
     public Image PeachImage_Decode_8bppGrayscale()
     {
         using var stream = new MemoryStream(_gray8Bpp);
-        return new PngDecoder().Decode(stream);
+        return PngDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -76,7 +76,7 @@ public class PngDecodeBenchmarks
     public Image PeachImage_Decode_InterlacedTruecolor()
     {
         using var stream = new MemoryStream(_interlacedTruecolor);
-        return new PngDecoder().Decode(stream);
+        return PngDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -88,7 +88,7 @@ public class PngDecodeBenchmarks
     public Image PeachImage_Decode_48bpp()
     {
         using var stream = new MemoryStream(_truecolor48Bpp);
-        return new PngDecoder().Decode(stream);
+        return PngDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]

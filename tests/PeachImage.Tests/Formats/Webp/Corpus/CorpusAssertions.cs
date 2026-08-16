@@ -47,7 +47,7 @@ internal static class CorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            peachImage = new WebpDecoder().Decode(stream);
+            peachImage = WebpDecoder.Decode(stream);
         }
         catch (WebpDecodingException)
         {
@@ -138,7 +138,7 @@ internal static class CorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            using var image = new WebpDecoder().Decode(stream);
+            using var image = WebpDecoder.Decode(stream);
             return (true, null);
         }
         catch (Exception ex)

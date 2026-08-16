@@ -99,9 +99,9 @@ public class VectorizedFilterRoundTripTests
     private static Image EncodeThenDecode(Image source, PngFilterStrategy strategy)
     {
         using var ms = new MemoryStream();
-        new PngEncoder().Encode(source, ms, new PngEncoderOptions { FilterStrategy = strategy });
+        PngEncoder.Encode(source, ms, new PngEncoderOptions { FilterStrategy = strategy });
         ms.Position = 0;
-        return new PngDecoder().Decode(ms);
+        return PngDecoder.Decode(ms);
     }
 
     private static Image CreateNoisyRgb24(int width, int height) => CreateNoisyImage(width, height, PixelFormat.Rgb24);

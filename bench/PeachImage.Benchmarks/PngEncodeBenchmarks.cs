@@ -26,9 +26,9 @@ public class PngEncodeBenchmarks
     {
         string assetsDir = Path.Combine(AppContext.BaseDirectory, "Assets");
 
-        _rgb24Source = new PngDecoder().Decode(File.OpenRead(Path.Combine(assetsDir, "photo_1920x1080_24bpp.png")));
-        _rgba32Source = new PngDecoder().Decode(File.OpenRead(Path.Combine(assetsDir, "photo_1920x1080_32bpp_rgba.png")));
-        _gray8Source = new PngDecoder().Decode(File.OpenRead(Path.Combine(assetsDir, "gray_1920x1080.png")));
+        _rgb24Source = PngDecoder.Decode(File.OpenRead(Path.Combine(assetsDir, "photo_1920x1080_24bpp.png")));
+        _rgba32Source = PngDecoder.Decode(File.OpenRead(Path.Combine(assetsDir, "photo_1920x1080_32bpp_rgba.png")));
+        _gray8Source = PngDecoder.Decode(File.OpenRead(Path.Combine(assetsDir, "gray_1920x1080.png")));
 
         _rgb24SkiaSource = SKBitmap.Decode(Path.Combine(assetsDir, "photo_1920x1080_24bpp.png"));
         _rgba32SkiaSource = SKBitmap.Decode(Path.Combine(assetsDir, "photo_1920x1080_32bpp_rgba.png"));
@@ -51,7 +51,7 @@ public class PngEncodeBenchmarks
     public MemoryStream PeachImage_Encode_24bpp()
     {
         var stream = new MemoryStream();
-        new PngEncoder().Encode(_rgb24Source, stream);
+        PngEncoder.Encode(_rgb24Source, stream);
         return stream;
     }
 
@@ -64,7 +64,7 @@ public class PngEncodeBenchmarks
     public MemoryStream PeachImage_Encode_32bppRgba()
     {
         var stream = new MemoryStream();
-        new PngEncoder().Encode(_rgba32Source, stream);
+        PngEncoder.Encode(_rgba32Source, stream);
         return stream;
     }
 
@@ -77,7 +77,7 @@ public class PngEncodeBenchmarks
     public MemoryStream PeachImage_Encode_8bppGrayscale()
     {
         var stream = new MemoryStream();
-        new PngEncoder().Encode(_gray8Source, stream);
+        PngEncoder.Encode(_gray8Source, stream);
         return stream;
     }
 

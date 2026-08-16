@@ -6,21 +6,14 @@ namespace PeachImage.Formats.Gif;
 /// Encodes images as GIF: builds a median-cut palette (with optional Floyd-Steinberg dithering, see
 /// <see cref="GifEncoderOptions.Dither"/>) from the source pixels, then LZW-compresses the quantized result.
 /// <see cref="Encode"/> writes a single-frame GIF; <see cref="EncodeAnimation"/> writes a full animated GIF
-/// (per-frame delay/disposal, NETSCAPE2.0 loop count) from a <see cref="GifImage"/>.
+/// (per-frame delay/disposal, NETSCAPE2.0 loop count) from an <see cref="AnimatedImage"/>. Used internally
+/// by <see cref="GifCodec"/>; animation is exposed publicly through the codec-agnostic
+/// <see cref="AnimatedImage"/>, not through this type.
 /// </summary>
-public sealed class GifEncoder : IImageEncoder
+internal static class GifEncoder
 {
-    /// <inheritdoc/>
-    public string FormatName => "gif";
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> FileExtensions { get; } = ["gif"];
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> MimeTypes { get; } = ["image/gif"];
-
-    /// <inheritdoc/>
-    public void Encode(Image image, Stream stream, EncoderOptions? options = null)
+    /// <summary>Encodes <paramref name="image"/> and writes the result to <paramref name="stream"/>.</summary>
+    public static void Encode(Image image, Stream stream, EncoderOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(stream);
@@ -30,7 +23,7 @@ public sealed class GifEncoder : IImageEncoder
     }
 
     /// <summary>Encodes every frame of <paramref name="image"/> as an animated GIF, honoring each frame's delay/disposal and the animation's loop count.</summary>
-    public static void EncodeAnimation(GifImage image, Stream stream, GifEncoderOptions? options = null)
+    public static void EncodeAnimation(AnimatedImage image, Stream stream, GifEncoderOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(stream);

@@ -1,3 +1,8 @@
+using PeachImage.Formats.Bmp;
+using PeachImage.Formats.Gif;
+using PeachImage.Formats.Jpeg;
+using PeachImage.Formats.Png;
+using PeachImage.Formats.Webp;
 using PeachImage.Internal;
 
 namespace PeachImage;
@@ -7,6 +12,22 @@ namespace PeachImage;
 /// </summary>
 public sealed class Image : IDisposable
 {
+    /// <summary>
+    /// The fixed set of built-in codecs. Internal rather than private so <see cref="AnimatedImage"/> can
+    /// filter it down to the subset that also implement <see cref="IAnimatedImageCodec"/>, instead of
+    /// maintaining a second, separately-curated codec list.
+    /// </summary>
+    internal static readonly IImageCodec[] Codecs =
+    [
+        JpegCodec.Instance,
+        BmpCodec.Instance,
+        PngCodec.Instance,
+        GifCodec.Instance,
+        WebpCodec.Instance,
+    ];
+
+    private static readonly int MaxHeaderSize = Codecs.Max(codec => codec.HeaderSize);
+
     private readonly byte[] _pixels;
     private bool _disposed;
 
@@ -87,13 +108,13 @@ public sealed class Image : IDisposable
     {
         ArgumentNullException.ThrowIfNull(stream);
 
-        var decoder = ResolveDecoder(stream, out var preparedStream);
-        if (decoder is null)
+        var codec = ResolveCodec(stream, out var preparedStream);
+        if (codec is null)
         {
-            throw new UnknownImageFormatException("The image format could not be determined from the stream contents. If this is a custom or third-party format, register its codec with ImageFormatManager.Register first.");
+            throw new UnknownImageFormatException("The image format could not be determined from the stream contents.");
         }
 
-        return decoder.Decode(preparedStream, options);
+        return codec.Decode(preparedStream, options);
     }
 
     /// <summary>Attempts to load an image from <paramref name="stream"/>, returning <see langword="false"/> instead of throwing on failure.</summary>
@@ -127,13 +148,13 @@ public sealed class Image : IDisposable
     {
         ArgumentNullException.ThrowIfNull(stream);
 
-        var decoder = ResolveDecoder(stream, out var preparedStream);
-        if (decoder is null)
+        var codec = ResolveCodec(stream, out var preparedStream);
+        if (codec is null)
         {
             throw new UnknownImageFormatException("The image format could not be determined from the stream contents.");
         }
 
-        return decoder.Identify(preparedStream);
+        return codec.Identify(preparedStream);
     }
 
     /// <summary>Encodes this image and writes it to <paramref name="path"/>, inferring the format from the file extension.</summary>
@@ -142,11 +163,11 @@ public sealed class Image : IDisposable
         ArgumentNullException.ThrowIfNull(path);
 
         string extension = Path.GetExtension(path).TrimStart('.');
-        var encoder = ImageFormatManager.FindEncoderByExtension(extension)
-            ?? throw new UnknownImageFormatException($"No registered codec can encode files with extension '.{extension}'.");
+        var codec = FindCodecByExtension(extension)
+            ?? throw new UnknownImageFormatException($"No built-in codec can encode files with extension '.{extension}'.");
 
         using var fileStream = File.Create(path);
-        encoder.Encode(this, fileStream, options);
+        codec.Encode(this, fileStream, options);
     }
 
     /// <summary>Encodes this image as <paramref name="formatName"/> and writes it to <paramref name="stream"/>.</summary>
@@ -155,10 +176,10 @@ public sealed class Image : IDisposable
         ArgumentNullException.ThrowIfNull(stream);
         ArgumentNullException.ThrowIfNull(formatName);
 
-        var encoder = ImageFormatManager.FindEncoderByFormatName(formatName)
-            ?? throw new UnknownImageFormatException($"No registered codec can encode format '{formatName}'.", formatName);
+        var codec = FindCodecByFormatName(formatName)
+            ?? throw new UnknownImageFormatException($"No built-in codec can encode format '{formatName}'.", formatName);
 
-        encoder.Encode(this, stream, options);
+        codec.Encode(this, stream, options);
     }
 
     /// <inheritdoc/>
@@ -171,14 +192,21 @@ public sealed class Image : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private static IImageDecoder? ResolveDecoder(Stream stream, out Stream preparedStream)
+    private static IImageCodec? ResolveCodec(Stream stream, out Stream preparedStream)
     {
-        int headerSize = ImageFormatManager.MaxDecoderHeaderSize;
-        var header = new byte[headerSize];
+        var header = new byte[MaxHeaderSize];
         int read = ReadFully(stream, header);
         var headerSpan = header.AsSpan(0, read);
 
-        var decoder = ImageFormatManager.FindDecoder(headerSpan);
+        IImageCodec? found = null;
+        foreach (var codec in Codecs)
+        {
+            if (codec.CanDecode && codec.IsSupportedFileFormat(headerSpan))
+            {
+                found = codec;
+                break;
+            }
+        }
 
         if (stream.CanSeek)
         {
@@ -190,10 +218,45 @@ public sealed class Image : IDisposable
             preparedStream = new PrefixedStream(header.AsSpan(0, read).ToArray(), stream);
         }
 
-        return decoder;
+        return found;
     }
 
-    private static int ReadFully(Stream stream, Span<byte> buffer)
+    private static IImageCodec? FindCodecByFormatName(string formatName)
+    {
+        foreach (var codec in Codecs)
+        {
+            if (codec.CanEncode && string.Equals(codec.FormatName, formatName, StringComparison.OrdinalIgnoreCase))
+            {
+                return codec;
+            }
+        }
+
+        return null;
+    }
+
+    private static IImageCodec? FindCodecByExtension(string extension)
+    {
+        foreach (var codec in Codecs)
+        {
+            if (!codec.CanEncode)
+            {
+                continue;
+            }
+
+            foreach (var candidate in codec.FileExtensions)
+            {
+                if (string.Equals(candidate, extension, StringComparison.OrdinalIgnoreCase))
+                {
+                    return codec;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Shared by <see cref="AnimatedImage"/>'s own header-sniffing so both types read a stream's header identically.</summary>
+    internal static int ReadFully(Stream stream, Span<byte> buffer)
     {
         int total = 0;
         while (total < buffer.Length)

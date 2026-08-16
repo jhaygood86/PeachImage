@@ -2,27 +2,13 @@ using PeachImage.Formats.Bmp.Decoding;
 
 namespace PeachImage.Formats.Bmp;
 
-/// <summary>Decodes Windows Bitmap (BMP) images, including OS/2 header variants, 1/4/8bpp indexed color, 16/24/32bpp direct color, RLE4/RLE8 compression, and explicit alpha channels (BI_BITFIELDS/BI_ALPHABITFIELDS or BITMAPV3+ headers with a declared alpha mask).</summary>
-public sealed class BmpDecoder : IImageDecoder
+/// <summary>Decodes Windows Bitmap (BMP) images, including OS/2 header variants, 1/4/8bpp indexed color, 16/24/32bpp direct color, RLE4/RLE8 compression, and explicit alpha channels (BI_BITFIELDS/BI_ALPHABITFIELDS or BITMAPV3+ headers with a declared alpha mask). Used internally by <see cref="BmpCodec"/>.</summary>
+internal static class BmpDecoder
 {
-    /// <inheritdoc/>
-    public string FormatName => "bmp";
+    private const string FormatName = "bmp";
 
-    /// <inheritdoc/>
-    public IReadOnlyList<string> FileExtensions { get; } = ["bmp"];
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> MimeTypes { get; } = ["image/bmp", "image/x-ms-bmp"];
-
-    /// <inheritdoc/>
-    public int HeaderSize => 2;
-
-    /// <inheritdoc/>
-    public bool IsSupportedFileFormat(ReadOnlySpan<byte> header) =>
-        header.Length >= 2 && header[0] == (byte)'B' && header[1] == (byte)'M';
-
-    /// <inheritdoc/>
-    public ImageInfo Identify(Stream stream)
+    /// <summary>Reads image dimensions and format information from <paramref name="stream"/> without fully decoding pixel data.</summary>
+    public static ImageInfo Identify(Stream stream)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
@@ -33,8 +19,8 @@ public sealed class BmpDecoder : IImageDecoder
         return new ImageInfo(header.Width, header.Height, pixelFormat, FormatName);
     }
 
-    /// <inheritdoc/>
-    public Image Decode(Stream stream, DecoderOptions? options = null)
+    /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>
+    public static Image Decode(Stream stream, DecoderOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
 

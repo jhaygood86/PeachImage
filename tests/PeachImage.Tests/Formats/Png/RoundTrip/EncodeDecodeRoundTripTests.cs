@@ -176,16 +176,16 @@ public class EncodeDecodeRoundTripTests
         using var source = Image.Create(4, 4, PixelFormat.Cmyk32);
         using var ms = new MemoryStream();
 
-        Assert.Throws<PngEncodingException>(() => new PngEncoder().Encode(source, ms));
+        Assert.Throws<PngEncodingException>(() => PngEncoder.Encode(source, ms));
     }
 
     private static Image EncodeThenDecode(Image source, PngEncoderOptions encoderOptions)
     {
         using var ms = new MemoryStream();
-        new PngEncoder().Encode(source, ms, encoderOptions);
+        PngEncoder.Encode(source, ms, encoderOptions);
 
         ms.Position = 0;
-        return new PngDecoder().Decode(ms);
+        return PngDecoder.Decode(ms);
     }
 
     private static Image CreateGradientImage(int width, int height)

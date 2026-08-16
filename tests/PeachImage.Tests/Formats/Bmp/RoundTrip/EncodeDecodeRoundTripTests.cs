@@ -51,17 +51,17 @@ public class EncodeDecodeRoundTripTests
         using var source = Image.Create(4, 4, PixelFormat.Cmyk32);
         using var ms = new MemoryStream();
 
-        Assert.Throws<BmpEncodingException>(() => new BmpEncoder().Encode(source, ms));
+        Assert.Throws<BmpEncodingException>(() => BmpEncoder.Encode(source, ms));
     }
 
     private static Image EncodeThenDecode(Image source, BmpEncoderOptions encoderOptions, PixelFormat? targetPixelFormat = null)
     {
         using var ms = new MemoryStream();
-        new BmpEncoder().Encode(source, ms, encoderOptions);
+        BmpEncoder.Encode(source, ms, encoderOptions);
 
         ms.Position = 0;
         var decoderOptions = targetPixelFormat is { } target ? new BmpDecoderOptions { TargetPixelFormat = target } : null;
-        return new BmpDecoder().Decode(ms, decoderOptions);
+        return BmpDecoder.Decode(ms, decoderOptions);
     }
 
     private static Image CreateGradientImage(int width, int height)

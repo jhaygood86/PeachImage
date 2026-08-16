@@ -40,7 +40,7 @@ public class WebpDecodeBenchmarks
     public Image PeachImage_Decode_LosslessPhotographic()
     {
         using var stream = new MemoryStream(_losslessPhotographic);
-        return new WebpDecoder().Decode(stream);
+        return WebpDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -52,7 +52,7 @@ public class WebpDecodeBenchmarks
     public Image PeachImage_Decode_LossyPhotographic()
     {
         using var stream = new MemoryStream(_lossyPhotographic);
-        return new WebpDecoder().Decode(stream);
+        return WebpDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -64,7 +64,7 @@ public class WebpDecodeBenchmarks
     public Image PeachImage_Decode_LosslessGraphic()
     {
         using var stream = new MemoryStream(_losslessGraphic);
-        return new WebpDecoder().Decode(stream);
+        return WebpDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -76,7 +76,7 @@ public class WebpDecodeBenchmarks
     public Image PeachImage_Decode_LossyAlpha()
     {
         using var stream = new MemoryStream(_lossyWithAlpha);
-        return new WebpDecoder().Decode(stream);
+        return WebpDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -88,7 +88,7 @@ public class WebpDecodeBenchmarks
     public Image PeachImage_Decode_LosslessAlpha()
     {
         using var stream = new MemoryStream(_losslessWithAlpha);
-        return new WebpDecoder().Decode(stream);
+        return WebpDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -100,7 +100,7 @@ public class WebpDecodeBenchmarks
     public Image PeachImage_Decode_Small()
     {
         using var stream = new MemoryStream(_small);
-        return new WebpDecoder().Decode(stream);
+        return WebpDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]

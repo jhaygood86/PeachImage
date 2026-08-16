@@ -8,7 +8,7 @@ namespace PeachImage.Benchmarks;
 /// Decode throughput: PeachImage vs. SkiaSharp (a mature, real-world GIF decoder — the same library used as
 /// the corpus tests' differential oracle). The acceptance bar (see the project plan) is PeachImage's Mean
 /// within 10% of SkiaSharp's Mean for every scenario below. The animated scenario decodes every frame through
-/// both libraries (PeachImage via <see cref="GifDecoder.DecodeAnimation"/>, SkiaSharp via <see cref="SKCodec"/>
+/// both libraries (PeachImage via <see cref="AnimatedImage.Load(Stream, DecoderOptions?)"/>, SkiaSharp via <see cref="SKCodec"/>
 /// frame-indexed decode), not just the first frame, since that's GIF's defining use case.
 /// </summary>
 [MemoryDiagnoser]
@@ -34,7 +34,7 @@ public class GifDecodeBenchmarks
     public Image PeachImage_Decode_LowColorGraphic()
     {
         using var stream = new MemoryStream(_lowColorGraphic);
-        return new GifDecoder().Decode(stream);
+        return GifDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -46,7 +46,7 @@ public class GifDecodeBenchmarks
     public Image PeachImage_Decode_PhotographicDithered()
     {
         using var stream = new MemoryStream(_photographicDithered);
-        return new GifDecoder().Decode(stream);
+        return GifDecoder.Decode(stream);
     }
 
     [Benchmark(Baseline = true)]
@@ -58,8 +58,8 @@ public class GifDecodeBenchmarks
     public int PeachImage_Decode_AnimatedAllFrames()
     {
         using var stream = new MemoryStream(_animated);
-        using var gifImage = GifDecoder.DecodeAnimation(stream);
-        return gifImage.Frames.Count;
+        using var animatedImage = AnimatedImage.Load(stream);
+        return animatedImage.Frames.Count;
     }
 
     [Benchmark(Baseline = true)]

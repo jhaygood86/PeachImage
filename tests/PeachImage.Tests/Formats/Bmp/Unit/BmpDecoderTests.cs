@@ -14,7 +14,7 @@ public class BmpDecoderTests
         // ImageInfo with a garbage negative Height and no exception at all.
         byte[] file = BuildMinimalFile(width: 4, height: int.MinValue);
 
-        Assert.Throws<BmpDecodingException>(() => new BmpDecoder().Identify(new MemoryStream(file)));
+        Assert.Throws<BmpDecodingException>(() => BmpDecoder.Identify(new MemoryStream(file)));
     }
 
     [Fact]
@@ -25,7 +25,7 @@ public class BmpDecoderTests
         // documented "only ImageFormatException" contract.
         byte[] file = BuildMinimalFile(width: 4, height: int.MinValue);
 
-        Assert.Throws<BmpDecodingException>(() => new BmpDecoder().Decode(new MemoryStream(file)));
+        Assert.Throws<BmpDecodingException>(() => BmpDecoder.Decode(new MemoryStream(file)));
     }
 
     private static byte[] BuildMinimalFile(int width, int height)
