@@ -250,6 +250,52 @@ array (see above) cut `Lossless-Graphic`'s *allocation* by more than half while 
 scenario. `PackPixels`' output remains un-pooled, but deliberately — it becomes the real final `Image`
 buffer the caller keeps, not an intermediate, so there is nothing to pool it against.
 
+## AVIF
+
+Decode-only, and only for this phase's supported subset: a single (non-grid) or grid-composited item,
+8- or 10-bit, with or without alpha, with the full deblock → CDEF → loop restoration filter chain
+applied (see [README.md](README.md) for the exact scope boundary — animated AVIF, film grain,
+gain maps, and 12-bit remain unimplemented). **There is no SkiaSharp baseline column**: this repo's
+pinned SkiaSharp version (confirmed in the Phase 0 spike) doesn't decode AVIF at all. In its place,
+the table below reports a supplementary `ffmpeg -c:v libdav1d`/`libaom` process-spawn timing as
+context, not as a directly comparable BenchmarkDotNet row — the two measurement methodologies aren't
+apples-to-apples (`ffmpeg`'s number includes process-startup overhead, and it's a mature,
+hand-vectorized C decoder with over a decade of tuning behind it, not a peer to benchmark parity
+against the way SkiaSharp is for the other formats here).
+
+Assets were encoded locally via `ffmpeg -c:v libaom-av1` from this repo's existing 1920×1080
+benchmark source PNGs (no AVIF-specific source assets existed), at default `libaom` settings
+(deblock/CDEF/restoration all encoder-enabled, matching real-world encoder output) — correctness
+itself is verified independently by the AV1 spec's own bitstream-conformance check and a real-file
+corpus (see [README.md](README.md) and `Av1HeaderCorpusTests`/`AvifCorpusTests`), not by this
+benchmark.
+
+| Scenario | PeachImage | `ffmpeg` (process-spawn, context only) | Allocated (PeachImage) |
+|---|---:|---:|---:|
+| Photographic, 8-bit 4:2:0 | 418.4 ms | 68.6 ms | 191.8 MB |
+| Photographic, 8-bit 4:2:0 + alpha | 438.2 ms | — | 198.4 MB |
+| Small image (32×24) | 149.2 µs | — | 330 KB |
+
+PeachImage is roughly **6.1×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario — a wide
+gap, and an expected one at this stage: only one kernel (the YUV→RGB color conversion's non-identity
+matrix path) is vectorized so far (`Vector128<double>`, 2 lanes, bit-identical to the scalar path by
+construction — SSE2 double arithmetic matches scalar double arithmetic exactly on the same hardware,
+so this is a pure speedup with no separate correctness burden). Entropy/symbol decode, the partition
+tree walk, coefficient decode, dequantization, the inverse transforms, intra prediction, and all
+three in-loop filters (deblock, CDEF, self-guided/Wiener restoration) remain scalar. Per the project
+plan, AV1/AVIF performance is an explicitly aspirational, long-term goal here, not a merge gate the
+way it is for the more mature formats above — WebP's own optimization arc (4.11× → 2.13× on its
+worst scenario, over several profile-guided passes) is the expected shape of future work, not
+something achieved in one pass. The highest-value next targets, by the same reasoning that guided
+WebP's own profiling: the inverse transform (WebP's single largest win came from vectorizing its
+DCT), directional intra prediction's edge interpolation, and CDEF's direction search.
+
+Allocation is also unoptimized: ~192-198 MB per 1080p decode reflects `int[]`-per-sample plane
+storage throughout the pipeline (chosen for implementation simplicity across every intra-prediction
+and reconstruction kernel while the format was being built out) rather than packed `byte`/`ushort`
+buffers with pooling, the same "prove correctness first, then multiply-pass down the allocation and
+CPU-time axes separately" order this repo's WebP work followed.
+
 ## Summary
 
 | Format | Decode | Encode |
@@ -258,6 +304,7 @@ buffer the caller keeps, not an intermediate, so there is nothing to pool it aga
 | BMP | 0.40×–1.05× | no baseline (PeachImage-only) |
 | PNG | 1.08×–1.63× | 0.65×–1.27× |
 | WebP | 1.15×–2.13× | not yet implemented |
+| AVIF | ~6.1× vs. `ffmpeg` (no SkiaSharp baseline available) | not yet implemented |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
 and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the

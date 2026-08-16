@@ -32,9 +32,24 @@ Targets .NET 10. No native interop — every codec is managed code, using modern
   the furthest of any format here from the 10%-of-SkiaSharp target on large images (see
   `LIBRARY_COMPARISON.md`), though a profile-guided pass has closed roughly a third of that gap; what
   remains is concentrated in entropy decode, which is inherently sequential.
-- Other formats (AVIF, ...) are not yet implemented. The public API (`Image`, `AnimatedImage` for
-  multi-frame formats like GIF) is designed to support them without breaking changes when they're added.
-  Codec selection is internal — there's no format-specific type or registration step in the public API.
+- **AVIF**: decode is implemented for baseline still images — intra-frame AV1 (partition tree, mode
+  info, coefficient decode, dequantization, inverse transforms, intra prediction including CFL), the
+  full in-loop filter chain (deblocking, CDEF, loop restoration including both Wiener and self-guided
+  SGRPROJ), HEIF `grid` composite images, alpha via the auxiliary-item mechanism, and both 8-bit and
+  10-bit depth (proportionally scaled to `Rgb48`/`Rgba64`/`Gray16`, not left-shift replication).
+  Animated AVIF, film grain synthesis, gain maps, 12-bit depth, and palette/IntraBC mode remain
+  unimplemented and throw a clear `AvifUnsupportedFeatureException` rather than a silently wrong
+  result. Performance is an explicitly aspirational, longer-term goal here (see
+  `LIBRARY_COMPARISON.md`) rather than a merge gate — only the YUV→RGB color conversion is vectorized
+  so far (`Vector128<double>`), with entropy decode, the transforms, intra prediction, and the in-loop
+  filters still scalar. Targeted correctness oracle is `ffmpeg` (test-only, never a shipped dependency)
+  rather than SkiaSharp, whose AVIF decode support is inconsistent across builds — confirmed absent in
+  this repo's pinned SkiaSharp version; correctness is instead verified via the AV1 spec's own
+  bitstream-conformance requirement checked across a real `libavif` test corpus, plus a pixel-hash
+  regression baseline that locks in known-good output before any future optimization pass.
+- Other formats are not yet implemented. The public API (`Image`, `AnimatedImage` for multi-frame formats
+  like GIF) is designed to support them without breaking changes when they're added. Codec selection is
+  internal — there's no format-specific type or registration step in the public API.
 
 ## Usage
 
