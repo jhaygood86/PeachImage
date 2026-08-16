@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Text;
 
 namespace PeachImage.Formats.Webp.Decoding;
 
@@ -27,7 +26,7 @@ internal static class WebpChunkReader
             throw new WebpDecodingException("Truncated WebP chunk header.");
         }
 
-        string fourCc = Encoding.ASCII.GetString(buffer[..4]);
+        string fourCc = System.Text.Encoding.ASCII.GetString(buffer[..4]);
         uint size = BinaryPrimitives.ReadUInt32LittleEndian(buffer[4..8]);
         header = new WebpChunkHeader(fourCc, size);
         return true;

@@ -31,3 +31,19 @@ public sealed class WebpDecodingException : WebpFormatException
     {
     }
 }
+
+/// <summary>Thrown when an <see cref="Image"/> cannot be encoded as WebP, either because its pixel format is unsupported or its dimensions exceed what VP8L can represent.</summary>
+public sealed class WebpEncodingException : WebpFormatException
+{
+    /// <summary>Initializes a new instance of <see cref="WebpEncodingException"/>.</summary>
+    public WebpEncodingException(string message)
+        : base(message)
+    {
+    }
+
+    /// <summary>Initializes a new instance of <see cref="WebpEncodingException"/> with an inner exception.</summary>
+    public WebpEncodingException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}

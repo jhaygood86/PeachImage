@@ -2,9 +2,10 @@ namespace PeachImage.Formats.Webp;
 
 /// <summary>
 /// The WebP codec. Format identity and header-sniffing live here, the single <see cref="IImageCodec"/>
-/// surface <see cref="Image"/> dispatches through; decode is a separate internal implementation detail
-/// (<see cref="WebpDecoder"/>) composed privately rather than exposed as its own abstraction. Decode-only
-/// for now — WebP encoding is planned but not yet implemented.
+/// surface <see cref="Image"/> dispatches through; decode and encode are separate internal implementation
+/// details (<see cref="WebpDecoder"/>/<see cref="WebpEncoder"/>) composed privately rather than exposed as
+/// their own abstractions. Encoding only ever produces the lossless (VP8L) bitstream for now — VP8 lossy
+/// encoding is a separate, much larger effort left for later.
 /// </summary>
 internal sealed class WebpCodec : IImageCodec
 {
@@ -37,7 +38,7 @@ internal sealed class WebpCodec : IImageCodec
     public bool CanDecode => true;
 
     /// <inheritdoc/>
-    public bool CanEncode => false;
+    public bool CanEncode => true;
 
     /// <inheritdoc/>
     public ImageInfo Identify(Stream stream) => WebpDecoder.Identify(stream);
@@ -46,6 +47,5 @@ internal sealed class WebpCodec : IImageCodec
     public Image Decode(Stream stream, DecoderOptions? options = null) => WebpDecoder.Decode(stream, options);
 
     /// <inheritdoc/>
-    public void Encode(Image image, Stream stream, EncoderOptions? options = null) =>
-        throw new NotSupportedException("WebP encoding is not yet implemented.");
+    public void Encode(Image image, Stream stream, EncoderOptions? options = null) => WebpEncoder.Encode(image, stream, options);
 }

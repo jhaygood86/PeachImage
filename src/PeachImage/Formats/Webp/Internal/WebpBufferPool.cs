@@ -26,4 +26,12 @@ internal static class WebpBufferPool
     /// elements = 32 MiB, matching <see cref="Shared"/>'s byte-oriented cap for consistency.
     /// </summary>
     public static ArrayPool<uint> SharedUInt32 { get; } = ArrayPool<uint>.Create(8 * 1024 * 1024, MaxArraysPerBucket);
+
+    /// <summary>
+    /// A separate pool for encode-only <c>int[]</c> scratch buffers -- currently <c>Vp8LMatchFinder</c>'s hash
+    /// table and hash-chain arrays, both sized to (or a small multiple of) the pixel count and discarded after
+    /// one use per image, the same large-transient-allocation pattern <see cref="SharedUInt32"/> exists for on
+    /// the decode side.
+    /// </summary>
+    public static ArrayPool<int> SharedInt32 { get; } = ArrayPool<int>.Create(8 * 1024 * 1024, MaxArraysPerBucket);
 }

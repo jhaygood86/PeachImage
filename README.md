@@ -26,7 +26,9 @@ Targets .NET 10. No native interop — every codec is managed code, using modern
   (median-cut palette quantization, optional Floyd-Steinberg dithering, animation) are implemented.
 - **WebP**: decode is implemented for both of WebP's bitstream codecs — VP8 (lossy) and VP8L
   (lossless) — including alpha (`ALPH` chunk / VP8L's own alpha) in the RIFF "simple" and "extended"
-  (non-animated) container formats. Animated WebP and encode are not yet implemented.
+  (non-animated) container formats. Encode currently produces the lossless (VP8L) bitstream only —
+  predictor-transform selection, palette/color-indexing detection, subtract-green, and a color cache
+  are all supported. Animated WebP and VP8 (lossy) encode are not yet implemented.
 - **AVIF**: decode is implemented for baseline still images — intra-frame AV1, the full in-loop filter
   chain (deblocking, CDEF, loop restoration), HEIF `grid` composite images, alpha via the auxiliary-item
   mechanism, and both 8-bit and 10-bit depth. Animated AVIF, film grain synthesis, gain maps, 12-bit

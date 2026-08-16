@@ -11,12 +11,6 @@ namespace PeachImage.Formats.Webp.Decoding;
 /// </summary>
 internal static class WebpContainerReader
 {
-    private const byte Vp8XIccBit = 0x20;
-    private const byte Vp8XAlphaBit = 0x10;
-    private const byte Vp8XExifBit = 0x08;
-    private const byte Vp8XXmpBit = 0x04;
-    private const byte Vp8XAnimationBit = 0x02;
-
     /// <summary>Reads the RIFF/WEBP container from <paramref name="stream"/>, collecting metadata chunks into <paramref name="metadata"/> as they're encountered.</summary>
     public static WebpContainerInfo Read(Stream stream, ImageMetadata metadata)
     {
@@ -148,8 +142,8 @@ internal static class WebpContainerReader
         }
 
         byte flags = data[0];
-        hasAlpha = (flags & Vp8XAlphaBit) != 0;
-        hasAnimation = (flags & Vp8XAnimationBit) != 0;
+        hasAlpha = (flags & Vp8XFlags.AlphaBit) != 0;
+        hasAnimation = (flags & Vp8XFlags.AnimationBit) != 0;
 
         // bytes[1..4) are reserved and MUST be 0 per spec, but real encoders occasionally leave stray bits set —
         // tolerated here rather than hard-failing, matching libwebp's own forward-compatible stance.
