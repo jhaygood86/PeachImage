@@ -41,13 +41,17 @@ internal static class Av1TileComposer
         // reading it (see AvifDecoder.Decode, which returns it via ReturnPlanes right after). A rented
         // array may be larger than requested, so every reader here and downstream must use the tracked
         // outWidths/outHeights, never Length -- see CopyRegion's own remarks for why that already had to
-        // be true regardless of pooling. Explicitly cleared to match `new int[]`'s zero-init: a source
-        // tile smaller than the declared output (a mismatched/reused grid tile item, or the last row/
-        // column of an overhanging grid) leaves copyW/copyH below outWidths/outHeights, so CopyRegion
-        // below does not necessarily write every element.
+        // be true regardless of pooling. Explicitly cleared to match `new int[]`'s zero-init -- but only
+        // when actually needed: a source tile smaller than the declared output (a mismatched/reused grid
+        // tile item, or the last row/column of an overhanging grid) leaves copyW/copyH below
+        // outWidths/outHeights, so CopyRegion below does not necessarily write every element. For the
+        // common single-tile case that's cheap to rule out upfront (copyW/copyH are already known before
+        // the copy runs), skipping a multi-megabyte clear entirely when the tile's own dimensions already
+        // cover the whole output.
         var outPlanes = new int[3][];
         var outWidths = new int[3];
         var outHeights = new int[3];
+        bool singleTile = gridRows == 1 && gridColumns == 1;
         for (int plane = 0; plane < numPlanes; plane++)
         {
             int subX = plane > 0 && seq.SubsamplingX ? 1 : 0;
@@ -56,10 +60,17 @@ internal static class Av1TileComposer
             outHeights[plane] = (outHeight + subY) >> subY;
             int length = outWidths[plane] * outHeights[plane];
             outPlanes[plane] = ArrayPool<int>.Shared.Rent(length);
-            Array.Clear(outPlanes[plane], 0, length);
+
+            bool fullyCovered = singleTile
+                && frames[0].PlaneWidths[plane] >= outWidths[plane]
+                && frames[0].PlaneHeights[plane] >= outHeights[plane];
+            if (!fullyCovered)
+            {
+                Array.Clear(outPlanes[plane], 0, length);
+            }
         }
 
-        if (gridRows == 1 && gridColumns == 1)
+        if (singleTile)
         {
             var single = frames[0];
             for (int plane = 0; plane < numPlanes; plane++)

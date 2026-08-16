@@ -1,3 +1,5 @@
+using System.Runtime.Intrinsics;
+
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
 /// <summary>
@@ -715,13 +717,27 @@ internal static class Av1InverseTransform
             }
         }
 
+        // residual[(i*w)+j] for i in [0,h), j in [0,w) is exactly the flat range [0, h*w) in row-major
+        // order, so this is a single unconditional elementwise clamp over the whole buffer -- no per-row
+        // structure to preserve -- vectorizable as one flat pass regardless of w/h individually.
         int colBound = 1 << (colClampRange - 1);
-        for (int i = 0; i < h; i++)
+        int total = h * w;
+        int k = 0;
+        if (Vector256.IsHardwareAccelerated)
         {
-            for (int j = 0; j < w; j++)
+            var lo = Vector256.Create(-colBound);
+            var hi = Vector256.Create(colBound - 1);
+            for (; k + 8 <= total; k += 8)
             {
-                residual[(i * w) + j] = Math.Clamp(residual[(i * w) + j], -colBound, colBound - 1);
+                var v = Vector256.LoadUnsafe(ref residual[k]);
+                var clamped = Vector256.Min(Vector256.Max(v, lo), hi);
+                clamped.StoreUnsafe(ref residual[k]);
             }
+        }
+
+        for (; k < total; k++)
+        {
+            residual[k] = Math.Clamp(residual[k], -colBound, colBound - 1);
         }
 
         var tCol = new int[h];

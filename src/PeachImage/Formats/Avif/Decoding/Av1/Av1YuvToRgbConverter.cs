@@ -120,6 +120,16 @@ internal static class Av1YuvToRgbConverter
         var cLoVec = Vector128.Create(cLo);
         var cRangeVec = Vector128.Create(cRange);
 
+        var twoKr256 = Vector256.Create(2 * (1 - kr));
+        var twoKb256 = Vector256.Create(2 * (1 - kb));
+        var krVec256 = Vector256.Create(kr);
+        var kbVec256 = Vector256.Create(kb);
+        var kgVec256 = Vector256.Create(kg);
+        var yLoVec256 = Vector256.Create(yLo);
+        var yRangeVec256 = Vector256.Create(yRange);
+        var cLoVec256 = Vector256.Create(cLo);
+        var cRangeVec256 = Vector256.Create(cRange);
+
         for (int row = 0; row < outHeight; row++)
         {
             int uvRow = row >> subY;
@@ -128,6 +138,66 @@ internal static class Av1YuvToRgbConverter
             int uvRowBaseU = uvRow * uStride;
             int uvRowBaseV = uvRow * vStride;
             int col = 0;
+
+            // 4-wide Vector256<double> fast path for the non-identity color-matrix case, falling back to
+            // 2-wide Vector128<double> and then scalar for the remainder. AVX2 (this repo's baseline x64
+            // target) double arithmetic is bit-identical to scalar double arithmetic on the same hardware
+            // regardless of vector width, so widening from 2 to 4 lanes is a pure speedup with no new
+            // precision divergence to verify -- same reasoning that already justified the 2-wide path.
+            if (!identity && Vector256.IsHardwareAccelerated)
+            {
+                for (; col + 3 < outWidth; col += 4)
+                {
+                    var ySamples = Vector256.Create((double)yPlane[rowBase + col], yPlane[rowBase + col + 1], yPlane[rowBase + col + 2], yPlane[rowBase + col + 3]);
+                    var uSamples = Vector256.Create((double)uPlane[uvRowBaseU + (col >> subX)], uPlane[uvRowBaseU + ((col + 1) >> subX)], uPlane[uvRowBaseU + ((col + 2) >> subX)], uPlane[uvRowBaseU + ((col + 3) >> subX)]);
+                    var vSamples = Vector256.Create((double)vPlane[uvRowBaseV + (col >> subX)], vPlane[uvRowBaseV + ((col + 1) >> subX)], vPlane[uvRowBaseV + ((col + 2) >> subX)], vPlane[uvRowBaseV + ((col + 3) >> subX)]);
+
+                    var yn = (ySamples - yLoVec256) / yRangeVec256;
+                    var cbn = (uSamples - cLoVec256) / cRangeVec256;
+                    var crn = (vSamples - cLoVec256) / cRangeVec256;
+
+                    var r = yn + (twoKr256 * crn);
+                    var b = yn + (twoKb256 * cbn);
+                    var g = (yn - (krVec256 * r) - (kbVec256 * b)) / kgVec256;
+
+                    int channelStride = channels * bytesPerChannel;
+                    int idx0 = ((row * outWidth) + col) * channelStride;
+                    WriteChannel(idx0, ClampToRange(r[0], outMax));
+                    WriteChannel(idx0 + bytesPerChannel, ClampToRange(g[0], outMax));
+                    WriteChannel(idx0 + (2 * bytesPerChannel), ClampToRange(b[0], outMax));
+                    if (hasAlpha)
+                    {
+                        WriteChannel(idx0 + (3 * bytesPerChannel), ScaleSample(alphaPlane![alphaRowBase + col], srcMax, outMax));
+                    }
+
+                    int idx1 = idx0 + channelStride;
+                    WriteChannel(idx1, ClampToRange(r[1], outMax));
+                    WriteChannel(idx1 + bytesPerChannel, ClampToRange(g[1], outMax));
+                    WriteChannel(idx1 + (2 * bytesPerChannel), ClampToRange(b[1], outMax));
+                    if (hasAlpha)
+                    {
+                        WriteChannel(idx1 + (3 * bytesPerChannel), ScaleSample(alphaPlane![alphaRowBase + col + 1], srcMax, outMax));
+                    }
+
+                    int idx2 = idx1 + channelStride;
+                    WriteChannel(idx2, ClampToRange(r[2], outMax));
+                    WriteChannel(idx2 + bytesPerChannel, ClampToRange(g[2], outMax));
+                    WriteChannel(idx2 + (2 * bytesPerChannel), ClampToRange(b[2], outMax));
+                    if (hasAlpha)
+                    {
+                        WriteChannel(idx2 + (3 * bytesPerChannel), ScaleSample(alphaPlane![alphaRowBase + col + 2], srcMax, outMax));
+                    }
+
+                    int idx3 = idx2 + channelStride;
+                    WriteChannel(idx3, ClampToRange(r[3], outMax));
+                    WriteChannel(idx3 + bytesPerChannel, ClampToRange(g[3], outMax));
+                    WriteChannel(idx3 + (2 * bytesPerChannel), ClampToRange(b[3], outMax));
+                    if (hasAlpha)
+                    {
+                        WriteChannel(idx3 + (3 * bytesPerChannel), ScaleSample(alphaPlane![alphaRowBase + col + 3], srcMax, outMax));
+                    }
+                }
+            }
 
             // 2-wide Vector128<double> fast path for the non-identity color-matrix case: SSE2 (always
             // available on x64) double arithmetic is bit-identical to scalar double arithmetic on the same

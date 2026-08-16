@@ -272,12 +272,12 @@ benchmark.
 
 | Scenario | PeachImage | `ffmpeg` (process-spawn, context only) | Allocated (PeachImage) |
 |---|---:|---:|---:|
-| Photographic, 8-bit 4:2:0 | 145.1 ms | 68.6 ms | 17.8 MB |
-| Photographic, 8-bit 4:2:0 + alpha | 161.2 ms | — | 19.8 MB |
-| Small image (32×24) | 115.0 µs | — | 213 KB |
+| Photographic, 8-bit 4:2:0 | 140.9 ms | 68.6 ms | 17.8 MB |
+| Photographic, 8-bit 4:2:0 + alpha | 159.4 ms | — | 19.8 MB |
+| Small image (32×24) | 113.4 µs | — | 213 KB |
 
-PeachImage is roughly **2.1×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario — down from
-an initial 6.1× after five profile-guided passes (below), and now within the same range as this repo's
+PeachImage is roughly **2.05×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario — down from
+an initial 6.1× after six profile-guided passes (below), and now within the same range as this repo's
 more mature codecs' own remaining gaps (JPEG 1.13×–1.30×, WebP 1.15×–2.13×). Per the project plan,
 AV1/AVIF performance is an explicitly aspirational, long-term goal here, not a merge gate the way it is
 for the more mature formats above — WebP's own optimization arc (4.11× → 2.13× on its worst scenario,
@@ -462,8 +462,6 @@ cut `CdefFilter`'s own self-time from 45% to under 10% of the total (roughly a 7
 specific hotspot) and took the 1080p scenario from 253.8 ms to **145.1 ms** (43%) — allocation was
 unchanged (17.8 MB), as expected for a pure CPU-time change.
 
-#### Remaining gap
-
 Re-profiling afterward surfaced `Av1TileDecoder.Coeffs` (coefficient/entropy decode) as the new largest
 single cost at 25% of self-time — expected, and not a good target: like WebP's own entropy decode, it's
 an inherently sequential, adaptive-CDF-driven symbol stream, not parallelizable across lanes. Its one
@@ -474,15 +472,68 @@ current reverse-scan pass, so the clear is load-bearing, not redundant — remov
 given the risk of silent, hard-to-detect corruption for a win that would need proving from spec details
 rather than measurement.
 
-The inverse transform's butterfly network (`InverseDct`/`Inverse2D`/`InverseAdst8` and friends, ~24%
-combined) remains the next real CPU-time target. A win there would need batching multiple independent
-transforms across SIMD lanes rather than vectorizing one transform's inherently-sequential butterfly
-chain (AV1's inverse DCT is a size-parameterized 31-step network, not the single fixed 4×4 kernel WebP's
-own biggest DCT win vectorized) — a materially larger undertaking than the CDEF pass, deferred rather
-than attempted without profiling data to justify the specific approach. `CdefDirection` (the direction
-search preceding `CdefFilter`, ~5% of self-time) is a smaller, structurally similar vectorization
-candidate not yet attempted — its cost-accumulation pattern indexes diagonally rather than row-wise,
-making it a less direct fit for the row-at-a-time approach used here.
+### Sixth pass: smaller, lower-risk wins around the transform and entropy paths
+
+With the two biggest levers (CDEF, allocation) spent, this pass swept for the same two patterns that had
+worked before — redundant per-call computation, and flat elementwise loops safe to vectorize — without
+attempting the still-deferred full transform-batching rewrite:
+
+- **`GetCoeffBaseCtx` recomputed `ComputeTxType` on every coefficient for chroma planes**, even though
+  `Coeffs()` had already computed the same value once and passed it to the sibling `GetCoeffBrCtx` call
+  a few lines away — it just wasn't threaded through to `GetCoeffBaseCtx` too. Worse, the recomputed
+  value was discarded unused entirely on the `isEob` path, which never reads it. Fixed by passing the
+  already-computed `txType` in as a parameter instead of recomputing it internally.
+- **`Av1TileDecoder.Reconstruct`'s final add-residual-then-clamp step** is a plain per-row contiguous
+  operation for the (overwhelmingly common) non-FLIPADST case — vectorized with `Vector256<int>`,
+  falling back to the original scalar loop only when a flip makes the destination a reversed-stride
+  write that a single contiguous SIMD store can't express.
+- **`Inverse2D`'s clamp between the row and column passes** turned out to have no per-row structure at
+  all — `residual[(i*w)+j]` for `i` in `[0,h)`, `j` in `[0,w)` is just the flat range `[0, h*w)` in
+  row-major order, so the nested loop collapsed to one unconditional elementwise clamp over the whole
+  buffer, vectorized the same way.
+- **The YUV→RGB converter's non-identity fast path was only 2-wide (`Vector128<double>`)** — widened to
+  4-wide (`Vector256<double>`) first, using a runtime-indexed lane-extraction loop for the packed-pixel
+  write; that regressed slightly (worse than not widening at all) because indexing a vector by a
+  non-constant lane number doesn't get the same codegen as indexing by a compile-time constant. Unrolled
+  back into four explicit `r[0]`/`r[1]`/`r[2]`/`r[3]`-style accesses, matching the already-proven 2-wide
+  style, which fixed it.
+- **`Av1TileComposer`'s output-canvas clear was unconditional**, even though it's only needed when a
+  source tile doesn't fully cover the destination (the same mismatched-tile-size case the pooling pass's
+  `Array.Clear` fixes exist for). For the common single-tile case, whether the tile fully covers the
+  output is known before the copy runs, so the multi-megabyte clear is now skipped whenever it
+  provably isn't needed — re-verified against the exact adversarial corpus file
+  (`color_grid_alpha_grid_tile_shared_in_dimg.avif`) that exercises the case where it's still required.
+
+Individually each of these was a fraction of a percent to ~1%; together they took the 1080p scenario
+from 145.1 ms to **140.9 ms**. Verified bit-identical via `AvifDecodeHashTests`, with extra repeated runs
+of the corpus suite specifically for the two changes touching the same buffer-coverage logic the
+pooling pass's zero-init bug lived in.
+
+#### Remaining gap
+
+The inverse transform's butterfly network (`InverseDct`/`Inverse2D`/`InverseAdst8` and friends, ~22%
+combined) remains the largest real CPU-time target, and the reasoning for deferring it hasn't changed:
+a genuine win needs batching multiple independent row/column transforms across SIMD lanes (the row pass
+transforms `h` independent rows through the identical butterfly network — a real, structurally-available
+batching axis, not a hypothetical one) rather than vectorizing one transform's inherently-sequential
+stage chain. What makes this harder than the CDEF pass isn't the vectorization itself (integer SIMD is
+still bit-exact) but the sheer length and intricacy of the network being transcribed: `InverseDct` alone
+is a 31-step, size-parameterized sequence of `B()`/`H()` calls with a different index/angle pair at
+nearly every step, and `B()`'s intermediate products are wide enough that a faithful vectorized version
+needs 4-lane `Vector256<long>` (matching the existing scalar `long` arithmetic's overflow safety) rather
+than 8-lane `Vector256<int>`, for less parallelism per instruction than CDEF's kernel got. Attempting
+this without being able to verify every one of those steps with high confidence risks exactly the kind
+of silent, hard-to-detect corruption the rest of this work has been careful to avoid — still deferred,
+not attempted, pending a pass with time budgeted specifically for that verification burden.
+
+`CdefDirection` (the direction search preceding `CdefFilter`, ~5% of self-time) remains a smaller,
+structurally similar vectorization candidate not yet attempted — its cost-accumulation pattern indexes
+diagonally rather than row-wise (some of its 8 running sums *are* contiguous-in-column for a fixed row
+and would vectorize cleanly, others index by `j/2` or reduce to a single scalar per row), making it a
+partial, more intricate fit for the row-at-a-time approach used in `CdefFilter` rather than a direct
+port. `Av1DeblockingFilter`'s per-edge sample filter (~6% combined) was inspected and not pursued: its
+mask/filter-size selection is heavily data-dependent per edge-crossing line, the kind of control-flow
+divergence that SIMD lanes handle poorly without a larger restructuring.
 
 ## Summary
 
@@ -492,7 +543,7 @@ making it a less direct fit for the row-at-a-time approach used here.
 | BMP | 0.40×–1.05× | no baseline (PeachImage-only) |
 | PNG | 1.08×–1.63× | 0.65×–1.27× |
 | WebP | 1.15×–2.13× | not yet implemented |
-| AVIF | ~2.1× vs. `ffmpeg` (no SkiaSharp baseline available) | not yet implemented |
+| AVIF | ~2.05× vs. `ffmpeg` (no SkiaSharp baseline available) | not yet implemented |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
 and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the

@@ -1,3 +1,5 @@
+using System.Runtime.Intrinsics;
+
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
 /// <summary>
@@ -1598,6 +1600,45 @@ internal sealed class Av1TileDecoder
         int stride = _planeWidths[plane];
         int maxSample = (1 << _seq.BitDepth) - 1;
 
+        // The common case (no FLIPADST-involving transform type -- the overwhelming majority of blocks)
+        // reduces to a plain contiguous add-then-clamp per row, vectorizable directly: unlike the flipped
+        // case below, source (_reconResidual) and destination (_planes) indices advance together, so no
+        // reversal is needed. Kept as a separate fast path rather than folding flip handling into the
+        // vectorized loop, since a flip turns the destination into a reversed-stride write that Vector256
+        // can't express as a single contiguous store.
+        if (!flipUd && !flipLr)
+        {
+            var destPlane = _planes[plane];
+            var zeroVec = Vector256<int>.Zero;
+            var maxVec = Vector256.Create(maxSample);
+
+            for (int i = 0; i < h; i++)
+            {
+                int rowBase = ((y + i) * stride) + x;
+                int resBase = i * w;
+                int j = 0;
+
+                if (Vector256.IsHardwareAccelerated)
+                {
+                    for (; j + 8 <= w; j += 8)
+                    {
+                        var pred = Vector256.LoadUnsafe(ref destPlane[rowBase + j]);
+                        var res = Vector256.LoadUnsafe(ref _reconResidual[resBase + j]);
+                        var clamped = Vector256.Min(Vector256.Max(pred + res, zeroVec), maxVec);
+                        clamped.StoreUnsafe(ref destPlane[rowBase + j]);
+                    }
+                }
+
+                for (; j < w; j++)
+                {
+                    int idx = rowBase + j;
+                    destPlane[idx] = Math.Clamp(destPlane[idx] + _reconResidual[resBase + j], 0, maxSample);
+                }
+            }
+
+            return;
+        }
+
         for (int i = 0; i < h; i++)
         {
             int yy = flipUd ? h - i - 1 : i;
@@ -1665,12 +1706,12 @@ internal sealed class Av1TileDecoder
                 int level;
                 if (c == eob - 1)
                 {
-                    int ctx = GetCoeffBaseCtx(txSz, plane, x4, y4, pos, c, isEob: true);
+                    int ctx = GetCoeffBaseCtx(txSz, plane, x4, y4, pos, c, txType, isEob: true);
                     level = _s.ReadSymbol(_cdf.CoeffBaseEob[txSzCtx][ptype][ctx - Av1CoeffTables.SigCoefContexts + Av1CoeffTables.SigCoefContextsEob]) + 1;
                 }
                 else
                 {
-                    int ctx = GetCoeffBaseCtx(txSz, plane, x4, y4, pos, c, isEob: false);
+                    int ctx = GetCoeffBaseCtx(txSz, plane, x4, y4, pos, c, txType, isEob: false);
                     level = _s.ReadSymbol(_cdf.CoeffBase[txSzCtx][ptype][ctx]);
                 }
 
@@ -1943,13 +1984,14 @@ internal sealed class Av1TileDecoder
     }
 
     /// <summary><c>coeff_base</c>/<c>coeff_base_eob</c>'s shared context derivation, <c>get_coeff_base_ctx()</c> (spec §8.3.2).</summary>
-    private int GetCoeffBaseCtx(int txSz, int plane, int blockX, int blockY, int pos, int c, bool isEob)
+    private int GetCoeffBaseCtx(int txSz, int plane, int blockX, int blockY, int pos, int c, int txType, bool isEob)
     {
+        _ = blockX;
+        _ = blockY;
         int adjTxSz = Av1CoeffTables.AdjustedTxSize[txSz];
         int bwl = Av1TxDimensions.WidthLog2[adjTxSz];
         int width = 1 << bwl;
         int height = Av1TxDimensions.Height[adjTxSz];
-        int txType = plane == 0 ? _planeTxType : ComputeTxType(plane, txSz, blockX, blockY);
 
         if (isEob)
         {
