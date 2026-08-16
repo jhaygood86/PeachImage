@@ -28,5 +28,17 @@ internal sealed class Vp8LColorCache
     /// <summary>Returns the ARGB value stored at cache index <paramref name="index"/> (already decoded from the bitstream — not a hash lookup).</summary>
     public uint Lookup(int index) => _entries[index];
 
+    /// <summary>
+    /// Encoder-only: reports whether <paramref name="argb"/>'s hash slot already holds that exact value —
+    /// i.e. whether encoding it as a cache-index token (instead of a literal) would round-trip correctly.
+    /// Does not insert; callers still call <see cref="Insert"/> themselves afterward, matching the decoder's
+    /// own insert-on-every-pixel invariant.
+    /// </summary>
+    public bool TryGetHitIndex(uint argb, out int index)
+    {
+        index = Hash(argb);
+        return _entries[index] == argb;
+    }
+
     private int Hash(uint argb) => (int)((argb * HashMultiplier) >> _hashShift);
 }

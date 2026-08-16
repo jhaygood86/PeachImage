@@ -46,4 +46,26 @@ internal static class Vp8LPixelMath
         uint redAndBlue = (a & 0x00FF00FFu) + (b & 0x00FF00FFu);
         return (alphaAndGreen & 0xFF00FF00u) | (redAndBlue & 0x00FF00FFu);
     }
+
+    /// <summary>
+    /// Encoder-only: subtracts two packed ARGB values channel-by-channel, mod 256, with no borrow between
+    /// channels — the inverse of <see cref="AddWrapping"/>, needed by the predictor and color-indexing
+    /// transforms' forward (encode) directions.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately NOT <see cref="AddWrapping"/>'s two-packed-lane-at-a-time trick: that trick relies on a
+    /// carry into an all-zero "gutter" byte (the unused channel between two packed lanes) dying out after
+    /// setting exactly one bit, since <c>0 + 0 + carry</c> never itself overflows. Subtraction has no such
+    /// property — a borrow into an all-zero gutter byte (<c>0 - 0 - borrow</c>) always re-borrows, so it
+    /// ripples all the way through the gutter into the next real channel, silently corrupting it. Explicit
+    /// per-byte subtraction sidesteps that asymmetry entirely.
+    /// </remarks>
+    public static uint SubtractWrapping(uint a, uint b)
+    {
+        byte r0 = (byte)((byte)a - (byte)b);
+        byte r1 = (byte)((byte)(a >> 8) - (byte)(b >> 8));
+        byte r2 = (byte)((byte)(a >> 16) - (byte)(b >> 16));
+        byte r3 = (byte)((byte)(a >> 24) - (byte)(b >> 24));
+        return r0 | ((uint)r1 << 8) | ((uint)r2 << 16) | ((uint)r3 << 24);
+    }
 }

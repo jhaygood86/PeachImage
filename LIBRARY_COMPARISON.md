@@ -83,8 +83,9 @@ SkiaSharp's encoder doesn't support BMP output, so encode has no SkiaSharp basel
 
 ## WebP
 
-Decode-only — encode and animation are not yet implemented. Covers both of WebP's bitstream codecs
-(VP8 lossy, VP8L lossless), with and without alpha, plus a small-image scenario.
+Decode covers both of WebP's bitstream codecs (VP8 lossy, VP8L lossless), with and without alpha,
+plus a small-image scenario. Encode currently produces the lossless (VP8L) bitstream only — VP8
+(lossy) encode and animation are not yet implemented.
 
 ### Decode
 
@@ -96,6 +97,13 @@ Decode-only — encode and animation are not yet implemented. Covers both of Web
 | Lossy, Alpha | 32.48 ms | 19.13 ms | **1.70×** | 11.1 MB |
 | Lossless, Alpha | 44.03 ms | 24.86 ms | **1.77×** | 13.0 MB |
 | Small image (32×24) | 14.21 µs | 12.34 µs | **1.15×** | 44 KB |
+
+### Encode (lossless)
+
+`WebpEncodeBenchmarks` covers the same photographic/alpha/graphic/small-image scenarios against
+SkiaSharp's lossless WebP encoder; results haven't been captured here yet — run the benchmark
+project locally (`dotnet run -c Release --project bench/PeachImage.Benchmarks --filter "*Webp*"`)
+to populate this table.
 
 ## AVIF
 
@@ -123,7 +131,7 @@ PeachImage is roughly **2.05×** `ffmpeg`'s process-spawn-inclusive time on the 
 | JPEG | 1.13×–1.30× | 1.20×–1.43× |
 | BMP | 0.40×–1.05× | no baseline (PeachImage-only) |
 | PNG | 1.08×–1.63× | 0.65×–1.27× |
-| WebP | 1.15×–2.13× | not yet implemented |
+| WebP | 1.15×–2.13× | not yet benchmarked (lossless-only encode implemented) |
 | AVIF | ~2.05× vs. `ffmpeg` (no SkiaSharp baseline available) | not yet implemented |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
