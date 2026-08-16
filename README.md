@@ -9,76 +9,74 @@ Targets .NET 10. No native interop — every codec is managed code, using modern
 
 - **JPEG**: decode (baseline sequential + progressive, grayscale/YCbCr/RGB/CMYK/YCCK, all standard
   chroma subsampling, restart markers) and encode (baseline sequential, grayscale/YCbCr) are implemented.
-  SIMD-accelerated IDCT/FDCT and color conversion kernels are in place
-  (`System.Runtime.Intrinsics.Vector128`/`Vector256`, dispatched at runtime by hardware support).
 - **BMP**: decode (OS/2 1.x/2.x and Windows BITMAPINFOHEADER through BITMAPV5HEADER variants, 1/4/8bpp
   indexed color, 16/24/32bpp direct color, RLE4/RLE8 compression, arbitrary BI_BITFIELDS/BI_ALPHABITFIELDS
   masks) and encode (24bpp truecolor, 8bpp indexed grayscale with optional RLE8, 32bpp with an explicit
   alpha channel via BITMAPV4HEADER + BI_BITFIELDS) are implemented, including explicit alpha-channel
   support on both sides.
 - **PNG**: decode and encode for all 5 color types (grayscale, truecolor, palette, grayscale+alpha,
-  truecolor+alpha) at every valid bit depth (1/2/4/8/16 — including via new `Gray16`/`Rgb48`/`Rgba64`
+  truecolor+alpha) at every valid bit depth (1/2/4/8/16 — including via `Gray16`/`Rgb48`/`Rgba64`
   pixel formats), Adam7 interlacing, palette + `tRNS` transparency (both per-entry and single-color-key),
-  optional opt-in gamma correction (`PngDecoderOptions.ScreenGamma`, mirroring libpng's
-  `png_set_gamma`), and the common ancillary chunks (`gAMA`/`cHRM`/`sRGB`/`iCCP`/`pHYs`/`tEXt`/`zTXt`/`iTXt`/`tIME`/`bKGD`).
-  Encoding doesn't yet build an indexed palette from an arbitrary truecolor source (no automatic
-  quantization) — non-palette sources always encode as grayscale/truecolor(+alpha).
+  optional opt-in gamma correction (`PngDecoderOptions.ScreenGamma`), and the common ancillary chunks
+  (`gAMA`/`cHRM`/`sRGB`/`iCCP`/`pHYs`/`tEXt`/`zTXt`/`iTXt`/`tIME`/`bKGD`). Encoding doesn't yet build an
+  indexed palette from an arbitrary truecolor source — non-palette sources always encode as
+  grayscale/truecolor(+alpha).
 - **GIF**: decode (GIF87a/GIF89a, interlacing, transparency, multi-frame animation with per-frame
   disposal methods and the NETSCAPE2.0 loop count via `AnimatedImage.Load`) and encode
   (median-cut palette quantization, optional Floyd-Steinberg dithering, animation) are implemented.
 - **WebP**: decode is implemented for both of WebP's bitstream codecs — VP8 (lossy) and VP8L
   (lossless) — including alpha (`ALPH` chunk / VP8L's own alpha) in the RIFF "simple" and "extended"
-  (non-animated) container formats. Animated WebP and encode are not yet implemented. WebP decode is
-  the furthest of any format here from the 10%-of-SkiaSharp target on large images (see
-  `LIBRARY_COMPARISON.md`), though a profile-guided pass has closed roughly a third of that gap; what
-  remains is concentrated in entropy decode, which is inherently sequential.
-- **AVIF**: decode is implemented for baseline still images — intra-frame AV1 (partition tree, mode
-  info, coefficient decode, dequantization, inverse transforms, intra prediction including CFL), the
-  full in-loop filter chain (deblocking, CDEF, loop restoration including both Wiener and self-guided
-  SGRPROJ), HEIF `grid` composite images, alpha via the auxiliary-item mechanism, and both 8-bit and
-  10-bit depth (proportionally scaled to `Rgb48`/`Rgba64`/`Gray16`, not left-shift replication).
-  Animated AVIF, film grain synthesis, gain maps, 12-bit depth, and palette/IntraBC mode remain
-  unimplemented and throw a clear `AvifUnsupportedFeatureException` rather than a silently wrong
-  result. Performance is an explicitly aspirational, longer-term goal here (see
-  `LIBRARY_COMPARISON.md`) rather than a merge gate — six profile-guided passes (CDEF's per-tap
-  availability check skipped for the common interior-block case; a redundant full-buffer clear in
-  reconstruction removed; the inverse transform's `cos128`/`sin128`/`brev` computations replaced with
-  lookup tables; a dedicated allocation pass reusing scratch buffers instead of reallocating them per
-  block; an `ArrayPool`-backed buffer pooling pass threaded through the whole filter pipeline; CDEF's
-  own directional filtering vectorized with `Vector256<int>`/`Vector128<int>`; and a follow-up sweep for
-  smaller redundant-computation and flat-loop vectorization wins around reconstruction, the transform,
-  entropy-decode context lookups, and the YUV converter) have together cut per-decode allocation on a
-  1080p photo from 175.5 MB to 17.8 MB and its time from 418 ms to 141 ms — roughly 2.05× `ffmpeg`'s
-  time, in the same range as this repo's mature codecs' own remaining gaps. The YUV→RGB color
-  conversion is vectorized (`Vector128<double>`/`Vector256<double>`) too; the inverse transform's own
-  butterfly-network arithmetic, entropy decode, and CDEF's direction search are still scalar — entropy
-  decode is inherently sequential and not a realistic target, and the inverse transform's remaining gap
-  needs batching independent row/column transforms across SIMD lanes, a materially larger, higher-risk
-  undertaking documented but deliberately deferred in `LIBRARY_COMPARISON.md`. Targeted correctness
-  oracle is `ffmpeg` (test-only, never a shipped dependency)
-  rather than SkiaSharp, whose AVIF decode support is inconsistent across builds — confirmed absent in
-  this repo's pinned SkiaSharp version; correctness is instead verified via the AV1 spec's own
-  bitstream-conformance requirement checked across a real `libavif` test corpus, plus a pixel-hash
-  regression baseline that locks in known-good output before any future optimization pass.
+  (non-animated) container formats. Animated WebP and encode are not yet implemented.
+- **AVIF**: decode is implemented for baseline still images — intra-frame AV1, the full in-loop filter
+  chain (deblocking, CDEF, loop restoration), HEIF `grid` composite images, alpha via the auxiliary-item
+  mechanism, and both 8-bit and 10-bit depth. Animated AVIF, film grain synthesis, gain maps, 12-bit
+  depth, and palette/IntraBC mode remain unimplemented and throw a clear
+  `AvifUnsupportedFeatureException` rather than a silently wrong result.
 - Other formats are not yet implemented. The public API (`Image`, `AnimatedImage` for multi-frame formats
   like GIF) is designed to support them without breaking changes when they're added. Codec selection is
   internal — there's no format-specific type or registration step in the public API.
 
+See [LIBRARY_COMPARISON.md](LIBRARY_COMPARISON.md) for performance numbers against SkiaSharp.
+
 ## Usage
+
+### Single-frame images
+
+The format is auto-detected from the file's contents for every operation below — no setup call needed.
 
 ```csharp
 using PeachImage;
 using PeachImage.Formats.Jpeg;
 
-// The format is auto-detected from the file's contents — no setup call needed.
-using var image = Image.Load("photo.jpg");
+// Load, inspect, and convert between formats.
+using var image = Image.Load("photo.webp");
+Console.WriteLine($"{image.Width}x{image.Height} {image.PixelFormat}");
 
 using var output = File.Create("resaved.jpg");
 image.Save(output, "jpeg", new JpegEncoderOptions { Quality = 85 });
 ```
 
-Multi-frame formats (GIF today) use `AnimatedImage` instead, the same way across every format that
-supports it:
+```csharp
+using PeachImage;
+
+// Read dimensions/format without decoding pixel data.
+using var stream = File.OpenRead("photo.avif");
+ImageInfo info = Image.Identify(stream);
+Console.WriteLine($"{info.Width}x{info.Height} {info.PixelFormat} ({info.FormatName})");
+```
+
+```csharp
+using PeachImage;
+
+// Zero-copy access to the decoded pixel buffer.
+using var image = Image.Load("photo.png");
+Span<byte> pixels = image.GetPixelSpan();
+Span<byte> firstRow = image.GetRowSpan(0);
+```
+
+### Animated images
+
+Multi-frame formats (GIF today) use `AnimatedImage` instead, with the same load/save shape:
 
 ```csharp
 using PeachImage;
@@ -86,8 +84,13 @@ using PeachImage.Formats.Gif;
 
 using var animation = AnimatedImage.Load("clip.gif");
 
+foreach (AnimatedImageFrame frame in animation.Frames)
+{
+    Console.WriteLine($"{frame.Duration.TotalMilliseconds}ms, disposal={frame.Disposal}");
+}
+
 using var output = File.Create("resaved.gif");
-animation.Save(output, "gif", new GifEncoderOptions { MaxColors = 128 });
+animation.Save(output, "gif", new GifEncoderOptions { MaxColors = 128, Dither = true });
 ```
 
 ## Building & testing
@@ -111,11 +114,9 @@ failing.
 dotnet run -c Release --project bench/PeachImage.Benchmarks
 ```
 
-Compares PeachImage's JPEG/BMP/PNG decode and encode throughput against SkiaSharp (a dev-only dependency
-of the benchmark project only — never referenced by the shipped library), a single consistent baseline
-across all three formats. BMP encode has no real-world baseline here — SkiaSharp's encoder doesn't support
-BMP output — so `BmpEncodeBenchmarks` tracks PeachImage's own throughput only. See
-[LIBRARY_COMPARISON.md](LIBRARY_COMPARISON.md) for a summary of the latest results.
+Compares PeachImage's decode/encode throughput against SkiaSharp (a dev-only dependency of the
+benchmark project only — never referenced by the shipped library). See
+[LIBRARY_COMPARISON.md](LIBRARY_COMPARISON.md) for the latest results.
 
 ## License
 
