@@ -9,5 +9,10 @@ if (args.Length > 0 && string.Equals(args[0], "profile", StringComparison.Ordina
     return WebpProfileHarness.Run(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "avif-profile", StringComparison.OrdinalIgnoreCase))
+{
+    return AvifProfileHarness.Run(args);
+}
+
 BenchmarkSwitcher.FromAssembly(Assembly.GetExecutingAssembly()).Run(args);
 return 0;

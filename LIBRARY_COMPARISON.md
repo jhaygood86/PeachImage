@@ -272,23 +272,61 @@ benchmark.
 
 | Scenario | PeachImage | `ffmpeg` (process-spawn, context only) | Allocated (PeachImage) |
 |---|---:|---:|---:|
-| Photographic, 8-bit 4:2:0 | 418.4 ms | 68.6 ms | 191.8 MB |
-| Photographic, 8-bit 4:2:0 + alpha | 438.2 ms | — | 198.4 MB |
+| Photographic, 8-bit 4:2:0 | 298.5 ms | 68.6 ms | 191.8 MB |
+| Photographic, 8-bit 4:2:0 + alpha | 316.4 ms | — | 198.4 MB |
 | Small image (32×24) | 149.2 µs | — | 330 KB |
 
-PeachImage is roughly **6.1×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario — a wide
-gap, and an expected one at this stage: only one kernel (the YUV→RGB color conversion's non-identity
-matrix path) is vectorized so far (`Vector128<double>`, 2 lanes, bit-identical to the scalar path by
-construction — SSE2 double arithmetic matches scalar double arithmetic exactly on the same hardware,
-so this is a pure speedup with no separate correctness burden). Entropy/symbol decode, the partition
-tree walk, coefficient decode, dequantization, the inverse transforms, intra prediction, and all
-three in-loop filters (deblock, CDEF, self-guided/Wiener restoration) remain scalar. Per the project
-plan, AV1/AVIF performance is an explicitly aspirational, long-term goal here, not a merge gate the
-way it is for the more mature formats above — WebP's own optimization arc (4.11× → 2.13× on its
-worst scenario, over several profile-guided passes) is the expected shape of future work, not
-something achieved in one pass. The highest-value next targets, by the same reasoning that guided
-WebP's own profiling: the inverse transform (WebP's single largest win came from vectorizing its
-DCT), directional intra prediction's edge interpolation, and CDEF's direction search.
+PeachImage is roughly **4.4×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario — still a
+real gap, and an expected one at this stage, but down from an initial 6.1× after one profile-guided
+pass (below). Per the project plan, AV1/AVIF performance is an explicitly aspirational, long-term goal
+here, not a merge gate the way it is for the more mature formats above — WebP's own optimization arc
+(4.11× → 2.13× on its worst scenario, over several profile-guided passes) is the expected shape of
+this work, not something achieved in one pass.
+
+### What the profile actually showed
+
+A `dotnet-trace` sampling profile of the 1080p scenario (`PeachImage.Benchmarks.exe avif-profile
+photo420 60`, a bare decode-in-a-loop harness so the trace is entirely decoder frames — see
+`AvifProfileHarness.cs`) contradicted the standing assumption that entropy/coefficient decode would
+dominate, the way it does for WebP's VP8:
+
+- **CDEF was 55% of total self-time**, not the secondary cost the plan's own risk assessment expected
+  (it flagged SGRPROJ, not CDEF, as the filter chain's riskiest piece). The cause wasn't algorithmic —
+  it was `cdef_get_at`'s per-tap `is_inside_filter_region` availability check: ~12 taps per sample,
+  each paying a property write/read plus an MI-unit bounds translation, even though the overwhelming
+  majority of 8×8 blocks in a 1920×1080 frame are nowhere near the edge and every one of their taps is
+  always available. Fixed by computing, once per plane per 8×8 block (not once per tap), whether the
+  block's fixed ±2-sample tap footprint stays fully inside frame bounds; interior blocks (the common
+  case) skip the availability check entirely, and only genuinely edge-adjacent blocks fall back to the
+  original bounds-checked path. This alone cut CDEF's cost by roughly 45%.
+- **17% of total time was spent zeroing memory that could never be read stale.** `Reconstruct()`
+  called `Array.Clear` on a fixed 64×64 scratch buffer before every transform block's dequantization,
+  regardless of that block's actual size — a 4×4 transform's worth of real work paid for clearing 16×
+  more memory than it used. Tracing `Av1Dequantizer.Dequantize`'s write bounds against
+  `Av1InverseTransform.Inverse2D`'s read bounds (both derive from the same `txSz`, so they're always
+  exactly matched) showed the clear was fully redundant: `Inverse2D` can never read a position that
+  call's `Dequantize` didn't just write. Removed entirely.
+
+Both changes are pure performance changes — verified bit-identical to the pre-change output via
+`AvifDecodeHashTests`, the same regression harness `WebpDecodeHashTests` uses, before being accepted.
+A third attempt (replacing CDEF's interior-path array reads with `Unsafe.Add` to skip the JIT's own
+bounds checks) measured no change and was reverted — RyuJIT had already eliminated them, so the
+`unsafe`-adjacent complexity bought nothing.
+
+#### Remaining gap
+
+Re-profiling after both fixes shows the inverse transform (`Av1InverseTransform.InverseDct`, the
+scalar 31-step butterfly network) as the new largest cost at 35% of self-time, with CDEF still second
+at 41%→ down from the pre-fix 55%, i.e. now smaller in absolute terms even though its *relative* share
+looks similar since total time also fell. Entropy/symbol decode, the partition tree walk, dequantization,
+intra prediction, and the deblocking/loop-restoration filters remain scalar and comparatively minor
+individually. The two clearest next targets, by the same profile-then-fix reasoning that produced this
+pass's results rather than by assumption: the inverse transform (WebP's own single largest win came
+from vectorizing its DCT, though AV1's is a size-parameterized 31-step network rather than one fixed
+4×4 kernel, so batching multiple independent transforms across SIMD lanes — not vectorizing a single
+transform's inherently-sequential butterfly chain — is the shape a real win here would need to take),
+and the remaining ~59% of CDEF's cost concentrated in the per-tap `Constrain`/tap-table arithmetic
+itself rather than the now-eliminated availability check.
 
 Allocation is also unoptimized: ~192-198 MB per 1080p decode reflects `int[]`-per-sample plane
 storage throughout the pipeline (chosen for implementation simplicity across every intra-prediction
@@ -304,7 +342,7 @@ CPU-time axes separately" order this repo's WebP work followed.
 | BMP | 0.40×–1.05× | no baseline (PeachImage-only) |
 | PNG | 1.08×–1.63× | 0.65×–1.27× |
 | WebP | 1.15×–2.13× | not yet implemented |
-| AVIF | ~6.1× vs. `ffmpeg` (no SkiaSharp baseline available) | not yet implemented |
+| AVIF | ~4.4× vs. `ffmpeg` (no SkiaSharp baseline available) | not yet implemented |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
 and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the

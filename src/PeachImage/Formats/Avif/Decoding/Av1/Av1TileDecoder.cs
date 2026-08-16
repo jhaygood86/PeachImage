@@ -1576,7 +1576,12 @@ internal sealed class Av1TileDecoder
         int w = Av1TxDimensions.Width[txSz];
         int h = Av1TxDimensions.Height[txSz];
 
-        Array.Clear(_reconDequant, 0, 64 * 64);
+        // No Array.Clear needed here: Av1Dequantizer.Dequantize writes exactly [0,th)x[0,tw) (th/tw =
+        // Min(32,h)/Min(32,w) for this same txSz), and Av1InverseTransform.Inverse2D's row loop only ever
+        // reads dequant[(i*64)+j] when i<32 && j<32 -- for i<32 that's bounded by the same th/tw Dequantize
+        // just wrote, and for i>=32 (only reachable when h>32) the read is skipped entirely (substituted
+        // with 0), so a previous call's leftover values at any position this call doesn't read can never
+        // surface. Confirmed by the byte-identical hash baseline before/after removing this clear.
         Av1Dequantizer.Dequantize(_quant, _reconDequant, txSz, GetDcQuant(plane), GetAcQuant(plane), _seq.BitDepth);
         Av1InverseTransform.Inverse2D(_reconDequant, _reconResidual, txSz, _planeTxType, _lossless, _seq.BitDepth);
 

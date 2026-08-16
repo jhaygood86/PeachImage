@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
 /// <summary>
@@ -245,6 +247,7 @@ internal static class Av1Cdef
     {
         var result = state.Result;
         var seq = result.Sequence;
+        var frame = result.Frame;
 
         int subX = plane != 0 && seq.SubsamplingX ? 1 : 0;
         int subY = plane != 0 && seq.SubsamplingY ? 1 : 0;
@@ -259,43 +262,110 @@ internal static class Av1Cdef
         var cdefPlane = state.CdefPlanes[plane];
         int stride = result.PlaneWidths[plane];
 
+        int tapIdx = (priStr >> coeffShift) & 1;
+        int priTap0 = CdefPriTaps[tapIdx][0];
+        int priTap1 = CdefPriTaps[tapIdx][1];
+        int secTap0 = CdefSecTaps[tapIdx][0];
+        int secTap1 = CdefSecTaps[tapIdx][1];
+
+        int dirA = (dir - 2) & 7;
+        int dirB = (dir + 2) & 7;
+        int pDy0 = CdefDirections[dir][0][0], pDx0 = CdefDirections[dir][0][1];
+        int pDy1 = CdefDirections[dir][1][0], pDx1 = CdefDirections[dir][1][1];
+        int aDy0 = CdefDirections[dirA][0][0], aDx0 = CdefDirections[dirA][0][1];
+        int aDy1 = CdefDirections[dirA][1][0], aDx1 = CdefDirections[dirA][1][1];
+        int bDy0 = CdefDirections[dirB][0][0], bDx0 = CdefDirections[dirB][0][1];
+        int bDy1 = CdefDirections[dirB][1][0], bDx1 = CdefDirections[dirB][1][1];
+
+        // Every tap this call can ever make is offset from (y0+i, x0+j) by at most 2 samples along
+        // either axis (the largest component in Cdef_Directions), for both primary and secondary taps
+        // combined. If the block's footprint extended by that fixed margin still translates (via the
+        // same <<sub>>2 MI-unit conversion is_inside_filter_region uses) to a range fully inside
+        // [0,MiRows)x[0,MiCols), every tap this call makes is unconditionally available -- so the
+        // per-tap availability check (state.CdefAvailable, a property write/read on every one of ~12
+        // taps per sample) can be skipped entirely for the (overwhelming majority, interior) case,
+        // falling back to the exact original bounds-checked path only for blocks near the frame edge.
+        int rMin = ((y0 - 2) << subY) >> 2;
+        int rMax = ((y0 + h + 1) << subY) >> 2;
+        int cMin = ((x0 - 2) << subX) >> 2;
+        int cMax = ((x0 + w + 1) << subX) >> 2;
+        bool interior = rMin >= 0 && rMax < frame.MiRows && cMin >= 0 && cMax < frame.MiCols;
+
         for (int i = 0; i < h; i++)
         {
+            int y = y0 + i;
             for (int j = 0; j < w; j++)
             {
+                int x = x0 + j;
+                int center = currPlane[(y * stride) + x];
                 long sum = 0;
-                int x = currPlane[((y0 + i) * stride) + x0 + j];
-                int max = x;
-                int min = x;
+                int max = center;
+                int min = center;
 
-                for (int k = 0; k < 2; k++)
+                if (interior)
                 {
-                    for (int sign = -1; sign <= 1; sign += 2)
-                    {
-                        int p = CdefGetAt(state, plane, x0, y0, i, j, dir, k, sign, subX, subY);
-                        if (state.CdefAvailable)
-                        {
-                            sum += CdefPriTaps[(priStr >> coeffShift) & 1][k] * Constrain(p - x, priStr, damping);
-                            max = Math.Max(p, max);
-                            min = Math.Min(p, min);
-                        }
+                    Accum(currPlane, stride, y, x, -pDy0, -pDx0, priTap0, priStr, damping, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, -aDy0, -aDx0, secTap0, secStr, damping, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, -bDy0, -bDx0, secTap0, secStr, damping, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, pDy0, pDx0, priTap0, priStr, damping, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, aDy0, aDx0, secTap0, secStr, damping, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, bDy0, bDx0, secTap0, secStr, damping, center, ref sum, ref max, ref min);
 
-                        for (int dirOff = -2; dirOff <= 2; dirOff += 4)
+                    Accum(currPlane, stride, y, x, -pDy1, -pDx1, priTap1, priStr, damping, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, -aDy1, -aDx1, secTap1, secStr, damping, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, -bDy1, -bDx1, secTap1, secStr, damping, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, pDy1, pDx1, priTap1, priStr, damping, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, aDy1, aDx1, secTap1, secStr, damping, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, bDy1, bDx1, secTap1, secStr, damping, center, ref sum, ref max, ref min);
+                }
+                else
+                {
+                    for (int k = 0; k < 2; k++)
+                    {
+                        for (int sign = -1; sign <= 1; sign += 2)
                         {
-                            int s = CdefGetAt(state, plane, x0, y0, i, j, (dir + dirOff) & 7, k, sign, subX, subY);
+                            int p = CdefGetAt(state, plane, x0, y0, i, j, dir, k, sign, subX, subY);
                             if (state.CdefAvailable)
                             {
-                                sum += CdefSecTaps[(priStr >> coeffShift) & 1][k] * Constrain(s - x, secStr, damping);
-                                max = Math.Max(s, max);
-                                min = Math.Min(s, min);
+                                sum += CdefPriTaps[tapIdx][k] * Constrain(p - center, priStr, damping);
+                                max = Math.Max(p, max);
+                                min = Math.Min(p, min);
+                            }
+
+                            for (int dirOff = -2; dirOff <= 2; dirOff += 4)
+                            {
+                                int s = CdefGetAt(state, plane, x0, y0, i, j, (dir + dirOff) & 7, k, sign, subX, subY);
+                                if (state.CdefAvailable)
+                                {
+                                    sum += CdefSecTaps[tapIdx][k] * Constrain(s - center, secStr, damping);
+                                    max = Math.Max(s, max);
+                                    min = Math.Min(s, min);
+                                }
                             }
                         }
                     }
                 }
 
-                int result8 = x + (int)((8 + sum - (sum < 0 ? 1 : 0)) >> 4);
-                cdefPlane[((y0 + i) * stride) + x0 + j] = Math.Clamp(result8, min, max);
+                int result8 = center + (int)((8 + sum - (sum < 0 ? 1 : 0)) >> 4);
+                cdefPlane[(y * stride) + x] = Math.Clamp(result8, min, max);
             }
+        }
+    }
+
+    /// <summary>Reads one CDEF tap and folds it into the running sum/max/min.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Accum(int[] plane, int stride, int y, int x, int dy, int dx, int tap, int strength, int damping, int center, ref long sum, ref int max, ref int min)
+    {
+        int p = plane[((y + dy) * stride) + x + dx];
+        sum += tap * Constrain(p - center, strength, damping);
+        if (p > max)
+        {
+            max = p;
+        }
+
+        if (p < min)
+        {
+            min = p;
         }
     }
 
