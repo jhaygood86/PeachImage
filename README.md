@@ -40,12 +40,14 @@ Targets .NET 10. No native interop — every codec is managed code, using modern
   Animated AVIF, film grain synthesis, gain maps, 12-bit depth, and palette/IntraBC mode remain
   unimplemented and throw a clear `AvifUnsupportedFeatureException` rather than a silently wrong
   result. Performance is an explicitly aspirational, longer-term goal here (see
-  `LIBRARY_COMPARISON.md`) rather than a merge gate — a profile-guided pass (CDEF's per-tap
+  `LIBRARY_COMPARISON.md`) rather than a merge gate — two profile-guided passes (CDEF's per-tap
   availability check skipped for the common interior-block case; a redundant full-buffer clear in
-  reconstruction removed) has closed roughly a third of the initial gap to `ffmpeg`, and the YUV→RGB
-  color conversion is vectorized (`Vector128<double>`); the inverse transforms, intra prediction,
-  entropy decode, and most of the in-loop filters are still scalar. Targeted correctness oracle is
-  `ffmpeg` (test-only, never a shipped dependency)
+  reconstruction removed; the inverse transform's `cos128`/`sin128`/`brev` computations replaced with
+  lookup tables and its per-row scratch allocation reused instead of reallocated) have closed roughly a
+  third of the initial gap to `ffmpeg`, and the YUV→RGB color conversion is vectorized
+  (`Vector128<double>`); the transforms' own arithmetic, intra prediction, entropy decode, and most of
+  the in-loop filters are still scalar. Targeted correctness oracle is `ffmpeg` (test-only, never a
+  shipped dependency)
   rather than SkiaSharp, whose AVIF decode support is inconsistent across builds — confirmed absent in
   this repo's pinned SkiaSharp version; correctness is instead verified via the AV1 spec's own
   bitstream-conformance requirement checked across a real `libavif` test corpus, plus a pixel-hash

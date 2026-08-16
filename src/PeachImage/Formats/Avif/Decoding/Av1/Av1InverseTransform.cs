@@ -32,43 +32,74 @@ internal static class Av1InverseTransform
     private const int Sinpi3_9 = 3344;
     private const int Sinpi4_9 = 3803;
 
-    private static int Cos128(int angle)
+    /// <summary>
+    /// <c>cos128</c> (spec §7.13.2.1) precomputed over its full <c>angle &amp; 255</c> domain, so every
+    /// call site (including <see cref="Sin128"/>, which is exactly <c>cos128(angle - 64)</c>) becomes a
+    /// single array lookup instead of the spec's own 3-branch case split -- B() calls this twice per
+    /// invocation and InverseDct calls B() up to 31 times per transform, so this table is on the hottest
+    /// path in reconstruction. Values are identical to <see cref="Cos128Lookup"/>'s own symmetric
+    /// definition by construction, not an independent re-derivation.
+    /// </summary>
+    private static readonly int[] Cos128Full = BuildCos128Full();
+
+    private static int[] BuildCos128Full()
     {
-        int angle2 = angle & 255;
-        if (angle2 <= 64)
+        var table = new int[256];
+        for (int angle2 = 0; angle2 < 256; angle2++)
         {
-            return Cos128Lookup[angle2];
+            table[angle2] = angle2 <= 64
+                ? Cos128Lookup[angle2]
+                : angle2 <= 128
+                    ? -Cos128Lookup[128 - angle2]
+                    : angle2 <= 192
+                        ? -Cos128Lookup[angle2 - 128]
+                        : Cos128Lookup[256 - angle2];
         }
 
-        if (angle2 <= 128)
-        {
-            return -Cos128Lookup[128 - angle2];
-        }
-
-        if (angle2 <= 192)
-        {
-            return -Cos128Lookup[angle2 - 128];
-        }
-
-        return Cos128Lookup[256 - angle2];
+        return table;
     }
 
-    private static int Sin128(int angle) => Cos128(angle - 64);
+    private static int Cos128(int angle) => Cos128Full[angle & 255];
+
+    private static int Sin128(int angle) => Cos128Full[(angle - 64) & 255];
 
     /// <summary><c>Round2(x, n)</c> (spec §4.7): arithmetic right shift with round-to-nearest, safe for negative <paramref name="x"/> since C#'s <c>&gt;&gt;</c> on a signed integer is already arithmetic (sign-extending).</summary>
     private static int Round2(long x, int n) => n == 0 ? (int)x : (int)((x + (1L << (n - 1))) >> n);
 
-    private static int Brev(int numBits, int x)
+    /// <summary>
+    /// <c>brev(numBits, x)</c> (spec §7.13.2.1) precomputed for every <c>numBits</c> this file ever calls
+    /// it with (2 through 6 -- the literal per-step bit-widths plus the full transform size <c>n</c> used
+    /// by <see cref="InverseDctPermute"/>). Called inside <see cref="InverseDctPermute"/>'s own O(2^n)
+    /// loop and several of <see cref="InverseDct"/>'s 31 steps, so turning its O(numBits) bit-reversal
+    /// loop into an O(1) table lookup removes real, repeated work from the hottest path in reconstruction.
+    /// </summary>
+    private static readonly int[][] BrevTables = BuildBrevTables();
+
+    private static int[][] BuildBrevTables()
     {
-        int t = 0;
-        for (int i = 0; i < numBits; i++)
+        var tables = new int[7][];
+        for (int numBits = 0; numBits <= 6; numBits++)
         {
-            int bit = (x >> i) & 1;
-            t += bit << (numBits - 1 - i);
+            var table = new int[1 << numBits];
+            for (int x = 0; x < table.Length; x++)
+            {
+                int t = 0;
+                for (int i = 0; i < numBits; i++)
+                {
+                    int bit = (x >> i) & 1;
+                    t += bit << (numBits - 1 - i);
+                }
+
+                table[x] = t;
+            }
+
+            tables[numBits] = table;
         }
 
-        return t;
+        return tables;
     }
+
+    private static int Brev(int numBits, int x) => BrevTables[numBits][x];
 
     /// <summary><c>B(a, b, angle, flip, r)</c> butterfly rotation (spec §7.13.2.1).</summary>
     private static void B(int[] t, int a, int b, int angle, bool flip, int r)
@@ -620,6 +651,13 @@ internal static class Av1InverseTransform
 
         Span<int> t = stackalloc int[64];
 
+        // Every InverseDct/InverseAdst/InverseWht/InverseIdentity call below takes plain int[] (not
+        // Span<int>) and only ever touches indices bounded by its own explicit n/w parameter, never
+        // t.Length -- so one w-length scratch array, allocated once and reused/overwritten for every one
+        // of the block's h rows, replaces what was previously a fresh w-length array allocated via
+        // ToArray() on every single row (an h-fold reduction in both allocation count and bytes).
+        var tRow = new int[w];
+
         for (int i = 0; i < h; i++)
         {
             for (int j = 0; j < w; j++)
@@ -635,7 +673,11 @@ internal static class Av1InverseTransform
                 }
             }
 
-            var tRow = t[..w].ToArray();
+            for (int j = 0; j < w; j++)
+            {
+                tRow[j] = t[j];
+            }
+
             if (lossless)
             {
                 InverseWht(tRow, 2);
