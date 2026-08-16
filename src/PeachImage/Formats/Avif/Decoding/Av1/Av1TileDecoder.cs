@@ -66,6 +66,12 @@ internal sealed class Av1TileDecoder
     private readonly int[] _reconDequant = new int[64 * 64];
     private readonly int[] _reconResidual = new int[64 * 64];
 
+    // Reusable AboveRow/LeftCol edge buffers for intra prediction (spec §7.11.2.1), sized for the
+    // largest possible capacity (4*(w+h)+16 with w+h maxing out at 64+64) and refilled by
+    // Av1IntraPrediction.BuildEdges for every transform block rather than allocated per call.
+    private readonly Av1EdgeArray _aboveRow = new(528);
+    private readonly Av1EdgeArray _leftCol = new(528);
+
     private int _currentQIndex;
     private readonly int[] _deltaLf = new int[4];
     private bool _readDeltas;
@@ -1423,7 +1429,8 @@ internal sealed class Av1TileDecoder
         bool haveAboveRight = GetBlockDecoded(plane, (subBlockMiRow >> subY) - 1, (subBlockMiCol >> subX) + stepX);
         bool haveBelowLeft = GetBlockDecoded(plane, (subBlockMiRow >> subY) + stepY, (subBlockMiCol >> subX) - 1);
 
-        var (aboveRow, leftCol) = Av1IntraPrediction.BuildEdges(
+        Av1IntraPrediction.BuildEdges(
+            _aboveRow, _leftCol,
             _planes[plane], _planeWidths[plane], startX, startY, w, h,
             haveLeft, haveAbove, haveAboveRight, haveBelowLeft, maxX - 1, maxY - 1, _seq.BitDepth);
 
@@ -1431,7 +1438,7 @@ internal sealed class Av1TileDecoder
         int angleDelta = plane == 0 ? _angleDeltaY : _angleDeltaUv;
 
         Av1IntraPrediction.Predict(
-            _reconPred, w, h, log2W, log2H, aboveRow, leftCol, mode, haveLeft, haveAbove,
+            _reconPred, w, h, log2W, log2H, _aboveRow, _leftCol, mode, haveLeft, haveAbove,
             plane == 0 && _useFilterIntra, _filterIntraMode, angleDelta, _seq.EnableIntraEdgeFilter,
             filterTypeSmooth, maxX - 1, maxY - 1, startX, startY, _seq.BitDepth);
 

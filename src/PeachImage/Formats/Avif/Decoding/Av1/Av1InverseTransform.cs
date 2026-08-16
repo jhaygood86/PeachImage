@@ -101,6 +101,17 @@ internal static class Av1InverseTransform
 
     private static int Brev(int numBits, int x) => BrevTables[numBits][x];
 
+    // Reusable scratch buffer for the permutation helpers below (InverseDctPermute/AdstInputPermute/
+    // AdstOutputPermute), sized to the largest possible transform length (64) and reused across every
+    // row/column permutation instead of Clone()-ing a fresh array each call -- these run twice per row
+    // and twice per column of every transform block, the single hottest allocation site in reconstruction.
+    // ThreadStatic (not an instance field, since this class has no instance) keeps concurrent decodes on
+    // different threads from stomping on each other; a single tile's own decode is always sequential.
+    [ThreadStatic]
+    private static int[]? _permuteScratch;
+
+    private static int[] PermuteScratch() => _permuteScratch ??= new int[64];
+
     /// <summary><c>B(a, b, angle, flip, r)</c> butterfly rotation (spec §7.13.2.1).</summary>
     private static void B(int[] t, int a, int b, int angle, bool flip, int r)
     {
@@ -134,8 +145,9 @@ internal static class Av1InverseTransform
     /// <summary><c>Inverse DCT array permutation process</c> (spec §7.13.2.2).</summary>
     private static void InverseDctPermute(int[] t, int n)
     {
-        var copy = (int[])t.Clone();
+        var copy = PermuteScratch();
         int len = 1 << n;
+        Array.Copy(t, copy, len);
         for (int i = 0; i < len; i++)
         {
             t[i] = copy[Brev(n, i)];
@@ -446,7 +458,8 @@ internal static class Av1InverseTransform
     private static void AdstInputPermute(int[] t, int n)
     {
         int n0 = 1 << n;
-        var copy = (int[])t.Clone();
+        var copy = PermuteScratch();
+        Array.Copy(t, copy, n0);
         for (int i = 0; i < n0; i++)
         {
             int idx = (i & 1) != 0 ? i - 1 : n0 - i - 1;
@@ -458,7 +471,8 @@ internal static class Av1InverseTransform
     private static void AdstOutputPermute(int[] t, int n)
     {
         int n0 = 1 << n;
-        var copy = (int[])t.Clone();
+        var copy = PermuteScratch();
+        Array.Copy(t, copy, n0);
         for (int i = 0; i < n0; i++)
         {
             int a = (i >> 3) & 1;

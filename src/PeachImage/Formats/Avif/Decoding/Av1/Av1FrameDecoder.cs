@@ -230,6 +230,7 @@ internal static class Av1FrameDecoder
                 deltaLfs, cdefIdx, loopfilterTxSizes, loopfilterTxSizeStrides, restorationUnits);
 
             tileDecoder.DecodeTile();
+
             blocksDecoded += tileDecoder.BlocksDecoded;
             stoppedAtResidual |= tileDecoder.StoppedAtResidual;
             minSymbolMaxBitsAtExit = Math.Min(minSymbolMaxBitsAtExit, tileDecoder.SymbolMaxBitsAtExit);
@@ -259,10 +260,16 @@ internal static class Av1FrameDecoder
 
         Av1DeblockingFilter.Apply(result);
 
-        var deblockedPlanes = new int[3][];
-        for (int plane = 0; plane < numPlanes; plane++)
+        // Only loop restoration ever reads this pre-CDEF snapshot (spec §7.17.1's stripe-boundary rule);
+        // Av1LoopRestoration.Apply returns immediately when UsesLr is false without touching it, so
+        // cloning three full planes (~12MB at 1080p) here would be pure waste for the (common) no-LR case.
+        var deblockedPlanes = frame.LoopRestoration.UsesLr ? new int[3][] : [];
+        if (frame.LoopRestoration.UsesLr)
         {
-            deblockedPlanes[plane] = (int[])result.Planes[plane].Clone();
+            for (int plane = 0; plane < numPlanes; plane++)
+            {
+                deblockedPlanes[plane] = (int[])result.Planes[plane].Clone();
+            }
         }
 
         Av1Cdef.Apply(result);

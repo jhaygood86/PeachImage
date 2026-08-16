@@ -129,11 +129,16 @@ internal static class Av1IntraPrediction
     private static int Clip1(int x, int bitDepth) => Math.Clamp(x, 0, (1 << bitDepth) - 1);
 
     /// <summary>
-    /// Builds <c>AboveRow</c>/<c>LeftCol</c> (spec §7.11.2.1, the array-construction steps preceding the
-    /// per-mode dispatch) from a flat, row-major plane buffer. <paramref name="planeStride"/> is the
-    /// buffer's full row width (not necessarily <paramref name="w"/>).
+    /// Fills <paramref name="above"/>/<paramref name="left"/> with <c>AboveRow</c>/<c>LeftCol</c> (spec
+    /// §7.11.2.1, the array-construction steps preceding the per-mode dispatch) from a flat, row-major
+    /// plane buffer. <paramref name="planeStride"/> is the buffer's full row width (not necessarily
+    /// <paramref name="w"/>). <paramref name="above"/>/<paramref name="left"/> are caller-owned and reused
+    /// across every transform block in a tile rather than allocated per call -- this runs once per
+    /// transform block (tens of thousands per frame), so it was a real, measured allocation hot spot.
     /// </summary>
-    public static (Av1EdgeArray Above, Av1EdgeArray Left) BuildEdges(
+    public static void BuildEdges(
+        Av1EdgeArray above,
+        Av1EdgeArray left,
         int[] plane,
         int planeStride,
         int x,
@@ -148,10 +153,6 @@ internal static class Av1IntraPrediction
         int maxY,
         int bitDepth)
     {
-        int capacity = (4 * (w + h)) + 16;
-        var above = new Av1EdgeArray(capacity);
-        var left = new Av1EdgeArray(capacity);
-
         if (!haveAbove && haveLeft)
         {
             int v = plane[(y * planeStride) + x - 1];
@@ -222,8 +223,6 @@ internal static class Av1IntraPrediction
 
         above[-1] = corner;
         left[-1] = corner;
-
-        return (above, left);
     }
 
     /// <summary>
@@ -298,7 +297,7 @@ internal static class Av1IntraPrediction
     {
         int w4 = w >> 2;
         int h2 = h >> 1;
-        var p = new int[7];
+        Span<int> p = stackalloc int[7];
 
         for (int i2 = 0; i2 < h2; i2++)
         {
@@ -735,7 +734,9 @@ internal static class Av1IntraPrediction
     /// <summary><c>Intra edge upsample process</c> (spec §7.11.2.11).</summary>
     private static void EdgeUpsample(Av1EdgeArray buf, int numPx)
     {
-        var dup = new int[numPx + 3];
+        // numPx maxes out around w+h (largest transform side sum, 128), so this is always well within a
+        // safe stackalloc bound.
+        Span<int> dup = stackalloc int[numPx + 3];
         dup[0] = buf[-1];
         for (int i = -1; i < numPx; i++)
         {
@@ -762,7 +763,8 @@ internal static class Av1IntraPrediction
             return;
         }
 
-        var edge = new int[sz];
+        // sz is spec-bounded to <= 129 (§7.11.2.12's own note), so this is always a safe stackalloc.
+        Span<int> edge = stackalloc int[sz];
         for (int i = 0; i < sz; i++)
         {
             edge[i] = buf[i - 1];
@@ -805,7 +807,8 @@ internal static class Av1IntraPrediction
         int maxLumaH,
         int bitDepth)
     {
-        var l = new int[h * w];
+        // h*w maxes out at 32*32 (the largest chroma transform size) = 4KB, a safe stackalloc bound.
+        Span<int> l = stackalloc int[h * w];
         long lumaAvg = 0;
 
         for (int i = 0; i < h; i++)

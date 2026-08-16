@@ -46,10 +46,14 @@ internal static class Av1Cdef
             return;
         }
 
+        // No Clone() needed here: the r/c loop below visits every 8x8 block in the frame exactly once, and
+        // CdefBlock's first action for every block is an unconditional CopyBlock() from result.Planes into
+        // this array (identity-copied for skip/unfiltered blocks, then selectively overwritten by
+        // CdefFilter for filtered ones) -- so every element gets written before CDEF ever reads it back.
         var cdefPlanes = new int[3][];
         for (int plane = 0; plane < seq.NumPlanes; plane++)
         {
-            cdefPlanes[plane] = (int[])result.Planes[plane].Clone();
+            cdefPlanes[plane] = new int[result.Planes[plane].Length];
         }
 
         var state = new State(result, cdefPlanes);
@@ -82,6 +86,24 @@ internal static class Av1Cdef
         public int[][] CdefPlanes { get; } = cdefPlanes;
 
         public bool CdefAvailable { get; set; }
+
+        // Reusable CDEF-direction-search scratch (spec's cost[8]/partial[8][15]), cleared and reused for
+        // every 8x8 block in the frame instead of allocating fresh each call -- this is called once per
+        // non-skip block (tens of thousands per 1080p frame), so freshly allocating 10 small arrays per
+        // call was a real, measured allocation hot spot.
+        public readonly long[] Cost = new long[8];
+        public readonly long[][] Partial = CreatePartial();
+
+        private static long[][] CreatePartial()
+        {
+            var partial = new long[8][];
+            for (int i = 0; i < 8; i++)
+            {
+                partial[i] = new long[15];
+            }
+
+            return partial;
+        }
     }
 
     /// <summary><c>CDEF block process</c> (spec §7.15.1).</summary>
@@ -123,7 +145,7 @@ internal static class Av1Cdef
             return;
         }
 
-        var (yDir, var) = CdefDirection(result, r, c);
+        var (yDir, var) = CdefDirection(state, r, c);
 
         int priStr = frame.Cdef.YPriStrength[idx] << coeffShift;
         int secStr = frame.Cdef.YSecStrength[idx] << coeffShift;
@@ -161,13 +183,15 @@ internal static class Av1Cdef
     }
 
     /// <summary><c>CDEF direction process</c> (spec §7.15.2).</summary>
-    private static (int YDir, int Var) CdefDirection(Av1FrameDecodeResult result, int r, int c)
+    private static (int YDir, int Var) CdefDirection(State state, int r, int c)
     {
-        var cost = new long[8];
-        var partial = new long[8][];
+        var result = state.Result;
+        var cost = state.Cost;
+        var partial = state.Partial;
+        Array.Clear(cost);
         for (int i = 0; i < 8; i++)
         {
-            partial[i] = new long[15];
+            Array.Clear(partial[i]);
         }
 
         long bestCost = 0;

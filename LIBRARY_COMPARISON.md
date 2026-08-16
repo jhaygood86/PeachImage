@@ -272,12 +272,12 @@ benchmark.
 
 | Scenario | PeachImage | `ffmpeg` (process-spawn, context only) | Allocated (PeachImage) |
 |---|---:|---:|---:|
-| Photographic, 8-bit 4:2:0 | 282.0 ms | 68.6 ms | 175.5 MB |
-| Photographic, 8-bit 4:2:0 + alpha | 307.2 ms | — | 181.7 MB |
-| Small image (32×24) | 149.2 µs | — | 330 KB |
+| Photographic, 8-bit 4:2:0 | 260.6 ms | 68.6 ms | 54.4 MB |
+| Photographic, 8-bit 4:2:0 + alpha | 277.3 ms | — | 55.1 MB |
+| Small image (32×24) | 127.3 µs | — | 265 KB |
 
-PeachImage is roughly **4.1×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario — still a
-real gap, and an expected one at this stage, but down from an initial 6.1× after two profile-guided
+PeachImage is roughly **3.8×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario — still a
+real gap, and an expected one at this stage, but down from an initial 6.1× after three profile-guided
 passes (below). Per the project plan, AV1/AVIF performance is an explicitly aspirational, long-term goal
 here, not a merge gate the way it is for the more mature formats above — WebP's own optimization arc
 (4.11× → 2.13× on its worst scenario, over several profile-guided passes) is the expected shape of
@@ -335,22 +335,58 @@ tracing rather than assumption:
 
 All three verified bit-identical via `AvifDecodeHashTests` as before.
 
+### Allocation-reduction pass
+
+A third pass targeted allocation specifically, using the same `GC.GetAllocatedBytesForCurrentThread()`
+delta-diagnostic technique (temporary, env-var-gated checkpoints bisecting the decode pipeline by
+phase) to localize the largest contributors before touching any code, rather than guessing:
+
+- **`Av1Cdef`'s direction search allocated ten small arrays (`cost[8]`, `partial[8][15]`) on every
+  call** — once per non-skip 8×8 block, tens of thousands of times per 1080p frame. Replaced with
+  reusable fields on the filter's per-frame `State`, cleared with `Array.Clear` instead of
+  reallocated.
+- **`Av1IntraPrediction.BuildEdges` allocated two `Av1EdgeArray` instances on every transform block.**
+  Changed from a tuple-returning factory to an in-place filler over caller-owned, reused instances
+  (mirroring `Av1TileDecoder`'s existing `_reconPred`/`_reconDequant`/`_reconResidual` reuse pattern).
+  Four smaller, always-small, never-escaping local arrays elsewhere in the same file (`PredictRecursive`,
+  `EdgeUpsample`, `EdgeFilter`, `PredictChromaFromLuma`) were converted to `stackalloc`.
+- **The inverse transform's three permutation helpers (`InverseDctPermute`, `AdstInputPermute`,
+  `AdstOutputPermute`) each `Clone()`d their input array on every call** — twice per row and twice per
+  column of every transform block in the frame, the single largest allocation site found this pass.
+  Replaced with one `[ThreadStatic]` 64-entry scratch buffer shared by all three (safe: permutation is
+  always a leaf, non-reentrant operation within one thread's sequential tile decode), cutting this
+  phase's own allocation from ~48 MB to ~4.4 MB per 1080p decode.
+- **`Av1Cdef.Apply`'s per-plane write buffer was seeded with a full `Clone()` of the input it never
+  reads back from.** Its own per-8×8-block loop unconditionally copies every input pixel into that
+  buffer before any filter ever runs (identity-copied for skip blocks, overwritten by the filter
+  otherwise) — the upfront clone's data was always overwritten before being read. Replaced with a
+  same-sized empty allocation; correctness confirmed by the existing bit-exact corpus hash suite,
+  since this is a genuine dead-work elimination rather than an approximation.
+- **The pre-CDEF plane snapshot (`deblockedPlanes`) was always cloned, even though only loop
+  restoration reads it, and loop restoration is a no-op — returning before touching it — whenever
+  `UsesLr` is false.** Now skipped entirely in that (common) case.
+
+Every change was verified bit-identical to the pre-change output via `AvifDecodeHashTests` before being
+accepted, same as the prior two passes. Together they took the 1080p scenario's allocation from
+175.5 MB to 54.4 MB (69%) and its time from 282.0 ms to 260.6 ms.
+
 #### Remaining gap
 
-Two profile-guided passes have taken the 1080p scenario from 418 ms to 282 ms (32.6%) and its
-allocation from 191.8 MB to 175.5 MB (8.5%). CDEF (now mostly its per-tap `Constrain`/tap-table
-arithmetic, the availability check already eliminated) and the inverse transform remain the two
-largest costs and the clearest next targets. A real further win on the transform would need batching
-multiple independent transforms across SIMD lanes rather than vectorizing one transform's inherently-
-sequential butterfly chain (AV1's inverse DCT is a size-parameterized 31-step network, not the single
-fixed 4×4 kernel WebP's own biggest DCT win vectorized) — a materially larger undertaking than either
-pass so far, deferred rather than attempted without profiling data to justify the specific approach.
+CDEF's own filtering arithmetic and the inverse transform's butterfly network remain the two largest
+CPU-time costs. A real further win on the transform would need batching multiple independent
+transforms across SIMD lanes rather than vectorizing one transform's inherently-sequential butterfly
+chain (AV1's inverse DCT is a size-parameterized 31-step network, not the single fixed 4×4 kernel
+WebP's own biggest DCT win vectorized) — a materially larger undertaking than any pass so far, deferred
+rather than attempted without profiling data to justify the specific approach.
 
-Allocation remains structurally unoptimized beyond the two fixes above: `int[]`-per-sample plane
-storage throughout the pipeline (chosen for implementation simplicity across every intra-prediction
-and reconstruction kernel while the format was being built out) rather than packed `byte`/`ushort`
-buffers with pooling, the same "prove correctness first, then multiply-pass down the allocation and
-CPU-time axes separately" order this repo's WebP work followed.
+What's left of allocation is now concentrated in state that's genuinely per-frame rather than
+per-block: the reconstructed plane buffers and per-mi-position neighbor-context arrays (allocated once
+per decode, sized to the frame), and CDEF's/loop restoration's own full-plane snapshot buffers (each
+reads-while-writes a distinct frame state per spec, so eliminating them outright isn't an option the
+way the dead upfront clone above was — only pooling them across repeated decodes remains open). `int[]`-
+per-sample plane storage throughout the pipeline (chosen for implementation simplicity across every
+intra-prediction and reconstruction kernel while the format was being built out) rather than packed
+`byte`/`ushort` buffers is the other standing simplification.
 
 ## Summary
 
@@ -360,7 +396,7 @@ CPU-time axes separately" order this repo's WebP work followed.
 | BMP | 0.40×–1.05× | no baseline (PeachImage-only) |
 | PNG | 1.08×–1.63× | 0.65×–1.27× |
 | WebP | 1.15×–2.13× | not yet implemented |
-| AVIF | ~4.1× vs. `ffmpeg` (no SkiaSharp baseline available) | not yet implemented |
+| AVIF | ~3.8× vs. `ffmpeg` (no SkiaSharp baseline available) | not yet implemented |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
 and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the
