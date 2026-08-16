@@ -272,16 +272,17 @@ benchmark.
 
 | Scenario | PeachImage | `ffmpeg` (process-spawn, context only) | Allocated (PeachImage) |
 |---|---:|---:|---:|
-| Photographic, 8-bit 4:2:0 | 253.8 ms | 68.6 ms | 17.8 MB |
-| Photographic, 8-bit 4:2:0 + alpha | 275.5 ms | — | 19.8 MB |
-| Small image (32×24) | 126.9 µs | — | 213 KB |
+| Photographic, 8-bit 4:2:0 | 145.1 ms | 68.6 ms | 17.8 MB |
+| Photographic, 8-bit 4:2:0 + alpha | 161.2 ms | — | 19.8 MB |
+| Small image (32×24) | 115.0 µs | — | 213 KB |
 
-PeachImage is roughly **3.7×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario — still a
-real gap, and an expected one at this stage, but down from an initial 6.1× after four profile-guided
-passes (below). Per the project plan, AV1/AVIF performance is an explicitly aspirational, long-term goal
-here, not a merge gate the way it is for the more mature formats above — WebP's own optimization arc
-(4.11× → 2.13× on its worst scenario, over several profile-guided passes) is the expected shape of
-this work, not something achieved in one pass.
+PeachImage is roughly **2.1×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario — down from
+an initial 6.1× after five profile-guided passes (below), and now within the same range as this repo's
+more mature codecs' own remaining gaps (JPEG 1.13×–1.30×, WebP 1.15×–2.13×). Per the project plan,
+AV1/AVIF performance is an explicitly aspirational, long-term goal here, not a merge gate the way it is
+for the more mature formats above — WebP's own optimization arc (4.11× → 2.13× on its worst scenario,
+over several profile-guided passes) was the expected shape of this work, and AVIF has now followed the
+same arc in fewer passes.
 
 ### What the profile actually showed
 
@@ -419,15 +420,6 @@ This pass didn't touch a single kernel's arithmetic — only where buffers come 
 zero once the pool warms up. Time held roughly flat (260.6 ms → 253.8 ms) as expected — this pass
 targeted allocation, not CPU time.
 
-#### Remaining gap
-
-CDEF's own filtering arithmetic and the inverse transform's butterfly network remain the two largest
-CPU-time costs. A real further win on the transform would need batching multiple independent
-transforms across SIMD lanes rather than vectorizing one transform's inherently-sequential butterfly
-chain (AV1's inverse DCT is a size-parameterized 31-step network, not the single fixed 4×4 kernel
-WebP's own biggest DCT win vectorized) — a materially larger undertaking than any pass so far, deferred
-rather than attempted without profiling data to justify the specific approach.
-
 What's left of allocation is now the per-mi-position neighbor-context arrays (mode/skip/segment/
 delta-LF/CDEF-index, still freshly allocated every decode — not yet pooled) and the first-ever rental
 of each buffer size the pool hasn't warmed up yet (irreducible for a one-off single decode, though
@@ -438,6 +430,60 @@ is the other standing simplification — it would shrink every pooled buffer by 
 every kernel in the decoder rather than just where its buffers come from, and is a materially larger,
 riskier undertaking than this pass.
 
+### CDEF vectorization pass
+
+A fresh `dotnet-trace` profile after the pooling pass (the prior trace was two passes stale) found
+CDEF's own filtering — `CdefFilter`, the primary/secondary directional tap accumulation, distinct from
+`CdefDirection`'s direction search — at **45% of total self-time**, a far larger single hotspot than
+anything else in the decoder. Two findings, in order:
+
+- **`Constrain` (the per-tap rounding/clamp step) recomputed `FloorLog2(threshold)` on every one of up
+  to 12 taps per pixel**, even though `threshold` (`priStr`/`secStr`) and `damping` are invariant for an
+  entire `CdefFilter` call — only 2 distinct threshold values across up to 768 taps per 8×8 block.
+  Hoisted to two precomputed `dampingAdj` values per call. This alone was a modest win (~3% faster):
+  `FloorLog2`'s bit-loop is cheap enough that the redundant calls weren't the dominant cost.
+- **The real cost was the sheer volume of scalar per-pixel, per-tap work**, and it turned out to be
+  safely vectorizable: every CDEF block is exactly 8 samples wide (luma, or 4:4:4 chroma) or 4 samples
+  wide (subsampled chroma) — matching `Vector256<int>`/`Vector128<int>` exactly — and every tap
+  operation (subtract, abs, shift, compare, clamp) is plain integer arithmetic. Unlike the float-based
+  YUV→RGB kernel vectorized earlier, integer SIMD ops are bit-for-bit identical to their scalar
+  equivalents on any hardware, so this carries none of the cross-hardware precision risk a
+  floating-point kernel would — a strictly safer vectorization target than it might first appear.
+  Rewritten to process a full interior row per SIMD call (`CdefFilterRow256`/`CdefFilterRow128`),
+  falling back to the untouched original scalar path for edge-adjacent blocks and non-x86 hardware.
+  One correctness subtlety: scalar `Accum` always reads the tap sample and folds it into min/max even
+  when `threshold == 0` (only the *sum* contribution is skipped) — the vectorized path reproduces this
+  exactly without a branch, since a precomputed `dampingAdj` of 0 already makes
+  `absDiff - (absDiff >> 0) == 0`, the same zero `Constrain` returns explicitly.
+
+Verified bit-identical via `AvifDecodeHashTests` across the full corpus (which exercises both the 8-wide
+and 4-wide paths, and both interior and edge blocks, across every subsampling mode). The vectorization
+cut `CdefFilter`'s own self-time from 45% to under 10% of the total (roughly a 7.6× reduction in that
+specific hotspot) and took the 1080p scenario from 253.8 ms to **145.1 ms** (43%) — allocation was
+unchanged (17.8 MB), as expected for a pure CPU-time change.
+
+#### Remaining gap
+
+Re-profiling afterward surfaced `Av1TileDecoder.Coeffs` (coefficient/entropy decode) as the new largest
+single cost at 25% of self-time — expected, and not a good target: like WebP's own entropy decode, it's
+an inherently sequential, adaptive-CDF-driven symbol stream, not parallelizable across lanes. Its one
+apparent redundant-work candidate (`_quant`'s per-call `Array.Clear`) turned out, on inspection, not to
+be one: unlike the earlier `_reconDequant` clear removed in an prior pass, `_quant` is read *during* the
+same call for neighbor coefficient-magnitude context at positions that may not yet be written in the
+current reverse-scan pass, so the clear is load-bearing, not redundant — removing it was not attempted
+given the risk of silent, hard-to-detect corruption for a win that would need proving from spec details
+rather than measurement.
+
+The inverse transform's butterfly network (`InverseDct`/`Inverse2D`/`InverseAdst8` and friends, ~24%
+combined) remains the next real CPU-time target. A win there would need batching multiple independent
+transforms across SIMD lanes rather than vectorizing one transform's inherently-sequential butterfly
+chain (AV1's inverse DCT is a size-parameterized 31-step network, not the single fixed 4×4 kernel WebP's
+own biggest DCT win vectorized) — a materially larger undertaking than the CDEF pass, deferred rather
+than attempted without profiling data to justify the specific approach. `CdefDirection` (the direction
+search preceding `CdefFilter`, ~5% of self-time) is a smaller, structurally similar vectorization
+candidate not yet attempted — its cost-accumulation pattern indexes diagonally rather than row-wise,
+making it a less direct fit for the row-at-a-time approach used here.
+
 ## Summary
 
 | Format | Decode | Encode |
@@ -446,7 +492,7 @@ riskier undertaking than this pass.
 | BMP | 0.40×–1.05× | no baseline (PeachImage-only) |
 | PNG | 1.08×–1.63× | 0.65×–1.27× |
 | WebP | 1.15×–2.13× | not yet implemented |
-| AVIF | ~3.7× vs. `ffmpeg` (no SkiaSharp baseline available) | not yet implemented |
+| AVIF | ~2.1× vs. `ffmpeg` (no SkiaSharp baseline available) | not yet implemented |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
 and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the

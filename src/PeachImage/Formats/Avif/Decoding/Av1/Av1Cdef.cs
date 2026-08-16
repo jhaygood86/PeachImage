@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -327,6 +328,36 @@ internal static class Av1Cdef
         int cMax = ((x0 + w + 1) << subX) >> 2;
         bool interior = rMin >= 0 && rMax < frame.MiRows && cMin >= 0 && cMax < frame.MiCols;
 
+        int priDampingAdj = DampingAdjust(priStr, damping);
+        int secDampingAdj = DampingAdjust(secStr, damping);
+
+        // Interior blocks (the common case) can be vectorized a full row at a time: w is always exactly
+        // 8 (luma, or 4:4:4 chroma) or 4 (subsampled chroma), matching Vector256<int>/Vector128<int>
+        // exactly, and every tap is plain integer arithmetic -- unlike float SIMD, integer vector ops are
+        // bit-for-bit identical to their scalar equivalents on any hardware, so this carries none of the
+        // cross-hardware precision risk a floating-point kernel would. Falls through to the scalar loop
+        // below (unchanged) when the block is edge-adjacent or the current hardware lacks the relevant
+        // vector width.
+        if (interior && w == 8 && Vector256.IsHardwareAccelerated)
+        {
+            for (int i = 0; i < h; i++)
+            {
+                CdefFilterRow256(currPlane, cdefPlane, stride, x0, y0 + i, priTap0, priTap1, secTap0, secTap1, priDampingAdj, secDampingAdj, pDy0, pDx0, pDy1, pDx1, aDy0, aDx0, aDy1, aDx1, bDy0, bDx0, bDy1, bDx1);
+            }
+
+            return;
+        }
+
+        if (interior && w == 4 && Vector128.IsHardwareAccelerated)
+        {
+            for (int i = 0; i < h; i++)
+            {
+                CdefFilterRow128(currPlane, cdefPlane, stride, x0, y0 + i, priTap0, priTap1, secTap0, secTap1, priDampingAdj, secDampingAdj, pDy0, pDx0, pDy1, pDx1, aDy0, aDx0, aDy1, aDx1, bDy0, bDx0, bDy1, bDx1);
+            }
+
+            return;
+        }
+
         for (int i = 0; i < h; i++)
         {
             int y = y0 + i;
@@ -340,19 +371,19 @@ internal static class Av1Cdef
 
                 if (interior)
                 {
-                    Accum(currPlane, stride, y, x, -pDy0, -pDx0, priTap0, priStr, damping, center, ref sum, ref max, ref min);
-                    Accum(currPlane, stride, y, x, -aDy0, -aDx0, secTap0, secStr, damping, center, ref sum, ref max, ref min);
-                    Accum(currPlane, stride, y, x, -bDy0, -bDx0, secTap0, secStr, damping, center, ref sum, ref max, ref min);
-                    Accum(currPlane, stride, y, x, pDy0, pDx0, priTap0, priStr, damping, center, ref sum, ref max, ref min);
-                    Accum(currPlane, stride, y, x, aDy0, aDx0, secTap0, secStr, damping, center, ref sum, ref max, ref min);
-                    Accum(currPlane, stride, y, x, bDy0, bDx0, secTap0, secStr, damping, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, -pDy0, -pDx0, priTap0, priStr, priDampingAdj, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, -aDy0, -aDx0, secTap0, secStr, secDampingAdj, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, -bDy0, -bDx0, secTap0, secStr, secDampingAdj, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, pDy0, pDx0, priTap0, priStr, priDampingAdj, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, aDy0, aDx0, secTap0, secStr, secDampingAdj, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, bDy0, bDx0, secTap0, secStr, secDampingAdj, center, ref sum, ref max, ref min);
 
-                    Accum(currPlane, stride, y, x, -pDy1, -pDx1, priTap1, priStr, damping, center, ref sum, ref max, ref min);
-                    Accum(currPlane, stride, y, x, -aDy1, -aDx1, secTap1, secStr, damping, center, ref sum, ref max, ref min);
-                    Accum(currPlane, stride, y, x, -bDy1, -bDx1, secTap1, secStr, damping, center, ref sum, ref max, ref min);
-                    Accum(currPlane, stride, y, x, pDy1, pDx1, priTap1, priStr, damping, center, ref sum, ref max, ref min);
-                    Accum(currPlane, stride, y, x, aDy1, aDx1, secTap1, secStr, damping, center, ref sum, ref max, ref min);
-                    Accum(currPlane, stride, y, x, bDy1, bDx1, secTap1, secStr, damping, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, -pDy1, -pDx1, priTap1, priStr, priDampingAdj, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, -aDy1, -aDx1, secTap1, secStr, secDampingAdj, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, -bDy1, -bDx1, secTap1, secStr, secDampingAdj, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, pDy1, pDx1, priTap1, priStr, priDampingAdj, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, aDy1, aDx1, secTap1, secStr, secDampingAdj, center, ref sum, ref max, ref min);
+                    Accum(currPlane, stride, y, x, bDy1, bDx1, secTap1, secStr, secDampingAdj, center, ref sum, ref max, ref min);
                 }
                 else
                 {
@@ -363,7 +394,7 @@ internal static class Av1Cdef
                             int p = CdefGetAt(state, plane, x0, y0, i, j, dir, k, sign, subX, subY);
                             if (state.CdefAvailable)
                             {
-                                sum += CdefPriTaps[tapIdx][k] * Constrain(p - center, priStr, damping);
+                                sum += CdefPriTaps[tapIdx][k] * ConstrainFast(p - center, priStr, priDampingAdj);
                                 max = Math.Max(p, max);
                                 min = Math.Min(p, min);
                             }
@@ -373,7 +404,7 @@ internal static class Av1Cdef
                                 int s = CdefGetAt(state, plane, x0, y0, i, j, (dir + dirOff) & 7, k, sign, subX, subY);
                                 if (state.CdefAvailable)
                                 {
-                                    sum += CdefSecTaps[tapIdx][k] * Constrain(s - center, secStr, damping);
+                                    sum += CdefSecTaps[tapIdx][k] * ConstrainFast(s - center, secStr, secDampingAdj);
                                     max = Math.Max(s, max);
                                     min = Math.Min(s, min);
                                 }
@@ -388,12 +419,116 @@ internal static class Av1Cdef
         }
     }
 
+    /// <summary>
+    /// Vectorized equivalent of <see cref="CdefFilter"/>'s interior per-pixel body, one row (8 luma
+    /// samples) at a time. <c>threshold</c> never needs to be passed in separately: each dampingAdj
+    /// argument is precomputed as exactly 0 whenever its corresponding threshold (priStr/secStr) is 0,
+    /// and <c>absDiff - (absDiff &gt;&gt; 0) == 0</c> reproduces <see cref="ConstrainFast"/>'s explicit
+    /// zero short-circuit without needing a branch here.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CdefFilterRow256(
+        int[] currPlane, int[] cdefPlane, int stride, int x0, int y,
+        int priTap0, int priTap1, int secTap0, int secTap1, int priDampingAdj, int secDampingAdj,
+        int pDy0, int pDx0, int pDy1, int pDx1, int aDy0, int aDx0, int aDy1, int aDx1, int bDy0, int bDx0, int bDy1, int bDx1)
+    {
+        int rowBase = (y * stride) + x0;
+        var center = Vector256.LoadUnsafe(ref currPlane[rowBase]);
+        var sum = Vector256<int>.Zero;
+        var max = center;
+        var min = center;
+
+        AccumVec256(currPlane, stride, rowBase, -pDy0, -pDx0, priTap0, priDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec256(currPlane, stride, rowBase, -aDy0, -aDx0, secTap0, secDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec256(currPlane, stride, rowBase, -bDy0, -bDx0, secTap0, secDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec256(currPlane, stride, rowBase, pDy0, pDx0, priTap0, priDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec256(currPlane, stride, rowBase, aDy0, aDx0, secTap0, secDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec256(currPlane, stride, rowBase, bDy0, bDx0, secTap0, secDampingAdj, center, ref sum, ref max, ref min);
+
+        AccumVec256(currPlane, stride, rowBase, -pDy1, -pDx1, priTap1, priDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec256(currPlane, stride, rowBase, -aDy1, -aDx1, secTap1, secDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec256(currPlane, stride, rowBase, -bDy1, -bDx1, secTap1, secDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec256(currPlane, stride, rowBase, pDy1, pDx1, priTap1, priDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec256(currPlane, stride, rowBase, aDy1, aDx1, secTap1, secDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec256(currPlane, stride, rowBase, bDy1, bDx1, secTap1, secDampingAdj, center, ref sum, ref max, ref min);
+
+        var negMask = Vector256.LessThan(sum, Vector256<int>.Zero);
+        var adjusted = sum - (negMask & Vector256.Create(1));
+        var rounded = (Vector256.Create(8) + adjusted) >> 4;
+        var resultVal = center + rounded;
+        var clamped = Vector256.Min(Vector256.Max(resultVal, min), max);
+        clamped.StoreUnsafe(ref cdefPlane[rowBase]);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AccumVec256(int[] plane, int stride, int rowBase, int dy, int dx, int tap, int dampingAdj, Vector256<int> center, ref Vector256<int> sum, ref Vector256<int> max, ref Vector256<int> min)
+    {
+        var p = Vector256.LoadUnsafe(ref plane[rowBase + (dy * stride) + dx]);
+        var diff = p - center;
+        var absDiff = Vector256.Abs(diff);
+        var constrainedAbs = absDiff - (absDiff >> dampingAdj);
+        var negMask = Vector256.LessThan(diff, Vector256<int>.Zero);
+        var constrained = Vector256.ConditionalSelect(negMask, -constrainedAbs, constrainedAbs);
+        sum += constrained * Vector256.Create(tap);
+        max = Vector256.Max(max, p);
+        min = Vector256.Min(min, p);
+    }
+
+    /// <summary>Same as <see cref="CdefFilterRow256"/>, for the 4-wide (subsampled chroma) block width.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CdefFilterRow128(
+        int[] currPlane, int[] cdefPlane, int stride, int x0, int y,
+        int priTap0, int priTap1, int secTap0, int secTap1, int priDampingAdj, int secDampingAdj,
+        int pDy0, int pDx0, int pDy1, int pDx1, int aDy0, int aDx0, int aDy1, int aDx1, int bDy0, int bDx0, int bDy1, int bDx1)
+    {
+        int rowBase = (y * stride) + x0;
+        var center = Vector128.LoadUnsafe(ref currPlane[rowBase]);
+        var sum = Vector128<int>.Zero;
+        var max = center;
+        var min = center;
+
+        AccumVec128(currPlane, stride, rowBase, -pDy0, -pDx0, priTap0, priDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec128(currPlane, stride, rowBase, -aDy0, -aDx0, secTap0, secDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec128(currPlane, stride, rowBase, -bDy0, -bDx0, secTap0, secDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec128(currPlane, stride, rowBase, pDy0, pDx0, priTap0, priDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec128(currPlane, stride, rowBase, aDy0, aDx0, secTap0, secDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec128(currPlane, stride, rowBase, bDy0, bDx0, secTap0, secDampingAdj, center, ref sum, ref max, ref min);
+
+        AccumVec128(currPlane, stride, rowBase, -pDy1, -pDx1, priTap1, priDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec128(currPlane, stride, rowBase, -aDy1, -aDx1, secTap1, secDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec128(currPlane, stride, rowBase, -bDy1, -bDx1, secTap1, secDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec128(currPlane, stride, rowBase, pDy1, pDx1, priTap1, priDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec128(currPlane, stride, rowBase, aDy1, aDx1, secTap1, secDampingAdj, center, ref sum, ref max, ref min);
+        AccumVec128(currPlane, stride, rowBase, bDy1, bDx1, secTap1, secDampingAdj, center, ref sum, ref max, ref min);
+
+        var negMask = Vector128.LessThan(sum, Vector128<int>.Zero);
+        var adjusted = sum - (negMask & Vector128.Create(1));
+        var rounded = (Vector128.Create(8) + adjusted) >> 4;
+        var resultVal = center + rounded;
+        var clamped = Vector128.Min(Vector128.Max(resultVal, min), max);
+        clamped.StoreUnsafe(ref cdefPlane[rowBase]);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AccumVec128(int[] plane, int stride, int rowBase, int dy, int dx, int tap, int dampingAdj, Vector128<int> center, ref Vector128<int> sum, ref Vector128<int> max, ref Vector128<int> min)
+    {
+        var p = Vector128.LoadUnsafe(ref plane[rowBase + (dy * stride) + dx]);
+        var diff = p - center;
+        var absDiff = Vector128.Abs(diff);
+        var constrainedAbs = absDiff - (absDiff >> dampingAdj);
+        var negMask = Vector128.LessThan(diff, Vector128<int>.Zero);
+        var constrained = Vector128.ConditionalSelect(negMask, -constrainedAbs, constrainedAbs);
+        sum += constrained * Vector128.Create(tap);
+        max = Vector128.Max(max, p);
+        min = Vector128.Min(min, p);
+    }
+
     /// <summary>Reads one CDEF tap and folds it into the running sum/max/min.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Accum(int[] plane, int stride, int y, int x, int dy, int dx, int tap, int strength, int damping, int center, ref long sum, ref int max, ref int min)
+    private static void Accum(int[] plane, int stride, int y, int x, int dy, int dx, int tap, int strength, int dampingAdj, int center, ref long sum, ref int max, ref int min)
     {
         int p = plane[((y + dy) * stride) + x + dx];
-        sum += tap * Constrain(p - center, strength, damping);
+        sum += tap * ConstrainFast(p - center, strength, dampingAdj);
         if (p > max)
         {
             max = p;
@@ -405,16 +540,27 @@ internal static class Av1Cdef
         }
     }
 
-    private static int Constrain(int diff, int threshold, int damping)
+    /// <summary>
+    /// <c>dampingAdj = max(0, damping - FloorLog2(threshold))</c> (spec's own <c>Constrain</c> process),
+    /// hoisted out of the per-tap hot path: <paramref name="threshold"/>/<paramref name="damping"/> are
+    /// invariant for an entire <see cref="CdefFilter"/> call (only 2 distinct threshold values -- priStr,
+    /// secStr -- across up to 768 taps per 8x8 block), so computing it once per call instead of once per
+    /// tap removes ~768 redundant <see cref="FloorLog2"/> bit-loops.
+    /// </summary>
+    private static int DampingAdjust(int threshold, int damping) =>
+        threshold == 0 ? 0 : Math.Max(0, damping - FloorLog2(threshold));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int ConstrainFast(int diff, int threshold, int dampingAdj)
     {
         if (threshold == 0)
         {
             return 0;
         }
 
-        int dampingAdj = Math.Max(0, damping - FloorLog2(threshold));
+        int absDiff = Math.Abs(diff);
         int sign = diff < 0 ? -1 : 1;
-        return sign * Math.Clamp(Math.Abs(diff) - (Math.Abs(diff) >> dampingAdj), 0, Math.Abs(diff));
+        return sign * Math.Clamp(absDiff - (absDiff >> dampingAdj), 0, absDiff);
     }
 
     /// <summary><c>cdef_get_at</c> (spec §7.15.3), reading from the deblocked <c>CurrFrame</c> (not the being-written <c>CdefFrame</c>).</summary>

@@ -40,16 +40,17 @@ Targets .NET 10. No native interop — every codec is managed code, using modern
   Animated AVIF, film grain synthesis, gain maps, 12-bit depth, and palette/IntraBC mode remain
   unimplemented and throw a clear `AvifUnsupportedFeatureException` rather than a silently wrong
   result. Performance is an explicitly aspirational, longer-term goal here (see
-  `LIBRARY_COMPARISON.md`) rather than a merge gate — four profile-guided passes (CDEF's per-tap
+  `LIBRARY_COMPARISON.md`) rather than a merge gate — five profile-guided passes (CDEF's per-tap
   availability check skipped for the common interior-block case; a redundant full-buffer clear in
   reconstruction removed; the inverse transform's `cos128`/`sin128`/`brev` computations replaced with
   lookup tables; a dedicated allocation pass reusing scratch buffers instead of reallocating them per
-  block; and an `ArrayPool`-backed buffer pooling pass threaded through the whole filter pipeline) have
-  together cut per-decode allocation on a 1080p photo from 175.5 MB to 17.8 MB and closed roughly 45% of
-  the initial time gap to `ffmpeg`, and the YUV→RGB color conversion is vectorized
-  (`Vector128<double>`); the transforms' own arithmetic, intra prediction, entropy decode, and most of
-  the in-loop filters are still scalar. Targeted correctness oracle is `ffmpeg` (test-only, never a
-  shipped dependency)
+  block; an `ArrayPool`-backed buffer pooling pass threaded through the whole filter pipeline; and
+  CDEF's own directional filtering vectorized with `Vector256<int>`/`Vector128<int>`, which alone took
+  the decoder from 3.7× to 2.1× `ffmpeg`'s time) have together cut per-decode allocation on a 1080p
+  photo from 175.5 MB to 17.8 MB and its time from 418 ms to 145 ms, and the YUV→RGB color conversion
+  is vectorized (`Vector128<double>`) too; the inverse transform's own arithmetic, intra prediction,
+  entropy decode, and CDEF's direction search are still scalar. Targeted correctness oracle is `ffmpeg`
+  (test-only, never a shipped dependency)
   rather than SkiaSharp, whose AVIF decode support is inconsistent across builds — confirmed absent in
   this repo's pinned SkiaSharp version; correctness is instead verified via the AV1 spec's own
   bitstream-conformance requirement checked across a real `libavif` test corpus, plus a pixel-hash
