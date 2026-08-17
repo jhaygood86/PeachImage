@@ -17,13 +17,18 @@ internal static class CorpusAssertions
     /// <summary>Asserts that decoding <paramref name="path"/> either succeeds or throws <see cref="WebpDecodingException"/> — never anything else, and never hangs.</summary>
     public static void AssertDecodesGracefully(string path)
     {
-        var task = Task.Run(() => TryDecode(path));
-        if (!task.Wait(PerFileTimeout))
+        // A dedicated thread, not Task.Run, so the timeout guard doesn't compete for thread-pool workers
+        // with xunit's own parallel test execution — under load that starves the pool and makes fast
+        // decodes spuriously "time out" (see the CI incident this replaced).
+        (bool Succeeded, Exception? Exception) result = default;
+        var thread = new Thread(() => result = TryDecode(path)) { IsBackground = true };
+        thread.Start();
+        if (!thread.Join(PerFileTimeout))
         {
             Assert.Fail($"Decoding {Path.GetFileName(path)} did not complete within {PerFileTimeout.TotalSeconds:F0}s (possible hang).");
         }
 
-        var (succeeded, exception) = task.GetAwaiter().GetResult();
+        var (succeeded, exception) = result;
         if (!succeeded && exception is not WebpDecodingException)
         {
             Assert.Fail($"Decoding {Path.GetFileName(path)} threw {exception}");
