@@ -160,9 +160,13 @@ internal static class Av1InverseTransform
     /// <c>Inverse DCT process</c> (spec §7.13.2.3): a single generic implementation, parameterized on
     /// <paramref name="n"/> (log2 of the transform length, 2 through 6), of the spec's own 31 ordered
     /// steps -- each step's own "if n is ..." guard is transcribed as a direct <c>if</c>, exactly as
-    /// written, rather than being unrolled per size.
+    /// written, rather than being unrolled per size. Internal (not private) so the AV1 forward-encode
+    /// core's <c>Av1ForwardTransform</c> can numerically derive its forward transform by probing this exact
+    /// operator with impulse vectors, guaranteeing the pair round-trips through this decoder's own,
+    /// already-correct inverse rather than depending on hand-deriving the transpose of this butterfly
+    /// network.
     /// </summary>
-    public static void InverseDct(int[] t, int n, int r)
+    internal static void InverseDct(int[] t, int n, int r)
     {
         InverseDctPermute(t, n);
 

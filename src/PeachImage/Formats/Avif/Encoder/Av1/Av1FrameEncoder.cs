@@ -1,0 +1,97 @@
+namespace PeachImage.Formats.Avif.Encoder.Av1;
+
+/// <summary>
+/// Top-level AV1 encode entry point: converts a source image to YUV, pads it to a 64-pixel-multiple coded
+/// canvas (edge-replicated -- see <see cref="Av1TileEncoder"/>'s remarks on why this is required for its
+/// simplified, edge-case-free superblock traversal), writes the sequence/frame headers and the single tile,
+/// and assembles the final OBU byte stream (temporal delimiter + sequence header + frame header + tile
+/// group). The true (unpadded) source dimensions are carried separately in the returned
+/// <see cref="Av1EncodedFrame"/> for the container writer's <c>ispe</c> box -- the AVIF container crops the
+/// padded coded frame back down to the true size at decode time (see <c>AvifDecoder.Decode</c>'s use of the
+/// container's own width/height, not the AV1 bitstream's <c>RenderWidth</c>/<c>RenderHeight</c>).
+/// </summary>
+internal static class Av1FrameEncoder
+{
+    /// <summary>Encodes an opaque 8-bit RGB24 (or, if <paramref name="monoChrome"/>, Gray8) source into a full AV1 OBU byte stream.</summary>
+    public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality)
+    {
+        int paddedWidth = ((width + 63) / 64) * 64;
+        int paddedHeight = ((height + 63) / 64) * 64;
+
+        int[] yPlane;
+        int[]? uPlane = null;
+        int[]? vPlane = null;
+        int chromaWidth = 0;
+        int chromaHeight = 0;
+        int paddedChromaWidth = 0;
+        int paddedChromaHeight = 0;
+
+        if (monoChrome)
+        {
+            int[] y = Av1RgbToYuvConverter.ConvertMonoChrome(pixels, width, height);
+            yPlane = PadPlane(y, width, height, paddedWidth, paddedHeight);
+        }
+        else
+        {
+            var (y, u, v, cw, ch) = Av1RgbToYuvConverter.Convert(pixels, width, height);
+            chromaWidth = cw;
+            chromaHeight = ch;
+            paddedChromaWidth = paddedWidth / 2;
+            paddedChromaHeight = paddedHeight / 2;
+
+            yPlane = PadPlane(y, width, height, paddedWidth, paddedHeight);
+            uPlane = PadPlane(u, chromaWidth, chromaHeight, paddedChromaWidth, paddedChromaHeight);
+            vPlane = PadPlane(v, chromaWidth, chromaHeight, paddedChromaWidth, paddedChromaHeight);
+        }
+
+        int baseQIdx = Av1ForwardQuantizer.QualityToBaseQIdx(quality);
+
+        var reconY = new int[paddedWidth * paddedHeight];
+        int[]? reconU = monoChrome ? null : new int[paddedChromaWidth * paddedChromaHeight];
+        int[]? reconV = monoChrome ? null : new int[paddedChromaWidth * paddedChromaHeight];
+
+        byte[] tileBytes = Av1TileEncoder.EncodeTile(
+            yPlane, paddedWidth, paddedHeight,
+            uPlane, vPlane, paddedChromaWidth, paddedChromaHeight,
+            reconY, reconU, reconV,
+            monoChrome, baseQIdx);
+
+        byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(paddedWidth, paddedHeight, monoChrome);
+
+        var frameHeaderWriter = new Av1BitWriter();
+        Av1FrameHeaderWriter.Write(frameHeaderWriter, paddedWidth, paddedHeight, monoChrome, baseQIdx);
+        byte[] frameHeaderPayload = frameHeaderWriter.ToArray();
+
+        var output = new List<byte>();
+        Av1ObuWriter.WriteObu(output, Decoding.Av1.Av1ObuType.TemporalDelimiter, ReadOnlySpan<byte>.Empty);
+        Av1ObuWriter.WriteObu(output, Decoding.Av1.Av1ObuType.SequenceHeader, seqHeaderPayload);
+        Av1ObuWriter.WriteObu(output, Decoding.Av1.Av1ObuType.FrameHeader, frameHeaderPayload);
+        Av1ObuWriter.WriteObu(output, Decoding.Av1.Av1ObuType.TileGroup, tileBytes);
+
+        return new Av1EncodedFrame(output.ToArray(), width, height, monoChrome);
+    }
+
+    /// <summary>Pads a <paramref name="srcWidth"/> x <paramref name="srcHeight"/> plane up to <paramref name="paddedWidth"/> x <paramref name="paddedHeight"/> by replicating the last real row/column into the padding region.</summary>
+    private static int[] PadPlane(int[] src, int srcWidth, int srcHeight, int paddedWidth, int paddedHeight)
+    {
+        if (srcWidth == paddedWidth && srcHeight == paddedHeight)
+        {
+            return src;
+        }
+
+        var padded = new int[paddedWidth * paddedHeight];
+        for (int row = 0; row < paddedHeight; row++)
+        {
+            int srcRow = Math.Min(row, srcHeight - 1);
+            int srcRowBase = srcRow * srcWidth;
+            int destRowBase = row * paddedWidth;
+            for (int col = 0; col < paddedWidth; col++)
+            {
+                int srcCol = Math.Min(col, srcWidth - 1);
+                padded[destRowBase + col] = src[srcRowBase + srcCol];
+            }
+        }
+
+        return padded;
+    }
+}

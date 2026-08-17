@@ -102,7 +102,7 @@ internal sealed class Av1SymbolDecoder
 
         if (adapt)
         {
-            AdaptCdf(cdf, n, symbol);
+            Av1CdfAdaptation.AdaptCdf(cdf, n, symbol);
         }
 
         return symbol;
@@ -122,41 +122,5 @@ internal sealed class Av1SymbolDecoder
         _symbolMaxBits -= bits;
     }
 
-    /// <summary>CDF adaptation (spec §8.2.6, the process following renormalization when <c>disable_cdf_update == 0</c>).</summary>
-    private static void AdaptCdf(Span<ushort> cdf, int n, int symbol)
-    {
-        int count = cdf[n];
-        int rate = 3 + (count > 15 ? 1 : 0) + (count > 31 ? 1 : 0) + Math.Min(FloorLog2((uint)n), 2);
-
-        int tmp = 0;
-        for (int i = 0; i < n - 1; i++)
-        {
-            tmp = i == symbol ? 1 << 15 : tmp;
-            if (tmp < cdf[i])
-            {
-                cdf[i] -= (ushort)((cdf[i] - tmp) >> rate);
-            }
-            else
-            {
-                cdf[i] += (ushort)((tmp - cdf[i]) >> rate);
-            }
-        }
-
-        if (count < 32)
-        {
-            cdf[n] = (ushort)(count + 1);
-        }
-    }
-
-    private static int FloorLog2(uint x)
-    {
-        int s = 0;
-        while (x != 0)
-        {
-            x >>= 1;
-            s++;
-        }
-
-        return s - 1;
-    }
+    private static int FloorLog2(uint x) => Av1CdfAdaptation.FloorLog2(x);
 }

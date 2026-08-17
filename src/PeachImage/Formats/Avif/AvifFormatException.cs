@@ -38,6 +38,10 @@ public sealed class AvifDecodingException : AvifFormatException
 /// than one that is malformed. Kept as a sibling of <see cref="AvifDecodingException"/> (not a subclass)
 /// so corpus/differential tests can distinguish "this file deliberately isn't supported, skip it" from
 /// "this is a real decoding bug" by catching this narrower type first.
+///
+/// <para>Also used on the encode side for source <em>images</em> whose content is deliberately out of scope
+/// for this encoder rather than malformed -- specifically, an <see cref="Image"/> with a non-opaque alpha
+/// channel, since this encoder only produces opaque AVIF still images in this version.</para>
 /// </summary>
 public sealed class AvifUnsupportedFeatureException : AvifFormatException
 {
@@ -49,6 +53,26 @@ public sealed class AvifUnsupportedFeatureException : AvifFormatException
 
     /// <summary>Initializes a new instance of <see cref="AvifUnsupportedFeatureException"/> with an inner exception.</summary>
     public AvifUnsupportedFeatureException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}
+
+/// <summary>
+/// Thrown when an <see cref="Image"/> cannot be encoded as AVIF, either because its pixel format is
+/// unsupported by this encoder or its dimensions exceed what it can represent. Alpha-bearing source images
+/// are rejected via <see cref="AvifUnsupportedFeatureException"/> instead -- see its own remarks.
+/// </summary>
+public sealed class AvifEncodingException : AvifFormatException
+{
+    /// <summary>Initializes a new instance of <see cref="AvifEncodingException"/>.</summary>
+    public AvifEncodingException(string message)
+        : base(message)
+    {
+    }
+
+    /// <summary>Initializes a new instance of <see cref="AvifEncodingException"/> with an inner exception.</summary>
+    public AvifEncodingException(string message, Exception innerException)
         : base(message, innerException)
     {
     }
