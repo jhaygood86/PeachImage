@@ -1,4 +1,5 @@
 using PeachImage.Formats.Avif;
+using PeachImage.Tests.Internal;
 
 namespace PeachImage.Tests.Formats.Avif.Corpus;
 
@@ -10,13 +11,7 @@ internal static class AvifCorpusAssertions
     /// <summary>Asserts that identifying <paramref name="path"/> either succeeds or throws <see cref="AvifDecodingException"/>/<see cref="AvifUnsupportedFeatureException"/> -- never anything else, and never hangs.</summary>
     public static void AssertIdentifiesGracefully(string path)
     {
-        // A dedicated thread, not Task.Run, so the timeout guard doesn't compete for thread-pool workers
-        // with xunit's own parallel test execution — under load that starves the pool and makes fast
-        // decodes spuriously "time out" (see the CI incident this replaced).
-        (bool Succeeded, Exception? Exception) result = default;
-        var thread = new Thread(() => result = TryIdentify(path)) { IsBackground = true };
-        thread.Start();
-        if (!thread.Join(PerFileTimeout))
+        if (!CorpusHangGuard.TryRun(() => TryIdentify(path), PerFileTimeout, out var result))
         {
             Assert.Fail($"Identifying {Path.GetFileName(path)} did not complete within {PerFileTimeout.TotalSeconds:F0}s (possible hang).");
         }
@@ -52,13 +47,7 @@ internal static class AvifCorpusAssertions
     /// </summary>
     public static void AssertDecodesGracefully(string path)
     {
-        // A dedicated thread, not Task.Run, so the timeout guard doesn't compete for thread-pool workers
-        // with xunit's own parallel test execution — under load that starves the pool and makes fast
-        // decodes spuriously "time out" (see the CI incident this replaced).
-        (bool Succeeded, Exception? Exception) result = default;
-        var thread = new Thread(() => result = TryDecode(path)) { IsBackground = true };
-        thread.Start();
-        if (!thread.Join(PerFileTimeout))
+        if (!CorpusHangGuard.TryRun(() => TryDecode(path), PerFileTimeout, out var result))
         {
             Assert.Fail($"Decoding {Path.GetFileName(path)} did not complete within {PerFileTimeout.TotalSeconds:F0}s (possible hang).");
         }
