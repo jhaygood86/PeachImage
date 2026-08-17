@@ -5,6 +5,15 @@
     <IsTestProject>true</IsTestProject>
     <RootNamespace>PeachImage.Tests</RootNamespace>
     <NoWarn>$(NoWarn);CS1591;CA1707;CA1859</NoWarn>
+    <!--
+      dotnet test runs this project's TFMs (net8.0/net10.0) in parallel by default (SDK 9+). On a fresh
+      checkout with no tests/corpus/ yet, both TFM processes race to auto-fetch it over the network at the
+      same time (CorpusFetcher), writing the same destination files concurrently — producing corrupt/partial
+      corpus files and, since Directory.GetFiles-backed MemberData can enumerate mid-fetch, spurious "no data
+      found" theory failures. Serializing the TFMs means the first one fully populates the corpus (and writes
+      its marker file) before the second starts, so it just sees the marker and skips fetching.
+    -->
+    <TestTfmsInParallel>false</TestTfmsInParallel>
   </PropertyGroup>
 
   <ItemGroup>
