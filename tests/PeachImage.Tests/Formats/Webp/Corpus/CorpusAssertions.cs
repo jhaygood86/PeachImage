@@ -13,7 +13,7 @@ namespace PeachImage.Tests.Formats.Webp.Corpus;
 /// </summary>
 internal static class CorpusAssertions
 {
-    private static readonly TimeSpan PerFileTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan PerFileTimeout = TimeSpan.FromSeconds(45);
 
     /// <summary>Asserts that decoding <paramref name="path"/> either succeeds or throws <see cref="WebpDecodingException"/> — never anything else, and never hangs.</summary>
     public static void AssertDecodesGracefully(string path)

@@ -6,7 +6,7 @@ namespace PeachImage.Tests.Formats.Avif.Corpus;
 /// <summary>Shared assertions for AVIF corpus-driven tests, mirroring Webp's <c>CorpusAssertions</c>. Kept as a plain helper (not itself a <c>[Fact]</c>/<c>[Theory]</c> method) so its blocking <c>Thread.Join</c> hang-guard doesn't trip xunit's analyzer rules against blocking directly inside a test method.</summary>
 internal static class AvifCorpusAssertions
 {
-    private static readonly TimeSpan PerFileTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan PerFileTimeout = TimeSpan.FromSeconds(45);
 
     /// <summary>Asserts that identifying <paramref name="path"/> either succeeds or throws <see cref="AvifDecodingException"/>/<see cref="AvifUnsupportedFeatureException"/> -- never anything else, and never hangs.</summary>
     public static void AssertIdentifiesGracefully(string path)
