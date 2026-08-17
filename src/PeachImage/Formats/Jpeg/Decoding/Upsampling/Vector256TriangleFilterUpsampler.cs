@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Jpeg.Decoding.Upsampling;
@@ -87,7 +88,7 @@ internal sealed class Vector256TriangleFilterUpsampler : IChromaUpsampler
         {
             var m = WidenToUShort(main.Slice(c, 16));
             var v = WidenToUShort(vNeighbor.Slice(c, 16));
-            (m + m + m + v).CopyTo(columnBlend.Slice(c, 16));
+            (m + m + m + v).StoreUnsafe(ref columnBlend[c]);
         }
 
         // Scalar tail for sourceWidth % 16 leftover columns — the routine case, not an edge case (chroma
@@ -108,9 +109,9 @@ internal sealed class Vector256TriangleFilterUpsampler : IChromaUpsampler
         int c = 0;
         for (; c + 16 <= sourceWidth; c += 16)
         {
-            var center = Vector256.Create(a.Slice(c + 1, 16));
-            var left = Vector256.Create(a.Slice(c, 16));
-            var right = Vector256.Create(a.Slice(c + 2, 16));
+            var center = Vector256.LoadUnsafe(ref MemoryMarshal.GetReference(a.Slice(c + 1, 16)));
+            var left = Vector256.LoadUnsafe(ref MemoryMarshal.GetReference(a.Slice(c, 16)));
+            var right = Vector256.LoadUnsafe(ref MemoryMarshal.GetReference(a.Slice(c + 2, 16)));
 
             var centerTimes3 = center + center + center;
             var leftBlend = Vector256.ShiftRightLogical(centerTimes3 + left + Eight, 4);
@@ -121,8 +122,8 @@ internal sealed class Vector256TriangleFilterUpsampler : IChromaUpsampler
             // a single per-lane Vector256.Shuffle can interleave.
             var combinedLow = Vector128.Narrow(leftBlend.GetLower(), rightBlend.GetLower());
             var combinedHigh = Vector128.Narrow(leftBlend.GetUpper(), rightBlend.GetUpper());
-            Vector128.Shuffle(combinedLow, InterleaveMask).CopyTo(dstRow.Slice(c * 2, 16));
-            Vector128.Shuffle(combinedHigh, InterleaveMask).CopyTo(dstRow.Slice((c * 2) + 16, 16));
+            Vector128.Shuffle(combinedLow, InterleaveMask).StoreUnsafe(ref dstRow[c * 2]);
+            Vector128.Shuffle(combinedHigh, InterleaveMask).StoreUnsafe(ref dstRow[(c * 2) + 16]);
         }
 
         for (; c < sourceWidth; c++)
@@ -137,7 +138,7 @@ internal sealed class Vector256TriangleFilterUpsampler : IChromaUpsampler
 
     private static Vector256<ushort> WidenToUShort(ReadOnlySpan<byte> source16)
     {
-        var byteVec = Vector256.Create(Vector128.Create(source16), Vector128<byte>.Zero);
+        var byteVec = Vector256.Create(Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(source16)), Vector128<byte>.Zero);
         return Vector256.WidenLower(byteVec);
     }
 }

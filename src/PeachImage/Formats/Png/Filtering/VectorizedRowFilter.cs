@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace PeachImage.Formats.Png.Filtering;
 
@@ -32,9 +33,9 @@ internal static class VectorizedRowFilter
 
         for (; x + n <= raw.Length; x += n)
         {
-            var current = new Vector<byte>(raw.Slice(x, n));
-            var a = new Vector<byte>(raw.Slice(x - bpp, n));
-            (current - a).CopyTo(destination.Slice(x, n));
+            var current = Vector.LoadUnsafe(ref MemoryMarshal.GetReference(raw.Slice(x, n)));
+            var a = Vector.LoadUnsafe(ref MemoryMarshal.GetReference(raw.Slice(x - bpp, n)));
+            (current - a).StoreUnsafe(ref destination[x]);
         }
 
         for (; x < raw.Length; x++)
@@ -50,9 +51,9 @@ internal static class VectorizedRowFilter
 
         for (; x + n <= raw.Length; x += n)
         {
-            var current = new Vector<byte>(raw.Slice(x, n));
-            var b = new Vector<byte>(previousRow.Slice(x, n));
-            (current - b).CopyTo(destination.Slice(x, n));
+            var current = Vector.LoadUnsafe(ref MemoryMarshal.GetReference(raw.Slice(x, n)));
+            var b = Vector.LoadUnsafe(ref MemoryMarshal.GetReference(previousRow.Slice(x, n)));
+            (current - b).StoreUnsafe(ref destination[x]);
         }
 
         for (; x < raw.Length; x++)
@@ -75,15 +76,15 @@ internal static class VectorizedRowFilter
 
         for (; x + n <= raw.Length; x += n)
         {
-            var a = new Vector<byte>(raw.Slice(x - bpp, n));
-            var b = hasPrev ? new Vector<byte>(previousRow.Slice(x, n)) : Vector<byte>.Zero;
+            var a = Vector.LoadUnsafe(ref MemoryMarshal.GetReference(raw.Slice(x - bpp, n)));
+            var b = hasPrev ? Vector.LoadUnsafe(ref MemoryMarshal.GetReference(previousRow.Slice(x, n))) : Vector<byte>.Zero;
 
             // floor((a+b)/2) without widening or overflow: (a&b) + ((a^b)>>1). Standard unsigned
             // average-without-overflow identity — verified against the scalar (a+b)/2 in tests.
             var avg = (a & b) + Vector.ShiftRightLogical(a ^ b, 1);
 
-            var current = new Vector<byte>(raw.Slice(x, n));
-            (current - avg).CopyTo(destination.Slice(x, n));
+            var current = Vector.LoadUnsafe(ref MemoryMarshal.GetReference(raw.Slice(x, n)));
+            (current - avg).StoreUnsafe(ref destination[x]);
         }
 
         for (; x < raw.Length; x++)
@@ -109,14 +110,14 @@ internal static class VectorizedRowFilter
         for (; x + n <= raw.Length; x += n)
         {
             // x >= bpp is guaranteed here (the scalar prologue above only exits once x >= bpp).
-            var aVec = new Vector<byte>(raw.Slice(x - bpp, n));
-            var bVec = hasPrev ? new Vector<byte>(previousRow.Slice(x, n)) : Vector<byte>.Zero;
-            var cVec = hasPrev ? new Vector<byte>(previousRow.Slice(x - bpp, n)) : Vector<byte>.Zero;
+            var aVec = Vector.LoadUnsafe(ref MemoryMarshal.GetReference(raw.Slice(x - bpp, n)));
+            var bVec = hasPrev ? Vector.LoadUnsafe(ref MemoryMarshal.GetReference(previousRow.Slice(x, n))) : Vector<byte>.Zero;
+            var cVec = hasPrev ? Vector.LoadUnsafe(ref MemoryMarshal.GetReference(previousRow.Slice(x - bpp, n))) : Vector<byte>.Zero;
 
             var predictor = PaethVector(aVec, bVec, cVec);
 
-            var current = new Vector<byte>(raw.Slice(x, n));
-            (current - predictor).CopyTo(destination.Slice(x, n));
+            var current = Vector.LoadUnsafe(ref MemoryMarshal.GetReference(raw.Slice(x, n)));
+            (current - predictor).StoreUnsafe(ref destination[x]);
         }
 
         for (; x < raw.Length; x++)
@@ -135,9 +136,9 @@ internal static class VectorizedRowFilter
 
         for (; x + n <= row.Length; x += n)
         {
-            var current = new Vector<byte>(row.Slice(x, n));
-            var b = new Vector<byte>(previousRow.Slice(x, n));
-            (current + b).CopyTo(row.Slice(x, n));
+            var current = Vector.LoadUnsafe(ref row[x]);
+            var b = Vector.LoadUnsafe(ref MemoryMarshal.GetReference(previousRow.Slice(x, n)));
+            (current + b).StoreUnsafe(ref row[x]);
         }
 
         for (; x < row.Length; x++)

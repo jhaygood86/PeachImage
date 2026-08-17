@@ -464,7 +464,7 @@ internal static class Vp8VectorLoopFilter
     private static Vector128<short> ShiftRight3(Vector128<short> v) => Vector128.ShiftRightArithmetic(v, 3);
 
     private static Vector128<byte> Load(Span<byte> plane, int offset) =>
-        Vector128.Create<byte>(plane.Slice(offset, Vector128<byte>.Count));
+        Vector128.LoadUnsafe(ref plane[offset]);
 
     private static Vector128<short> Lower(Vector128<byte> v) => Vector128.WidenLower(v).AsInt16();
 
@@ -486,5 +486,5 @@ internal static class Vp8VectorLoopFilter
 
     /// <summary>Narrows the two filtered halves back to bytes and writes them. Every lane is already clamped to [0,255], so the truncating narrow keeps them intact.</summary>
     private static void Store(Span<byte> plane, int offset, Vector128<short> lower, Vector128<short> upper) =>
-        Vector128.Narrow(lower, upper).AsByte().CopyTo(plane.Slice(offset, Vector128<byte>.Count));
+        Vector128.Narrow(lower, upper).AsByte().StoreUnsafe(ref plane[offset]);
 }

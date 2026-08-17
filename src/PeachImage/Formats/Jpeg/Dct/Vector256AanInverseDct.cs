@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Jpeg.Dct;
@@ -75,10 +76,10 @@ internal sealed class Vector256AanInverseDct : IInverseDctKernel
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector256<float> LoadAndDequantizeRow(ReadOnlySpan<short> coefficients, ReadOnlySpan<float> dequantTable, int offset)
     {
-        var coeffShorts = Vector128.Create(coefficients.Slice(offset, 8));
+        var coeffShorts = Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(coefficients.Slice(offset, 8)));
         var (intLower, intUpper) = Vector128.Widen(coeffShorts);
         var coeffFloats = Vector256.ConvertToSingle(Vector256.Create(intLower, intUpper));
-        var dequant = Vector256.Create(dequantTable.Slice(offset, 8));
+        var dequant = Vector256.LoadUnsafe(ref MemoryMarshal.GetReference(dequantTable.Slice(offset, 8)));
         return coeffFloats * dequant;
     }
 
@@ -101,6 +102,6 @@ internal sealed class Vector256AanInverseDct : IInverseDctKernel
         var asUInt = Vector256.ConvertToInt32(clamped).AsUInt32();
         var narrowedToUShort = Vector128.Narrow(asUInt.GetLower(), asUInt.GetUpper());
         var bytes = Vector128.Narrow(narrowedToUShort, Vector128<ushort>.Zero).GetLower();
-        bytes.CopyTo(output.Slice(offset, 8));
+        bytes.StoreUnsafe(ref output[offset]);
     }
 }

@@ -2,7 +2,7 @@
 
 Pure .NET image format readers and writers for commonly used image formats on the web.
 
-Targets .NET 10. No native interop — every codec is managed code, using modern .NET APIs
+Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed code, using modern .NET APIs
 (`System.Runtime.Intrinsics`, `Span<T>`/`ReadOnlySpan<T>`) for performance instead of P/Invoke.
 
 ## Status

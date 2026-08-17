@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Jpeg.Decoding.Upsampling;
@@ -101,7 +102,7 @@ internal sealed class TriangleFilterUpsampler : IChromaUpsampler
         {
             var m = WidenToUShort(main.Slice(c, 8));
             var v = WidenToUShort(vNeighbor.Slice(c, 8));
-            (m + m + m + v).CopyTo(columnBlend.Slice(c, 8));
+            (m + m + m + v).StoreUnsafe(ref columnBlend[c]);
         }
 
         // Scalar tail for sourceWidth % 8 leftover columns — must compute these directly, not zero-pad:
@@ -121,9 +122,9 @@ internal sealed class TriangleFilterUpsampler : IChromaUpsampler
         int c = 0;
         for (; c + 8 <= sourceWidth; c += 8)
         {
-            var center = Vector128.Create(a.Slice(c + 1, 8));
-            var left = Vector128.Create(a.Slice(c, 8));
-            var right = Vector128.Create(a.Slice(c + 2, 8));
+            var center = Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(a.Slice(c + 1, 8)));
+            var left = Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(a.Slice(c, 8)));
+            var right = Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(a.Slice(c + 2, 8)));
 
             var centerTimes3 = center + center + center;
             var leftBlend = Vector128.ShiftRightLogical(centerTimes3 + left + Eight, 4);
@@ -134,7 +135,7 @@ internal sealed class TriangleFilterUpsampler : IChromaUpsampler
             // column to c's left), dst[2c+1]=rightBlend[c] (uses the column to c's right).
             var combined = Vector128.Narrow(leftBlend, rightBlend);
             var interleaved = Vector128.Shuffle(combined, InterleaveMask);
-            interleaved.CopyTo(dstRow.Slice(c * 2, 16));
+            interleaved.StoreUnsafe(ref dstRow[c * 2]);
         }
 
         for (; c < sourceWidth; c++)
@@ -149,9 +150,8 @@ internal sealed class TriangleFilterUpsampler : IChromaUpsampler
 
     private static Vector128<ushort> WidenToUShort(ReadOnlySpan<byte> source8)
     {
-        Span<byte> padded = stackalloc byte[16];
-        source8.CopyTo(padded);
-        return Vector128.WidenLower(Vector128.Create((ReadOnlySpan<byte>)padded));
+        var byteVec = Vector128.Create(Vector64.LoadUnsafe(ref MemoryMarshal.GetReference(source8)), Vector64<byte>.Zero);
+        return Vector128.WidenLower(byteVec);
     }
 
     /// <summary>Original per-pixel scalar path — kept for <c>horizontalRatio == 1</c> (vertical-only subsampling, essentially never seen in real files, not worth vectorizing).</summary>

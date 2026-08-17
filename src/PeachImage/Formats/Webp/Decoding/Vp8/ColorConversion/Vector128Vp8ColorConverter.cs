@@ -69,7 +69,7 @@ internal sealed class Vector128Vp8ColorConverter : IVp8ColorConverter
                 Vector128.Shuffle(DescaleAndPack(green), GreenLanes) |
                 Vector128.Shuffle(DescaleAndPack(blue), BlueLanes);
 
-            interleaved.CopyTo(rgb[(x * 3)..]);
+            interleaved.StoreUnsafe(ref rgb[x * 3]);
         }
 
         Vp8ScalarColorConverter.ConvertRemainder(y, u, v, rgb, x, width);

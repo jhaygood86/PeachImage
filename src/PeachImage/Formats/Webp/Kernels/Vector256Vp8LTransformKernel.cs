@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Webp.Kernels;
@@ -14,7 +15,7 @@ internal sealed class Vector256Vp8LTransformKernel : IVp8LTransformKernel
 
         for (; i + n <= pixels.Length; i += n)
         {
-            var argb = Vector256.Create(pixels.Slice(i, n));
+            var argb = Vector256.LoadUnsafe(ref pixels[i]);
             var green = (argb & GreenMask) >> 8;
 
             // Adding in *byte* lanes rather than uint lanes is what makes the per-channel "mod 256, no clamp"
@@ -25,7 +26,7 @@ internal sealed class Vector256Vp8LTransformKernel : IVp8LTransformKernel
             // green and alpha.
             var greenIntoRedAndBlue = ((green << 16) | green).AsByte();
             var result = (argb.AsByte() + greenIntoRedAndBlue).AsUInt32();
-            result.CopyTo(pixels.Slice(i, n));
+            result.StoreUnsafe(ref pixels[i]);
         }
 
         for (; i < pixels.Length; i++)
@@ -41,9 +42,9 @@ internal sealed class Vector256Vp8LTransformKernel : IVp8LTransformKernel
 
         for (; i + n <= row.Length; i += n)
         {
-            var a = Vector256.Create(row.Slice(i, n));
-            var b = Vector256.Create(topRow.Slice(i, n));
-            (a + b).CopyTo(row.Slice(i, n));
+            var a = Vector256.LoadUnsafe(ref row[i]);
+            var b = Vector256.LoadUnsafe(ref MemoryMarshal.GetReference(topRow.Slice(i, n)));
+            (a + b).StoreUnsafe(ref row[i]);
         }
 
         for (; i < row.Length; i++)

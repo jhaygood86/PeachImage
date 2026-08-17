@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Jpeg.ColorConversion;
@@ -133,7 +134,7 @@ internal sealed class Vector128ColorConverter : IColorConverter
     /// <summary><paramref name="padded16"/>'s first <see cref="Lanes"/> bytes widened to a <see cref="Vector128{Single}"/> via byte-&gt;ushort-&gt;uint widen then a hardware uint-&gt;float convert — the rest of the 16 bytes is don't-care padding, never read past lane 3.</summary>
     private static Vector128<float> WidenBytes(ReadOnlySpan<byte> padded16)
     {
-        var byteVec = Vector128.Create(padded16);
+        var byteVec = Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(padded16));
         var ushortVec = Vector128.WidenLower(byteVec);
         var uintVec = Vector128.WidenLower(ushortVec);
         return Vector128.ConvertToSingle(uintVec);
@@ -157,13 +158,13 @@ internal sealed class Vector128ColorConverter : IColorConverter
             var narrowedToUShort = Vector128.Narrow(asUInt, Vector128<uint>.Zero);
             var bytes = Vector128.Narrow(narrowedToUShort, Vector128<ushort>.Zero).GetLower();
             Span<byte> lane8 = stackalloc byte[8];
-            bytes.CopyTo(lane8);
+            bytes.StoreUnsafe(ref lane8[0]);
             lane8[..Lanes].CopyTo(destination.Slice(firstOffset, Lanes));
             return;
         }
 
         Span<int> rounded = stackalloc int[Lanes];
-        ToRoundedInt(value).CopyTo(rounded);
+        ToRoundedInt(value).StoreUnsafe(ref rounded[0]);
         for (int i = 0; i < Lanes; i++)
         {
             destination[firstOffset + (i * stride)] = (byte)(invert ? 255 - rounded[i] : rounded[i]);

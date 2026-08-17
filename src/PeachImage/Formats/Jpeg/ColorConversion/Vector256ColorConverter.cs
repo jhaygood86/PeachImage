@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Jpeg.ColorConversion;
@@ -137,7 +138,7 @@ internal sealed class Vector256ColorConverter : IColorConverter
     /// <summary>Loads <see cref="Lanes"/> contiguous bytes and widens them to float via hardware byte-&gt;ushort-&gt;uint-&gt;float widen/convert, not a scalar per-lane cast. Builds the zero-padded 16-byte vector directly from an 8-byte vector load plus a zero upper half — the load-side mirror of <see cref="StoreInterleavedRgb"/>'s <c>Vector128.Create(NarrowRounded(...), Vector64&lt;byte&gt;.Zero)</c> — rather than routing already-contiguous source bytes through a stack buffer just to satisfy <see cref="Vector128"/>'s 16-byte <see cref="Vector128.Create{T}(System.ReadOnlySpan{T})"/> overload.</summary>
     private static Vector256<float> LoadWidened(ReadOnlySpan<byte> source, int offset)
     {
-        var byteVec = Vector128.Create(Vector64.Create(source.Slice(offset, Lanes)), Vector64<byte>.Zero);
+        var byteVec = Vector128.Create(Vector64.LoadUnsafe(ref MemoryMarshal.GetReference(source.Slice(offset, Lanes))), Vector64<byte>.Zero);
         return WidenBytes(byteVec);
     }
 
@@ -155,7 +156,7 @@ internal sealed class Vector256ColorConverter : IColorConverter
             bPadded[lane] = rgb[offset + 2];
         }
 
-        return (WidenBytes(Vector128.Create((ReadOnlySpan<byte>)rPadded)), WidenBytes(Vector128.Create((ReadOnlySpan<byte>)gPadded)), WidenBytes(Vector128.Create((ReadOnlySpan<byte>)bPadded)));
+        return (WidenBytes(Vector128.LoadUnsafe(ref rPadded[0])), WidenBytes(Vector128.LoadUnsafe(ref gPadded[0])), WidenBytes(Vector128.LoadUnsafe(ref bPadded[0])));
     }
 
     /// <summary><paramref name="byteVec"/>'s first <see cref="Lanes"/> bytes (the rest is don't-care padding, never read past lane 7) widened to a <see cref="Vector256{Single}"/> — byte-&gt;ushort-&gt;uint widen, then a hardware uint-&gt;float convert, no scalar casts.</summary>
@@ -193,8 +194,8 @@ internal sealed class Vector256ColorConverter : IColorConverter
         var lo = Vector128.Shuffle(r, RgbShuffleR0) | Vector128.Shuffle(g, RgbShuffleG0) | Vector128.Shuffle(b, RgbShuffleB0);
         var hi = Vector128.Shuffle(r, RgbShuffleR1) | Vector128.Shuffle(g, RgbShuffleG1) | Vector128.Shuffle(b, RgbShuffleB1);
 
-        lo.CopyTo(destination.Slice(firstOffset, 16));
-        hi.GetLower().CopyTo(destination.Slice(firstOffset + 16, 8));
+        lo.StoreUnsafe(ref destination[firstOffset]);
+        hi.GetLower().StoreUnsafe(ref destination[firstOffset + 16]);
     }
 
     /// <summary>
@@ -218,12 +219,12 @@ internal sealed class Vector256ColorConverter : IColorConverter
     {
         if (stride == 1 && !invert)
         {
-            NarrowRounded(value).CopyTo(destination.Slice(firstOffset, Lanes));
+            NarrowRounded(value).StoreUnsafe(ref destination[firstOffset]);
             return;
         }
 
         Span<int> rounded = stackalloc int[Lanes];
-        ToRoundedInt(value).CopyTo(rounded);
+        ToRoundedInt(value).StoreUnsafe(ref rounded[0]);
         for (int lane = 0; lane < Lanes; lane++)
         {
             destination[firstOffset + (lane * stride)] = (byte)(invert ? 255 - rounded[lane] : rounded[lane]);

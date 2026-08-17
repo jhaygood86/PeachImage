@@ -22,7 +22,7 @@ internal sealed class Vector256ForwardDct : IForwardDctKernel
         Span<float> rowPass = stackalloc float[64];
         for (int y = 0; y < 8; y++)
         {
-            var rowVector = Vector256.Create(shifted.Slice(y * 8, 8));
+            var rowVector = Vector256.LoadUnsafe(ref shifted[y * 8]);
             for (int u = 0; u < 8; u++)
             {
                 rowPass[(y * 8) + u] = Vector256.Dot(rowVector, CosineRows[u]);
@@ -41,7 +41,7 @@ internal sealed class Vector256ForwardDct : IForwardDctKernel
             column[6] = rowPass[48 + u];
             column[7] = rowPass[56 + u];
 
-            var columnVector = Vector256.Create((ReadOnlySpan<float>)column);
+            var columnVector = Vector256.LoadUnsafe(ref column[0]);
             for (int v = 0; v < 8; v++)
             {
                 float sum = Vector256.Dot(columnVector, CosineRows[v]);

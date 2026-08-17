@@ -22,8 +22,8 @@ internal sealed class Vector128InverseDct : IInverseDctKernel
         Span<float> rowPass = stackalloc float[64];
         for (int v = 0; v < 8; v++)
         {
-            var lo = Vector128.Create(dequantized[(v * 8) + 0], dequantized[(v * 8) + 1], dequantized[(v * 8) + 2], dequantized[(v * 8) + 3]);
-            var hi = Vector128.Create(dequantized[(v * 8) + 4], dequantized[(v * 8) + 5], dequantized[(v * 8) + 6], dequantized[(v * 8) + 7]);
+            var lo = Vector128.LoadUnsafe(ref dequantized[v * 8]);
+            var hi = Vector128.LoadUnsafe(ref dequantized[(v * 8) + 4]);
 
             for (int x = 0; x < 8; x++)
             {

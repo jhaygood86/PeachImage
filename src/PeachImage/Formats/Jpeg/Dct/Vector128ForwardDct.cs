@@ -22,8 +22,8 @@ internal sealed class Vector128ForwardDct : IForwardDctKernel
         Span<float> rowPass = stackalloc float[64];
         for (int y = 0; y < 8; y++)
         {
-            var lo = Vector128.Create(shifted[(y * 8) + 0], shifted[(y * 8) + 1], shifted[(y * 8) + 2], shifted[(y * 8) + 3]);
-            var hi = Vector128.Create(shifted[(y * 8) + 4], shifted[(y * 8) + 5], shifted[(y * 8) + 6], shifted[(y * 8) + 7]);
+            var lo = Vector128.LoadUnsafe(ref shifted[y * 8]);
+            var hi = Vector128.LoadUnsafe(ref shifted[(y * 8) + 4]);
 
             for (int u = 0; u < 8; u++)
             {

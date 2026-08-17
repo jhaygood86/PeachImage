@@ -25,7 +25,7 @@ internal sealed class Vector256InverseDct : IInverseDctKernel
         Span<float> rowPass = stackalloc float[64];
         for (int v = 0; v < 8; v++)
         {
-            var rowVector = Vector256.Create(dequantized.Slice(v * 8, 8));
+            var rowVector = Vector256.LoadUnsafe(ref dequantized[v * 8]);
             for (int x = 0; x < 8; x++)
             {
                 rowPass[(v * 8) + x] = Vector256.Dot(rowVector, WeightedCosineRows[x]) * 0.5f;
@@ -44,7 +44,7 @@ internal sealed class Vector256InverseDct : IInverseDctKernel
             column[6] = rowPass[48 + x];
             column[7] = rowPass[56 + x];
 
-            var columnVector = Vector256.Create((ReadOnlySpan<float>)column);
+            var columnVector = Vector256.LoadUnsafe(ref column[0]);
             for (int y = 0; y < 8; y++)
             {
                 float sum = Vector256.Dot(columnVector, WeightedCosineRows[y]);

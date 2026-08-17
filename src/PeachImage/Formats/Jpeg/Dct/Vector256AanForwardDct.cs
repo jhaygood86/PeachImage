@@ -68,7 +68,7 @@ internal sealed class Vector256AanForwardDct : IForwardDctKernel
             row[x] = input[offset + x] - 128f;
         }
 
-        return Vector256.Create((ReadOnlySpan<float>)row);
+        return Vector256.LoadUnsafe(ref row[0]);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -76,7 +76,7 @@ internal sealed class Vector256AanForwardDct : IForwardDctKernel
     {
         var scaled = row * Eighth;
         Span<float> values = stackalloc float[8];
-        scaled.CopyTo(values);
+        scaled.StoreUnsafe(ref values[0]);
         for (int i = 0; i < 8; i++)
         {
             output[offset + i] = values[i];
