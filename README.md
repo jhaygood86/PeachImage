@@ -40,6 +40,14 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
 
 See [LIBRARY_COMPARISON.md](LIBRARY_COMPARISON.md) for performance numbers against SkiaSharp.
 
+## Installing PeachImage
+
+Install the PeachImage package from nuget.org
+
+```
+dotnet add package PeachImage
+```
+
 ## Usage
 
 ### Single-frame images
