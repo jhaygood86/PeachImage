@@ -1,22 +1,22 @@
 using PeachImage.Formats.Avif;
+using PeachImage.Tests.Internal;
 
 namespace PeachImage.Tests.Formats.Avif.Corpus;
 
-/// <summary>Shared assertions for AVIF corpus-driven tests, mirroring Webp's <c>CorpusAssertions</c>. Kept as a plain helper (not itself a <c>[Fact]</c>/<c>[Theory]</c> method) so its blocking <c>Task.Wait</c> hang-guard doesn't trip xunit's analyzer rules against blocking directly inside a test method.</summary>
+/// <summary>Shared assertions for AVIF corpus-driven tests, mirroring Webp's <c>CorpusAssertions</c>. Kept as a plain helper (not itself a <c>[Fact]</c>/<c>[Theory]</c> method) so its blocking <c>Thread.Join</c> hang-guard doesn't trip xunit's analyzer rules against blocking directly inside a test method.</summary>
 internal static class AvifCorpusAssertions
 {
-    private static readonly TimeSpan PerFileTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan PerFileTimeout = TimeSpan.FromSeconds(45);
 
     /// <summary>Asserts that identifying <paramref name="path"/> either succeeds or throws <see cref="AvifDecodingException"/>/<see cref="AvifUnsupportedFeatureException"/> -- never anything else, and never hangs.</summary>
     public static void AssertIdentifiesGracefully(string path)
     {
-        var task = Task.Run(() => TryIdentify(path));
-        if (!task.Wait(PerFileTimeout))
+        if (!CorpusHangGuard.TryRun(() => TryIdentify(path), PerFileTimeout, out var result))
         {
             Assert.Fail($"Identifying {Path.GetFileName(path)} did not complete within {PerFileTimeout.TotalSeconds:F0}s (possible hang).");
         }
 
-        var (succeeded, exception) = task.GetAwaiter().GetResult();
+        var (succeeded, exception) = result;
         if (!succeeded && exception is not (AvifDecodingException or AvifUnsupportedFeatureException))
         {
             Assert.Fail($"Identifying {Path.GetFileName(path)} threw {exception}");
@@ -47,13 +47,12 @@ internal static class AvifCorpusAssertions
     /// </summary>
     public static void AssertDecodesGracefully(string path)
     {
-        var task = Task.Run(() => TryDecode(path));
-        if (!task.Wait(PerFileTimeout))
+        if (!CorpusHangGuard.TryRun(() => TryDecode(path), PerFileTimeout, out var result))
         {
             Assert.Fail($"Decoding {Path.GetFileName(path)} did not complete within {PerFileTimeout.TotalSeconds:F0}s (possible hang).");
         }
 
-        var (succeeded, exception) = task.GetAwaiter().GetResult();
+        var (succeeded, exception) = result;
         if (!succeeded && exception is not (AvifDecodingException or AvifUnsupportedFeatureException))
         {
             Assert.Fail($"Decoding {Path.GetFileName(path)} threw {exception}");

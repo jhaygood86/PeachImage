@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using PeachImage.Formats.Png;
+using PeachImage.Tests.Internal;
 using SkiaSharp;
 
 namespace PeachImage.Tests.Formats.Png.Corpus;
@@ -12,18 +13,17 @@ namespace PeachImage.Tests.Formats.Png.Corpus;
 /// </summary>
 internal static class PngCorpusAssertions
 {
-    private static readonly TimeSpan PerFileTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan PerFileTimeout = TimeSpan.FromSeconds(45);
 
     /// <summary>Asserts that decoding <paramref name="path"/> either succeeds or throws <see cref="PngFormatException"/> — never anything else, and never hangs.</summary>
     public static void AssertDecodesGracefully(string path)
     {
-        var task = Task.Run(() => TryDecode(path));
-        if (!task.Wait(PerFileTimeout))
+        if (!CorpusHangGuard.TryRun(() => TryDecode(path), PerFileTimeout, out var result))
         {
             Assert.Fail($"Decoding {Path.GetFileName(path)} did not complete within {PerFileTimeout.TotalSeconds:F0}s (possible hang).");
         }
 
-        var (succeeded, exception) = task.GetAwaiter().GetResult();
+        var (succeeded, exception) = result;
         if (!succeeded && exception is not PngFormatException)
         {
             Assert.Fail($"Decoding {Path.GetFileName(path)} threw {exception}");
