@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
+using PeachImage.Tests.Internal;
 
 namespace PeachImage.Tests.Formats.Gif.Corpus;
 
@@ -60,11 +61,12 @@ internal static class CorpusFetcher
     {
         var source = GiflibSource;
         string treeUrl = $"https://api.github.com/repos/{source.Owner}/{source.Repo}/git/trees/{source.Branch}?recursive=1";
-        using var request = new HttpRequestMessage(HttpMethod.Get, treeUrl);
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-
-        using var response = await http.SendAsync(request, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        using var response = await HttpRetry.SendWithRetryAsync(http, () =>
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, treeUrl);
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+            return request;
+        }, cancellationToken).ConfigureAwait(false);
 
         await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         using var document = await JsonDocument.ParseAsync(responseStream, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -97,12 +99,7 @@ internal static class CorpusFetcher
 
             try
             {
-                using var fileResponse = await http.GetAsync(url, ct).ConfigureAwait(false);
-                if (!fileResponse.IsSuccessStatusCode)
-                {
-                    return;
-                }
-
+                using var fileResponse = await HttpRetry.GetWithRetryAsync(http, url, ct).ConfigureAwait(false);
                 await using var fileStream = File.Create(destination);
                 await fileResponse.Content.CopyToAsync(fileStream, ct).ConfigureAwait(false);
             }
@@ -122,12 +119,7 @@ internal static class CorpusFetcher
         {
             try
             {
-                using var response = await http.GetAsync(W3cBaseUrl + name, ct).ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode)
-                {
-                    return;
-                }
-
+                using var response = await HttpRetry.GetWithRetryAsync(http, W3cBaseUrl + name, ct).ConfigureAwait(false);
                 string destination = Path.Combine(CorpusPaths.W3cRoot, name);
                 await using var fileStream = File.Create(destination);
                 await response.Content.CopyToAsync(fileStream, ct).ConfigureAwait(false);

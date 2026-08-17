@@ -179,7 +179,7 @@ PeachImage is roughly **2.12×** `ffmpeg`'s process-spawn-inclusive time on the 
 | BMP | 0.38×–1.04× | no baseline (PeachImage-only) |
 | PNG | 1.06×–2.33× | 0.66×–1.15× |
 | WebP | 1.12×–2.17× | not yet benchmarked (lossless-only encode implemented) |
-| AVIF | ~2.12× vs. `ffmpeg` (no SkiaSharp baseline available) | not yet implemented |
+| AVIF | ~2.12× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented (fixed 8x8 blocks, no partition-tree RDO yet); throughput not yet measured here |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
 and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the

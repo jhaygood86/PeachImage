@@ -2,9 +2,10 @@ namespace PeachImage.Formats.Avif;
 
 /// <summary>
 /// The AVIF codec. Format identity and header-sniffing live here, the single <see cref="IImageCodec"/>
-/// surface <see cref="Image"/> dispatches through; decode is a separate internal implementation detail
-/// (<see cref="AvifDecoder"/>) composed privately rather than exposed as its own abstraction. Decode-only —
-/// AVIF encoding is not planned yet.
+/// surface <see cref="Image"/> dispatches through; decode and encode are separate internal implementation
+/// details (<see cref="AvifDecoder"/>/<see cref="AvifEncoder"/>) composed privately rather than exposed as
+/// their own abstraction. Encode produces a lossy, 8-bit, 4:2:0, single still-image item (no animation, no
+/// alpha, no HEIF grid) — decode remains the fuller-featured side (10-bit, alpha, grid).
 /// </summary>
 internal sealed class AvifCodec : IImageCodec
 {
@@ -34,7 +35,7 @@ internal sealed class AvifCodec : IImageCodec
     public bool CanDecode => true;
 
     /// <inheritdoc/>
-    public bool CanEncode => false;
+    public bool CanEncode => true;
 
     /// <inheritdoc/>
     public ImageInfo Identify(Stream stream) => AvifDecoder.Identify(stream);
@@ -43,6 +44,5 @@ internal sealed class AvifCodec : IImageCodec
     public Image Decode(Stream stream, DecoderOptions? options = null) => AvifDecoder.Decode(stream, options);
 
     /// <inheritdoc/>
-    public void Encode(Image image, Stream stream, EncoderOptions? options = null) =>
-        throw new NotSupportedException("AVIF encoding is not yet implemented.");
+    public void Encode(Image image, Stream stream, EncoderOptions? options = null) => AvifEncoder.Encode(image, stream, options);
 }

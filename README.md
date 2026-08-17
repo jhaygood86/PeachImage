@@ -33,7 +33,12 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   chain (deblocking, CDEF, loop restoration), HEIF `grid` composite images, alpha via the auxiliary-item
   mechanism, and both 8-bit and 10-bit depth. Animated AVIF, film grain synthesis, gain maps, 12-bit
   depth, and palette/IntraBC mode remain unimplemented and throw a clear
-  `AvifUnsupportedFeatureException` rather than a silently wrong result.
+  `AvifUnsupportedFeatureException` rather than a silently wrong result. Encode is implemented for lossy,
+  8-bit, 4:2:0, opaque still images only (a single `av01` item; no HEIF `grid`/`avis` animation on the
+  output side even though decode supports reading them, and no partition-tree size search yet — every
+  block is a fixed 8x8 with a real intra-mode decision among DC/vertical/horizontal/smooth/Paeth
+  candidates). Alpha-bearing sources and higher bit depths are rejected with a clear exception rather than
+  silently dropped or downsampled.
 - Other formats are not yet implemented. The public API (`Image`, `AnimatedImage` for multi-frame formats
   like GIF) is designed to support them without breaking changes when they're added. Codec selection is
   internal — there's no format-specific type or registration step in the public API.
