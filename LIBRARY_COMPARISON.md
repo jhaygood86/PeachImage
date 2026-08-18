@@ -131,8 +131,9 @@ SkiaSharp's encoder doesn't support BMP output, so encode has no SkiaSharp basel
 ## WebP
 
 Decode covers both of WebP's bitstream codecs (VP8 lossy, VP8L lossless), with and without alpha,
-plus a small-image scenario. Encode currently produces the lossless (VP8L) bitstream only — VP8
-(lossy) encode and animation are not yet implemented.
+plus a small-image scenario. Encode covers both the lossless (VP8L, default) and lossy (VP8,
+`WebpEncoderOptions.Lossless = false`) bitstreams; animation is not yet implemented for either
+direction.
 
 ### Decode
 
@@ -147,10 +148,33 @@ plus a small-image scenario. Encode currently produces the lossless (VP8L) bitst
 
 ### Encode (lossless)
 
-`WebpEncodeBenchmarks` covers the same photographic/alpha/graphic/small-image scenarios against
-SkiaSharp's lossless WebP encoder; results haven't been captured here yet — run the benchmark
-project locally (`dotnet run -c Release --project bench/PeachImage.Benchmarks --filter "*Webp*"`)
-to populate this table.
+| Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
+|---|---:|---:|---:|---:|
+| Photographic | 241.78 ms | 237.21 ms | 1.02× | 15.0 MB |
+| Graphic (flat color, palette) | 2.16 ms | 1.51 ms | **1.44×** | 666 KB |
+| Alpha | 265.11 ms | 262.98 ms | 1.01× | 9.5 MB |
+| Small image (32×24) | 38.09 µs | 240.64 µs | **0.16×** | 78 KB |
+
+Photographic and alpha are near parity with SkiaSharp (both are dominated by the same LZ77-style
+backward-reference search either way); the small-image case is where SkiaSharp's fixed per-call
+native marshaling overhead dominates instead, and PeachImage's pure-managed path is ~6× faster.
+
+### Encode (lossy)
+
+`Vp8ImageEncoder` (issue #21) is a v1 encoder: SAD-only mode decision (no rate-distortion search),
+a linear quality→quantizer mapping, and no coefficient-probability adaptation — see that PR's
+description for the full list of deferred refinements. Despite that, it already beats SkiaSharp's
+real-libwebp encoder on throughput at the same quality setting:
+
+| Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
+|---|---:|---:|---:|---:|
+| Photographic (quality 75) | 99.10 ms | 112.57 ms | **0.88×** | 51.9 MB |
+
+The allocation gap (52 MB vs SkiaSharp's ~1 KB) is the encoder's own unoptimized per-macroblock
+scratch allocations (a fresh `short[16]`/`short[16][]` per block, per macroblock) rather than
+anything inherent to the algorithm — libwebp's encoder works in unmanaged memory throughout, so its
+managed allocation is near zero regardless of image size. Pooling those scratch buffers is a real
+follow-up, not attempted here since it wasn't necessary to beat SkiaSharp on wall-clock time.
 
 ## AVIF
 
