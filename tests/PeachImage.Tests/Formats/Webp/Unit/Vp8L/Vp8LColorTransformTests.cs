@@ -1,4 +1,5 @@
 using PeachImage.Formats.Webp.Decoding.Vp8L;
+using PeachImage.Formats.Webp.Kernels;
 
 namespace PeachImage.Tests.Formats.Webp.Unit.Vp8L;
 
@@ -81,6 +82,87 @@ public class Vp8LColorTransformTests
         Assert.Equal(8, (int)((pixels[1] >> 16) & 0xFF));
         Assert.Equal(16, (int)((pixels[2] >> 16) & 0xFF));
         Assert.Equal(16, (int)((pixels[3] >> 16) & 0xFF));
+    }
+
+    /// <summary>
+    /// Direct kernel-tier agreement test, mirroring <c>Vp8LSubtractGreenTransformTests.AllThreeKernelTiers_AgreeOnRandomInput</c>:
+    /// constructs each tier directly (bypassing hardware detection) so all three run in CI regardless of the
+    /// CI machine's ISA, across pixel-array lengths spanning the Vector128/Vector256 SIMD widths and their
+    /// scalar tails.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(7)]
+    [InlineData(8)]
+    [InlineData(9)]
+    [InlineData(16)]
+    [InlineData(17)]
+    [InlineData(100)]
+    public void AllThreeKernelTiers_AgreeOnRandomInput(int pixelCount)
+    {
+        var random = new Random(1000 + pixelCount);
+        uint[] source = new uint[pixelCount];
+        for (int i = 0; i < source.Length; i++)
+        {
+            source[i] = (uint)random.Next();
+        }
+
+        sbyte greenToRed = (sbyte)random.Next(-128, 128);
+        sbyte greenToBlue = (sbyte)random.Next(-128, 128);
+        sbyte redToBlue = (sbyte)random.Next(-128, 128);
+
+        AssertAllTiersAgree(source, greenToRed, greenToBlue, redToBlue);
+    }
+
+    /// <summary>Extreme multiplier/color combinations (min/max sbyte on both sides), to stress the sign-extension and shift math at its boundaries rather than relying on random sampling to hit them.</summary>
+    [Fact]
+    public void AllThreeKernelTiers_Agree_OnExtremeMultipliersAndChannelValues()
+    {
+        List<uint> source = [];
+        foreach (int a in new[] { 0, 255 })
+        {
+            foreach (int g in new[] { 0, 1, 127, 128, 200, 255 })
+            {
+                foreach (int r in new[] { 0, 1, 127, 128, 200, 255 })
+                {
+                    foreach (int b in new[] { 0, 1, 127, 128, 200, 255 })
+                    {
+                        source.Add(Pack(a, r, g, b));
+                    }
+                }
+            }
+        }
+
+        foreach (sbyte greenToRed in new sbyte[] { sbyte.MinValue, -1, 0, 1, sbyte.MaxValue })
+        {
+            foreach (sbyte greenToBlue in new sbyte[] { sbyte.MinValue, 0, sbyte.MaxValue })
+            {
+                foreach (sbyte redToBlue in new sbyte[] { sbyte.MinValue, 0, sbyte.MaxValue })
+                {
+                    AssertAllTiersAgree([.. source], greenToRed, greenToBlue, redToBlue);
+                }
+            }
+        }
+    }
+
+    private static void AssertAllTiersAgree(uint[] source, sbyte greenToRed, sbyte greenToBlue, sbyte redToBlue)
+    {
+        uint[] scalarResult = (uint[])source.Clone();
+        new ScalarVp8LTransformKernel().ColorTransformInverse(scalarResult, greenToRed, greenToBlue, redToBlue);
+
+        uint[] vector128Result = (uint[])source.Clone();
+        new Vector128Vp8LTransformKernel().ColorTransformInverse(vector128Result, greenToRed, greenToBlue, redToBlue);
+
+        uint[] vector256Result = (uint[])source.Clone();
+        new Vector256Vp8LTransformKernel().ColorTransformInverse(vector256Result, greenToRed, greenToBlue, redToBlue);
+
+        Assert.Equal(scalarResult, vector128Result);
+        Assert.Equal(scalarResult, vector256Result);
     }
 
     private static uint Pack(int a, int r, int g, int b) => ((uint)a << 24) | ((uint)r << 16) | ((uint)g << 8) | (uint)b;

@@ -4,10 +4,12 @@ namespace PeachImage.Formats.Webp.Kernels;
 /// Hardware-tier-dispatched kernels for VP8L transform-inverse operations that have no cross-pixel
 /// dependency (so are safe to vectorize) — selected once at startup by <see cref="Vp8LTransformKernelSelector"/>,
 /// mirroring <c>Jpeg.ColorConversion.ColorConverterSelector</c>'s Vector256 &gt; Vector128 &gt; scalar dispatch.
-/// The color transform's inverse is deliberately *not* here: it has a genuine same-pixel cross-channel
-/// dependency (the blue channel's second delta reads the just-computed, masked red channel) that a
-/// correctness-first first pass left scalar-only rather than risk a subtly wrong vectorization — see
-/// <c>Vp8LColorTransform</c>'s remarks.
+/// The color transform's "same-pixel dependency" (the blue channel's second delta reads the just-computed,
+/// masked red channel) is within one pixel's 3-step chain, not across pixels — every pixel in a tile run
+/// uses the same 3 constant multipliers and only reads/writes its own ARGB word, so it is embarrassingly
+/// parallel across pixels/lanes the same way the other two members here are, unlike the predictor
+/// transform's non-"top" modes or PNG's row filters, which read the *neighboring* pixel's already-
+/// reconstructed value.
 /// </summary>
 internal interface IVp8LTransformKernel
 {
@@ -23,4 +25,12 @@ internal interface IVp8LTransformKernel
     /// single portable width.
     /// </summary>
     void PredictorTopInverse(Span<byte> row, ReadOnlySpan<byte> topRow);
+
+    /// <summary>
+    /// In place, per pixel: predicts red from green and blue from (green, the just-predicted red) via the
+    /// cross-color transform's inverse — see <c>Vp8LColorTransform</c>'s remarks for the exact per-pixel
+    /// formula. <paramref name="greenToRed"/>/<paramref name="greenToBlue"/>/<paramref name="redToBlue"/> are
+    /// constant for the whole span (one tile's multipliers).
+    /// </summary>
+    void ColorTransformInverse(Span<uint> pixels, sbyte greenToRed, sbyte greenToBlue, sbyte redToBlue);
 }
