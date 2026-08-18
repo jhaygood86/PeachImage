@@ -1,4 +1,5 @@
 using BenchmarkDotNet.Attributes;
+using PeachImage.Formats.Gif;
 using PeachImage.Formats.Png;
 using SkiaSharp;
 
@@ -17,9 +18,11 @@ public class PngEncodeBenchmarks
     private Image _rgb24Source = null!;
     private Image _rgba32Source = null!;
     private Image _gray8Source = null!;
+    private Image _lowColorSource = null!;
     private SKBitmap _rgb24SkiaSource = null!;
     private SKBitmap _rgba32SkiaSource = null!;
     private SKBitmap _gray8SkiaSource = null!;
+    private SKBitmap _lowColorSkiaSource = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -30,9 +33,13 @@ public class PngEncodeBenchmarks
         _rgba32Source = PngDecoder.Decode(File.OpenRead(Path.Combine(assetsDir, "photo_1920x1080_32bpp_rgba.png")));
         _gray8Source = PngDecoder.Decode(File.OpenRead(Path.Combine(assetsDir, "gray_1920x1080.png")));
 
+        string lowColorPath = Path.Combine(assetsDir, "graphic_640x480_16color.gif");
+        _lowColorSource = GifDecoder.Decode(File.OpenRead(lowColorPath));
+
         _rgb24SkiaSource = SKBitmap.Decode(Path.Combine(assetsDir, "photo_1920x1080_24bpp.png"));
         _rgba32SkiaSource = SKBitmap.Decode(Path.Combine(assetsDir, "photo_1920x1080_32bpp_rgba.png"));
         _gray8SkiaSource = SKBitmap.Decode(Path.Combine(assetsDir, "gray_1920x1080.png"));
+        _lowColorSkiaSource = SKBitmap.Decode(lowColorPath);
     }
 
     [GlobalCleanup]
@@ -41,9 +48,11 @@ public class PngEncodeBenchmarks
         _rgb24Source.Dispose();
         _rgba32Source.Dispose();
         _gray8Source.Dispose();
+        _lowColorSource.Dispose();
         _rgb24SkiaSource.Dispose();
         _rgba32SkiaSource.Dispose();
         _gray8SkiaSource.Dispose();
+        _lowColorSkiaSource.Dispose();
     }
 
     [Benchmark]
@@ -84,4 +93,23 @@ public class PngEncodeBenchmarks
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("8bpp-Grayscale")]
     public SKData SkiaSharp_Encode_8bppGrayscale() => _gray8SkiaSource.Encode(SKEncodedImageFormat.Png, 100);
+
+    // Issue #23: indexed (PLTE) palette construction. Low-color-count graphics/icon/screenshot content is
+    // exactly the case indexed color targets — this scenario (16-color source) exercises
+    // PngEncoderOptions.ColorMode's default Auto quantization path. SkiaSharp's SKBitmap.Encode does not
+    // itself choose indexed color here (confirmed empirically: its output stays color type 2/truecolor
+    // regardless of source color count), so this is a throughput comparison only — the win this feature
+    // targets is file size, captured in LIBRARY_COMPARISON.md instead.
+    [Benchmark]
+    [BenchmarkCategory("LowColor-Indexed")]
+    public MemoryStream PeachImage_Encode_LowColorIndexed()
+    {
+        var stream = new MemoryStream();
+        PngEncoder.Encode(_lowColorSource, stream);
+        return stream;
+    }
+
+    [Benchmark(Baseline = true)]
+    [BenchmarkCategory("LowColor-Indexed")]
+    public SKData SkiaSharp_Encode_LowColorIndexed() => _lowColorSkiaSource.Encode(SKEncodedImageFormat.Png, 100);
 }

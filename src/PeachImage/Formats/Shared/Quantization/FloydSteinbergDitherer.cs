@@ -1,4 +1,4 @@
-namespace PeachImage.Formats.Gif.Encoding;
+namespace PeachImage.Formats.Shared.Quantization;
 
 /// <summary>
 /// Maps an image's pixels to palette indices with Floyd-Steinberg error-diffusion dithering, reducing banding
@@ -8,7 +8,7 @@ namespace PeachImage.Formats.Gif.Encoding;
 /// </summary>
 internal static class FloydSteinbergDitherer
 {
-    public static byte[] Map(Image image, GifPaletteKdTree paletteTree, int? transparentIndex, byte alphaThreshold)
+    public static byte[] Map(Image image, PaletteKdTree paletteTree, int? transparentIndex, byte alphaThreshold)
     {
         byte[] palette = paletteTree.Palette;
         int width = image.Width, height = image.Height;

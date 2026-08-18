@@ -1,7 +1,7 @@
-namespace PeachImage.Formats.Gif.Encoding;
+namespace PeachImage.Formats.Shared.Quantization;
 
 /// <summary>
-/// Builds a palette of at most <c>maxColors</c> entries from a <see cref="GifColorHistogram"/> using
+/// Builds a palette of at most <c>maxColors</c> entries from a <see cref="ColorHistogram"/> using
 /// frequency-weighted median-cut box splitting (Heckbert's algorithm), the same general approach used by
 /// gifsicle/ffmpeg's GIF encoder. If the source has at most <c>maxColors</c> distinct colors, every color is
 /// kept exactly — this is what makes encode→decode round trips of low-color-count images lossless.
@@ -9,7 +9,7 @@ namespace PeachImage.Formats.Gif.Encoding;
 internal static class MedianCutQuantizer
 {
     /// <summary>Builds a flat RGB-triple palette (length = entry count * 3), with at most <paramref name="maxColors"/> entries.</summary>
-    public static byte[] BuildPalette(GifColorHistogram histogram, int maxColors)
+    public static byte[] BuildPalette(ColorHistogram histogram, int maxColors)
     {
         maxColors = Math.Clamp(maxColors, 1, 256);
 

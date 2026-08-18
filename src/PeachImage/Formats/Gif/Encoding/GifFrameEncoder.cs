@@ -1,3 +1,5 @@
+using PeachImage.Formats.Shared.Quantization;
+
 namespace PeachImage.Formats.Gif.Encoding;
 
 /// <summary>Writes one frame: an optional Graphic Control Extension, Image Descriptor, and LZW-compressed image data.</summary>
@@ -7,7 +9,7 @@ internal static class GifFrameEncoder
     private const byte GraphicControlLabel = 0xF9;
     private const byte ImageSeparator = 0x2C;
 
-    public static void WriteFrame(Stream stream, Image image, GifPaletteKdTree paletteTree, int? transparentIndex, TimeSpan duration, GifDisposalMethod disposal, bool dither, int minCodeSize, byte alphaThreshold)
+    public static void WriteFrame(Stream stream, Image image, PaletteKdTree paletteTree, int? transparentIndex, TimeSpan duration, GifDisposalMethod disposal, bool dither, int minCodeSize, byte alphaThreshold)
     {
         bool needsGce = transparentIndex.HasValue || duration > TimeSpan.Zero || disposal != GifDisposalMethod.None;
         if (needsGce)
@@ -19,7 +21,7 @@ internal static class GifFrameEncoder
 
         byte[] indices = dither
             ? FloydSteinbergDitherer.Map(image, paletteTree, transparentIndex, alphaThreshold)
-            : GifPaletteMapper.Map(image, paletteTree, transparentIndex, alphaThreshold);
+            : PaletteMapper.Map(image, paletteTree, transparentIndex, alphaThreshold);
 
         stream.WriteByte((byte)minCodeSize);
         GifLzwEncoder.Encode(stream, indices, minCodeSize);

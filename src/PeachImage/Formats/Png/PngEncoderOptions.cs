@@ -20,4 +20,29 @@ public sealed class PngEncoderOptions : EncoderOptions
     /// always encode with a true per-pixel alpha channel.
     /// </summary>
     public (byte R, byte G, byte B)? TransparentColor { get; init; }
+
+    /// <summary>
+    /// Controls whether the encoder builds an indexed (PLTE, color type 3) palette instead of grayscale/
+    /// truecolor. Default <see cref="PngColorMode.Auto"/>. Ignored (and indexed encoding skipped) whenever
+    /// <see cref="TransparentColor"/> is set, since color-key transparency and a quantized palette target
+    /// different scenarios and combining them isn't supported.
+    /// </summary>
+    public PngColorMode ColorMode { get; init; } = PngColorMode.Auto;
+
+    /// <summary>
+    /// The palette size, in [1, 256], indexed encoding quantizes down to. In <see cref="PngColorMode.Auto"/>
+    /// mode this also doubles as the distinct-color-count threshold below which indexed output is chosen
+    /// automatically — the default of 256 only auto-indexes sources that already have at most 256 distinct
+    /// colors, which is always lossless. In <see cref="PngColorMode.Indexed"/> mode, a source with more
+    /// distinct colors than this is quantized down via median-cut, which is lossy. Default 256.
+    /// </summary>
+    public int MaxColors { get; init; } = 256;
+
+    /// <summary>
+    /// Whether to apply Floyd-Steinberg error-diffusion dithering when mapping pixels down to an indexed
+    /// palette. Only makes a visible difference once quantization is actually lossy (i.e.
+    /// <see cref="PngColorMode.Indexed"/> with a source that has more than <see cref="MaxColors"/> distinct
+    /// colors). Default <see langword="false"/>.
+    /// </summary>
+    public bool Dither { get; init; }
 }
