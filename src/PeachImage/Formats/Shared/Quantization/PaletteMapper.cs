@@ -1,10 +1,10 @@
-namespace PeachImage.Formats.Gif.Encoding;
+namespace PeachImage.Formats.Shared.Quantization;
 
 /// <summary>Maps an image's pixels to palette indices, no dithering: each pixel independently gets its nearest palette entry.</summary>
-internal static class GifPaletteMapper
+internal static class PaletteMapper
 {
     /// <summary>Maps <paramref name="image"/>'s pixels to indices into <paramref name="paletteTree"/>'s palette, using <paramref name="transparentIndex"/> for any pixel whose alpha is below <paramref name="alphaThreshold"/>.</summary>
-    public static byte[] Map(Image image, GifPaletteKdTree paletteTree, int? transparentIndex, byte alphaThreshold)
+    public static byte[] Map(Image image, PaletteKdTree paletteTree, int? transparentIndex, byte alphaThreshold)
     {
         int width = image.Width, height = image.Height;
         byte[] indices = new byte[width * height];

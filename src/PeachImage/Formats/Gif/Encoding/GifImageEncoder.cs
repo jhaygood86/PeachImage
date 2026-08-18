@@ -1,3 +1,5 @@
+using PeachImage.Formats.Shared.Quantization;
+
 namespace PeachImage.Formats.Gif.Encoding;
 
 /// <summary>Orchestrates a full GIF encode: header, Logical Screen Descriptor, Global Color Table, optional NETSCAPE2.0 loop extension, frames, trailer.</summary>
@@ -56,7 +58,7 @@ internal static class GifImageEncoder
         bool hasTransparency = false;
         foreach (var frame in frames)
         {
-            if (frame.Image.PixelFormat == PixelFormat.Rgba32 && HasTransparentPixel(frame.Image, AlphaThreshold))
+            if (ColorHistogram.HasTransparentPixel(frame.Image, AlphaThreshold))
             {
                 hasTransparency = true;
                 break;
@@ -66,7 +68,7 @@ internal static class GifImageEncoder
         int maxColors = Math.Clamp(options.MaxColors, 2, 256);
         int quantizeTarget = Math.Max(1, hasTransparency ? maxColors - 1 : maxColors);
 
-        var histogram = new GifColorHistogram();
+        var histogram = new ColorHistogram();
         foreach (var frame in frames)
         {
             histogram.AddOpaquePixels(frame.Image, AlphaThreshold);
@@ -97,7 +99,7 @@ internal static class GifImageEncoder
 
         // Built once and reused across every pixel of every frame — the k-d tree's O(n log n) build cost is
         // amortized against however many pixels this encode ends up mapping through it.
-        var paletteTree = new GifPaletteKdTree(colorTable);
+        var paletteTree = new PaletteKdTree(colorTable);
 
         foreach (var frame in frames)
         {
@@ -105,20 +107,6 @@ internal static class GifImageEncoder
         }
 
         stream.WriteByte(Trailer);
-    }
-
-    private static bool HasTransparentPixel(Image image, byte alphaThreshold)
-    {
-        var pixels = image.GetPixelSpan();
-        for (int i = 3; i < pixels.Length; i += 4)
-        {
-            if (pixels[i] < alphaThreshold)
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static void WriteHeader(Stream stream, int width, int height, byte[] colorTable)

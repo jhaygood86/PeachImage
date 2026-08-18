@@ -6,28 +6,64 @@ using PeachImage.Formats.Png.Internal;
 
 namespace PeachImage.Formats.Png.Encoding;
 
-/// <summary>Top-level PNG encode orchestrator: writes IHDR/ancillary chunks, then a per-pass (Adam7-aware) filtered/deflated scanline stream.</summary>
+/// <summary>Top-level PNG encode orchestrator: writes IHDR/PLTE/ancillary chunks, then a per-pass (Adam7-aware) filtered/deflated scanline stream.</summary>
 internal static class PngImageEncoder
 {
     public static void Encode(Image image, Stream stream, PngEncoderOptions options)
     {
-        var (colorType, bitDepth) = PngHeaderWriter.ChooseColorType(image.PixelFormat);
-        bool is16 = bitDepth == 16;
-        int bytesPerPixel = image.PixelFormat.GetBytesPerPixel();
-        int channels = image.PixelFormat.GetChannelCount();
+        var indexedPlan = PngIndexedPaletteBuilder.TryBuild(image, options);
+
+        PngColorType colorType;
+        byte bitDepth;
+        int channels;
+        bool is16;
+
+        if (indexedPlan is { } plan)
+        {
+            colorType = PngColorType.Palette;
+            bitDepth = plan.BitDepth;
+            channels = 1;
+            is16 = false;
+        }
+        else
+        {
+            (colorType, bitDepth) = PngHeaderWriter.ChooseColorType(image.PixelFormat);
+            is16 = bitDepth == 16;
+            channels = image.PixelFormat.GetChannelCount();
+        }
+
+        var header = new PngHeader(image.Width, image.Height, bitDepth, colorType, 0, 0, 0);
+        int bitsPerPixel = header.BitsPerPixel;
+        int filterBytesPerPixel = header.FilterBytesPerPixel;
 
         PngChunkWriter.WriteSignature(stream);
         PngHeaderWriter.WriteIhdr(stream, image.Width, image.Height, colorType, bitDepth, options.Interlace);
 
-        bool sourceHasAlpha = image.PixelFormat is PixelFormat.Rgba32 or PixelFormat.Rgba64;
-        if (options.TransparentColor is { } key && !sourceHasAlpha)
+        if (options.IncludeMetadata)
         {
-            WriteTrns(stream, colorType, key, is16);
+            PngAncillaryChunkWriter.WriteColorProfileChunks(stream, image.Metadata);
+        }
+
+        if (indexedPlan is { } indexed)
+        {
+            WritePlte(stream, indexed);
+            if (indexed.TransparentIndex is { } transparentIndex)
+            {
+                WritePaletteTrns(stream, transparentIndex);
+            }
+        }
+        else
+        {
+            bool sourceHasAlpha = image.PixelFormat is PixelFormat.Rgba32 or PixelFormat.Rgba64;
+            if (options.TransparentColor is { } key && !sourceHasAlpha)
+            {
+                WriteTrns(stream, colorType, key, is16);
+            }
         }
 
         if (options.IncludeMetadata)
         {
-            PngAncillaryChunkWriter.WriteAll(stream, image.Metadata);
+            PngAncillaryChunkWriter.WriteRemainingChunks(stream, image.Metadata);
         }
 
         ReadOnlySpan<Adam7Pass> passes = options.Interlace ? Adam7.Passes : [new Adam7Pass(0, 0, 1, 1)];
@@ -48,26 +84,36 @@ internal static class PngImageEncoder
                     continue;
                 }
 
-                int rawRowBytes = passWidth * bytesPerPixel;
+                int rawRowBytes = PngHeader.BytesPerScanline(passWidth, bitsPerPixel);
                 var rawRowBuffer = ArrayPool<byte>.Shared.Rent(rawRowBytes);
                 var previousRawRowBuffer = ArrayPool<byte>.Shared.Rent(rawRowBytes);
                 var filteredRowBuffer = ArrayPool<byte>.Shared.Rent(rawRowBytes);
                 var scratchBuffer = ArrayPool<byte>.Shared.Rent(rawRowBytes);
+                var indexRowBuffer = indexedPlan is not null ? ArrayPool<byte>.Shared.Rent(passWidth) : null;
                 try
                 {
                     var rawRow = rawRowBuffer.AsSpan(0, rawRowBytes);
                     var previousRawRow = previousRawRowBuffer.AsSpan(0, rawRowBytes);
                     var filteredRow = filteredRowBuffer.AsSpan(0, rawRowBytes);
                     var scratch = scratchBuffer.AsSpan(0, rawRowBytes);
+                    Span<byte> indexRow = indexRowBuffer is not null ? indexRowBuffer.AsSpan(0, passWidth) : default;
                     bool firstRow = true;
 
                     for (int y = 0; y < passHeight; y++)
                     {
                         int srcY = pass.StartY + (y * pass.StrideY);
-                        BuildRawRow(image, srcY, pass, passWidth, bytesPerPixel, channels, is16, rawRow);
+
+                        if (indexedPlan is { } activePlan)
+                        {
+                            BuildIndexedRawRow(activePlan, image.Width, srcY, pass, passWidth, bitDepth, indexRow, rawRow);
+                        }
+                        else
+                        {
+                            BuildRawRow(image, srcY, pass, passWidth, filterBytesPerPixel, channels, is16, rawRow);
+                        }
 
                         var previous = firstRow ? ReadOnlySpan<byte>.Empty : previousRawRow;
-                        var filterType = PngRowFilterSelector.FilterRow(rawRow, previous, bytesPerPixel, options.FilterStrategy, scratch, filteredRow);
+                        var filterType = PngRowFilterSelector.FilterRow(rawRow, previous, filterBytesPerPixel, options.FilterStrategy, scratch, filteredRow);
                         zlib.WriteByte((byte)filterType);
                         zlib.Write(filteredRow);
 
@@ -84,12 +130,66 @@ internal static class PngImageEncoder
                     ArrayPool<byte>.Shared.Return(previousRawRowBuffer);
                     ArrayPool<byte>.Shared.Return(filteredRowBuffer);
                     ArrayPool<byte>.Shared.Return(scratchBuffer);
+                    if (indexRowBuffer is not null)
+                    {
+                        ArrayPool<byte>.Shared.Return(indexRowBuffer);
+                    }
                 }
             }
         }
 
         idatWriter.FinishFinalChunk();
         PngChunkWriter.WriteChunk(stream, PngChunkType.Iend, ReadOnlySpan<byte>.Empty);
+    }
+
+    private static void BuildIndexedRawRow(PngIndexedPaletteBuilder.Plan plan, int imageWidth, int srcY, in Adam7Pass pass, int passWidth, int bitDepth, Span<byte> indexRow, Span<byte> raw)
+    {
+        var indices = plan.Indices;
+        int rowOffset = srcY * imageWidth;
+
+        if (pass.StrideX == 1)
+        {
+            indices.AsSpan(rowOffset + pass.StartX, passWidth).CopyTo(indexRow);
+        }
+        else
+        {
+            for (int x = 0; x < passWidth; x++)
+            {
+                int srcX = pass.StartX + (x * pass.StrideX);
+                indexRow[x] = indices[rowOffset + srcX];
+            }
+        }
+
+        PngIndexedBitPacker.PackRow(indexRow, bitDepth, raw);
+    }
+
+    private static void WritePlte(Stream stream, PngIndexedPaletteBuilder.Plan plan)
+    {
+        if (plan.TransparentIndex is null)
+        {
+            PngChunkWriter.WriteChunk(stream, PngChunkType.Plte, plan.Palette);
+            return;
+        }
+
+        // The transparent index still needs an RGB entry in PLTE (every index referenced by the pixel data
+        // must have one), even though its color is never actually visible — tRNS below marks it fully
+        // transparent. The extra slot is left at its default (0, 0, 0).
+        byte[] withTransparentSlot = new byte[plan.Palette.Length + 3];
+        plan.Palette.CopyTo(withTransparentSlot, 0);
+        PngChunkWriter.WriteChunk(stream, PngChunkType.Plte, withTransparentSlot);
+    }
+
+    private static void WritePaletteTrns(Stream stream, int transparentIndex)
+    {
+        // Trailing entries default to fully opaque (255) and can be omitted entirely; since the transparent
+        // slot is always the last (highest) index in use, this array only needs to run up to and include it.
+        byte[] alpha = new byte[transparentIndex + 1];
+        for (int i = 0; i < transparentIndex; i++)
+        {
+            alpha[i] = 255;
+        }
+
+        PngChunkWriter.WriteChunk(stream, PngChunkType.Trns, alpha);
     }
 
     private static void BuildRawRow(Image source, int srcY, in Adam7Pass pass, int passWidth, int bytesPerPixel, int channels, bool is16, Span<byte> raw)

@@ -4,16 +4,16 @@ using PeachImage.Formats.Png.Internal;
 
 namespace PeachImage.Formats.Png.Encoding;
 
-/// <summary>Re-emits captured metadata as ancillary chunks, gated by <see cref="EncoderOptions.IncludeMetadata"/>.</summary>
+/// <summary>
+/// Re-emits captured metadata as ancillary chunks, gated by <see cref="EncoderOptions.IncludeMetadata"/>.
+/// Split into two passes so callers can interleave a PLTE write between them: spec §5.4 requires cHRM/gAMA/
+/// sRGB/iCCP to precede PLTE, while bKGD must follow it (and pHYs/tEXt/tIME aren't order-constrained either way).
+/// </summary>
 internal static class PngAncillaryChunkWriter
 {
-    public static void WriteAll(Stream stream, ImageMetadata metadata)
+    /// <summary>Chunks that must precede PLTE (and IDAT): color-management data the palette itself depends on.</summary>
+    public static void WriteColorProfileChunks(Stream stream, ImageMetadata metadata)
     {
-        if (metadata.HorizontalResolution is { } hRes && metadata.VerticalResolution is { } vRes && hRes > 0 && vRes > 0)
-        {
-            WritePhys(stream, hRes, vRes);
-        }
-
         foreach (var profile in metadata.Profiles)
         {
             switch (profile.Kind)
@@ -33,7 +33,22 @@ internal static class PngAncillaryChunkWriter
                 case MetadataProfileKind.Srgb when profile.Data.Length == 1:
                     PngChunkWriter.WriteChunk(stream, PngChunkType.Srgb, profile.Data);
                     break;
+            }
+        }
+    }
 
+    /// <summary>Everything else: no ordering constraint beyond preceding IDAT, but bKGD additionally must not precede PLTE — the caller guarantees that by calling this only after any PLTE write.</summary>
+    public static void WriteRemainingChunks(Stream stream, ImageMetadata metadata)
+    {
+        if (metadata.HorizontalResolution is { } hRes && metadata.VerticalResolution is { } vRes && hRes > 0 && vRes > 0)
+        {
+            WritePhys(stream, hRes, vRes);
+        }
+
+        foreach (var profile in metadata.Profiles)
+        {
+            switch (profile.Kind)
+            {
                 case MetadataProfileKind.Time when profile.Data.Length == 7:
                     PngChunkWriter.WriteChunk(stream, PngChunkType.Time, profile.Data);
                     break;

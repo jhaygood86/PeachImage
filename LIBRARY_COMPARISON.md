@@ -127,6 +127,16 @@ SkiaSharp's encoder doesn't support BMP output, so encode has no SkiaSharp basel
 | 24bpp Truecolor | 122.08 ms | 148.98 ms | **0.82×** |
 | 32bpp RGBA | 148.28 ms | 225.23 ms | **0.66×** |
 | 8bpp Grayscale | 49.96 ms | 43.41 ms | 1.15× |
+| Low-color graphic (16 colors), indexed | 6.08 ms | 4.09 ms | 1.49× |
+
+Indexed-color (PLTE) encoding (issue #23) is a new capability, not yet held to the 10% throughput
+target the other rows track — its point is file size, not speed. On the low-color scenario above
+(640x480, 16 distinct colors), `PngEncoderOptions.ColorMode`'s default `Auto` mode automatically
+quantizes to a palette and produces a **1,187-byte** file, vs. **2,243 bytes** encoding the same
+source as truecolor (this encoder, `ColorMode = Truecolor`) and **2,229 bytes** from SkiaSharp's
+`SKBitmap.Encode` — confirmed empirically that SkiaSharp's PNG encoder does not itself select indexed
+color for this source (its output stays color type 2/truecolor regardless of the source's color
+count), so the file-size comparison is PeachImage-only.
 
 ## WebP
 

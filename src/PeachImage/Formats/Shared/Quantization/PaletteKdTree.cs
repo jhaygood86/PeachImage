@@ -1,14 +1,15 @@
-namespace PeachImage.Formats.Gif.Encoding;
+namespace PeachImage.Formats.Shared.Quantization;
 
 /// <summary>
-/// A 3-D (R/G/B) k-d tree over a GIF color table, for exact nearest-color queries in O(log n) average instead
-/// of an O(n) linear scan over every palette entry. Built once per encode and reused across every pixel
-/// (and, for animated GIFs, every frame) — the whole point is amortizing the O(n log n) build cost against
-/// millions of per-pixel queries. Returns exactly the same nearest index a linear scan would (this is a
-/// speed-only change, not an approximation), except that ties (multiple palette entries at the identical
-/// minimum distance) may resolve to a different one of the tied entries than array-order linear scan would.
+/// A 3-D (R/G/B) k-d tree over a quantized color palette, for exact nearest-color queries in O(log n)
+/// average instead of an O(n) linear scan over every palette entry. Built once per encode and reused across
+/// every pixel (and, for animated GIFs, every frame) — the whole point is amortizing the O(n log n) build
+/// cost against millions of per-pixel queries. Returns exactly the same nearest index a linear scan would
+/// (this is a speed-only change, not an approximation), except that ties (multiple palette entries at the
+/// identical minimum distance) may resolve to a different one of the tied entries than array-order linear
+/// scan would.
 /// </summary>
-internal sealed class GifPaletteKdTree
+internal sealed class PaletteKdTree
 {
     private struct Node
     {
@@ -21,7 +22,7 @@ internal sealed class GifPaletteKdTree
     private readonly Node[] _nodes;
     private readonly int _root;
 
-    public GifPaletteKdTree(byte[] palette)
+    public PaletteKdTree(byte[] palette)
     {
         Palette = palette;
         int count = palette.Length / 3;

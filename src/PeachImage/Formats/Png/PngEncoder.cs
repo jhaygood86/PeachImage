@@ -4,10 +4,11 @@ namespace PeachImage.Formats.Png;
 
 /// <summary>
 /// Encodes images as PNG. <see cref="PixelFormat.Gray8"/>/<see cref="PixelFormat.Gray16"/> write
-/// grayscale (color type 0); <see cref="PixelFormat.Rgb24"/>/<see cref="PixelFormat.Rgb48"/> write
-/// truecolor (color type 2); <see cref="PixelFormat.Rgba32"/>/<see cref="PixelFormat.Rgba64"/> write
-/// truecolor-with-alpha (color type 6). No automatic palette quantization — indexed (color type 3)
-/// output is not produced in v1. CMYK is not supported. Used internally by <see cref="PngCodec"/>.
+/// grayscale (color type 0); <see cref="PixelFormat.Rgb48"/>/<see cref="PixelFormat.Rgba64"/> always write
+/// truecolor(-with-alpha) (color types 2/6), since indexed color needs 8-bit-per-channel source samples.
+/// <see cref="PixelFormat.Rgb24"/>/<see cref="PixelFormat.Rgba32"/> write indexed color (PLTE, color type 3)
+/// or truecolor(-with-alpha) depending on <see cref="PngEncoderOptions.ColorMode"/> (see there for the
+/// default auto-detection behavior). CMYK is not supported. Used internally by <see cref="PngCodec"/>.
 /// </summary>
 internal static class PngEncoder
 {

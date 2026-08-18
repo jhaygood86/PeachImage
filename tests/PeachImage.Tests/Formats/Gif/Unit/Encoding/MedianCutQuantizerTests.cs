@@ -1,4 +1,4 @@
-using PeachImage.Formats.Gif.Encoding;
+using PeachImage.Formats.Shared.Quantization;
 
 namespace PeachImage.Tests.Formats.Gif.Unit.Encoding;
 
@@ -7,7 +7,7 @@ public class MedianCutQuantizerTests
     [Fact]
     public void FewerColorsThanMax_ReturnsExactPalette()
     {
-        var histogram = new GifColorHistogram();
+        var histogram = new ColorHistogram();
         histogram.Add(10, 20, 30);
         histogram.Add(200, 100, 50);
         histogram.Add(0, 0, 0);
@@ -26,7 +26,7 @@ public class MedianCutQuantizerTests
     [Fact]
     public void MoreColorsThanMax_NeverExceedsMaxColors()
     {
-        var histogram = new GifColorHistogram();
+        var histogram = new ColorHistogram();
         var random = new Random(42);
         for (int i = 0; i < 5000; i++)
         {
@@ -42,7 +42,7 @@ public class MedianCutQuantizerTests
     [Fact]
     public void EmptyHistogram_ReturnsSingleFallbackColor()
     {
-        var histogram = new GifColorHistogram();
+        var histogram = new ColorHistogram();
 
         byte[] palette = MedianCutQuantizer.BuildPalette(histogram, maxColors: 256);
 
