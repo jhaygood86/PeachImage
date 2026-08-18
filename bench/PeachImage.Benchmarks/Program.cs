@@ -14,5 +14,10 @@ if (args.Length > 0 && string.Equals(args[0], "avif-profile", StringComparison.O
     return AvifProfileHarness.Run(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "gif-profile", StringComparison.OrdinalIgnoreCase))
+{
+    return GifProfileHarness.Run(args);
+}
+
 BenchmarkSwitcher.FromAssembly(Assembly.GetExecutingAssembly()).Run(args);
 return 0;

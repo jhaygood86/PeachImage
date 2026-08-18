@@ -8,6 +8,13 @@ namespace PeachImage.Formats.Gif.Decoding;
 /// JIT was already eliminating the checks that matter), so the loop stays plain, safe array indexing.
 /// Never throws on malformed/truncated input — a corrupt or short stream simply stops early, leaving the rest
 /// of the output buffer zero-filled, mirroring <c>BmpRleDecoder</c>'s defensive convention.
+///
+/// Stage-level profiling (issue #35) found the per-code chain-walk (following <c>prefix</c> back to the code's
+/// root byte) plus the reversed copy into the output buffer account for ~76% of decode time on long-run images
+/// and ~54% on short-run ones — <see cref="GifLzwBitReader"/>'s bit-read cost is the other end of that tradeoff
+/// (~12% vs. ~25%). The copy loop's per-byte <c>writePos &lt; pixelCount</c> bound only needs to protect the
+/// last code of a stream (a corrupt/oversized run could otherwise overflow the output buffer); every other
+/// code has room for its whole run, so that check is hoisted out of the loop for the common case below.
 /// </summary>
 internal static class GifLzwDecoder
 {
@@ -41,7 +48,10 @@ internal static class GifLzwDecoder
         int nextCode = endCode + 1;
         int maxCode = 1 << codeSize;
 
-        var prefix = new int[MaxCodeTableSize];
+        // ushort (not int): code values never exceed MaxCodeTableSize - 1 (4095), and the chain walk below
+        // touches this table with an unpredictable access pattern, so the smaller footprint (8 KB vs. 16 KB)
+        // is worth the cast on write.
+        var prefix = new ushort[MaxCodeTableSize];
         var suffix = new byte[MaxCodeTableSize];
         var stack = new byte[MaxCodeTableSize];
 
@@ -92,19 +102,37 @@ internal static class GifLzwDecoder
             stack[stackTop++] = (byte)c;
             byte firstChar = (byte)c;
 
-            for (int i = stackTop - 1; i >= 0 && writePos < pixelCount; i--)
+            int runLength = stackTop + (isNewCode ? 1 : 0);
+            if (runLength <= pixelCount - writePos)
             {
-                output[writePos++] = stack[i];
-            }
+                // Common case: this code's whole expansion fits, so the per-byte "still room left" check the
+                // truncating path below needs can be skipped entirely.
+                for (int i = stackTop - 1; i >= 0; i--)
+                {
+                    output[writePos++] = stack[i];
+                }
 
-            if (isNewCode && writePos < pixelCount)
+                if (isNewCode)
+                {
+                    output[writePos++] = firstChar;
+                }
+            }
+            else
             {
-                output[writePos++] = firstChar;
+                for (int i = stackTop - 1; i >= 0 && writePos < pixelCount; i--)
+                {
+                    output[writePos++] = stack[i];
+                }
+
+                if (isNewCode && writePos < pixelCount)
+                {
+                    output[writePos++] = firstChar;
+                }
             }
 
             if (prevCode != -1 && nextCode < MaxCodeTableSize)
             {
-                prefix[nextCode] = prevCode;
+                prefix[nextCode] = (ushort)prevCode;
                 suffix[nextCode] = firstChar;
                 nextCode++;
                 if (nextCode == maxCode && codeSize < 12)
