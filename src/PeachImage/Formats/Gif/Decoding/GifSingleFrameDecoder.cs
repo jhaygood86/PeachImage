@@ -101,11 +101,6 @@ internal static class GifSingleFrameDecoder
                 {
                     ResolveIndices(image, descriptor, indices, palette, gce.TransparentColorIndex, hasAlpha);
                 }
-                catch
-                {
-                    image.Dispose();
-                    throw;
-                }
                 finally
                 {
                     if (rentedDeinterlaced is not null)

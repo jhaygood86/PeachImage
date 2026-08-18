@@ -56,7 +56,7 @@ public class Vp8LDecoderBackwardReferenceTests
 
         byte[] chunk = BuildChunk(writer);
 
-        using var image = Vp8LDecoder.Decode(chunk);
+        var image = Vp8LDecoder.Decode(chunk);
 
         Assert.Equal(4, image.Width);
         Assert.Equal(1, image.Height);

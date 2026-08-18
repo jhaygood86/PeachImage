@@ -45,10 +45,6 @@ public class PngEncodeBenchmarks
     [GlobalCleanup]
     public void Cleanup()
     {
-        _rgb24Source.Dispose();
-        _rgba32Source.Dispose();
-        _gray8Source.Dispose();
-        _lowColorSource.Dispose();
         _rgb24SkiaSource.Dispose();
         _rgba32SkiaSource.Dispose();
         _gray8SkiaSource.Dispose();

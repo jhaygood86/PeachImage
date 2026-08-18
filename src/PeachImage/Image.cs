@@ -11,7 +11,7 @@ namespace PeachImage;
 /// <summary>
 /// An in-memory, single-frame, tightly-packed pixel buffer decoded from (or destined for) an image file.
 /// </summary>
-public sealed class Image : IDisposable
+public sealed class Image
 {
     /// <summary>
     /// The fixed set of built-in codecs. Internal rather than private so <see cref="AnimatedImage"/> can
@@ -31,7 +31,7 @@ public sealed class Image : IDisposable
     private static readonly int MaxHeaderSize = Codecs.Max(codec => codec.HeaderSize);
 
     private readonly byte[] _pixels;
-    private bool _disposed;
+    private bool _invalidated;
 
     private Image(int width, int height, PixelFormat pixelFormat, byte[] pixels)
     {
@@ -61,17 +61,29 @@ public sealed class Image : IDisposable
     /// </summary>
     public bool IsAnimated { get; internal set; }
 
-    /// <summary>Gets a zero-copy view of the entire tightly-packed pixel buffer.</summary>
+    /// <summary>
+    /// Gets a zero-copy view of the entire tightly-packed pixel buffer.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// This image was produced by <see cref="AnimatedImage.Frames"/> and a later frame has since been
+    /// pulled from the same enumeration — see the <c>Frames</c> remarks for the frame-validity contract.
+    /// </exception>
     public Span<byte> GetPixelSpan()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfInvalidated();
         return _pixels;
     }
 
-    /// <summary>Gets a zero-copy view of a single scanline.</summary>
+    /// <summary>
+    /// Gets a zero-copy view of a single scanline.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// This image was produced by <see cref="AnimatedImage.Frames"/> and a later frame has since been
+    /// pulled from the same enumeration — see the <c>Frames</c> remarks for the frame-validity contract.
+    /// </exception>
     public Span<byte> GetRowSpan(int y)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfInvalidated();
         ArgumentOutOfRangeException.ThrowIfNegative(y);
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(y, Height);
 
@@ -79,12 +91,18 @@ public sealed class Image : IDisposable
         return _pixels.AsSpan(y * rowBytes, rowBytes);
     }
 
-    /// <summary>Gets the entire tightly-packed pixel buffer as <see cref="Memory{T}"/>, for async/non-span consumers.</summary>
+    /// <summary>
+    /// Gets the entire tightly-packed pixel buffer as <see cref="Memory{T}"/>, for async/non-span consumers.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// This image was produced by <see cref="AnimatedImage.Frames"/> and a later frame has since been
+    /// pulled from the same enumeration — see the <c>Frames</c> remarks for the frame-validity contract.
+    /// </exception>
     public Memory<byte> PixelMemory
     {
         get
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            ThrowIfInvalidated();
             return _pixels;
         }
     }
@@ -102,6 +120,25 @@ public sealed class Image : IDisposable
     /// <summary>Wraps an already-allocated, tightly-packed pixel buffer without copying it. For use by codec implementations.</summary>
     internal static Image FromBuffer(int width, int height, PixelFormat pixelFormat, byte[] buffer) =>
         new(width, height, pixelFormat, buffer);
+
+    /// <summary>
+    /// Creates an independent copy of this image's pixel data and metadata. Use this to retain a frame
+    /// pulled from <see cref="AnimatedImage.Frames"/> beyond the point where it would otherwise be
+    /// invalidated by advancing to the next frame.
+    /// </summary>
+    public Image Clone()
+    {
+        var copy = Create(Width, Height, PixelFormat);
+        GetPixelSpan().CopyTo(copy.GetPixelSpan());
+        copy.Metadata.HorizontalResolution = Metadata.HorizontalResolution;
+        copy.Metadata.VerticalResolution = Metadata.VerticalResolution;
+        foreach (var profile in Metadata.Profiles)
+        {
+            copy.Metadata.Profiles.Add(profile);
+        }
+
+        return copy;
+    }
 
     /// <summary>Loads an image from <paramref name="path"/>, auto-detecting its format.</summary>
     public static Image Load(string path, DecoderOptions? options = null)
@@ -191,14 +228,22 @@ public sealed class Image : IDisposable
         codec.Encode(this, stream, options);
     }
 
-    /// <inheritdoc/>
-    public void Dispose()
+    /// <summary>
+    /// Marks this image's pixel data as no longer valid. Used internally by animated-decode frame
+    /// compositors once a later frame has overwritten the shared canvas this image aliases — see
+    /// <see cref="AnimatedImage.Frames"/> for the frame-validity contract this enforces.
+    /// </summary>
+    internal void Invalidate() => _invalidated = true;
+
+    private void ThrowIfInvalidated()
     {
-        // Backing storage is a plain, GC-managed array in v1 — nothing to release yet. Kept as a real
-        // Dispose (rather than omitted) so `using var img = Image.Load(...)` remains correct if a future
-        // pooled-buffer allocation strategy is introduced.
-        _disposed = true;
-        GC.SuppressFinalize(this);
+        if (_invalidated)
+        {
+            throw new InvalidOperationException(
+                "This frame's Image has been invalidated because a later frame was requested from the same " +
+                "AnimatedImage.Frames enumeration. Call Clone() (on the Image or the AnimatedImageFrame) " +
+                "before advancing if you need to retain this frame's pixel data.");
+        }
     }
 
     private static IImageCodec? ResolveCodec(Stream stream, out Stream preparedStream)

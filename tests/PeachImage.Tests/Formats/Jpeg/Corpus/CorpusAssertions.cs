@@ -45,29 +45,26 @@ internal static class CorpusAssertions
             return;
         }
 
-        using (peachImage)
+        if (peachImage.Width < 8 || peachImage.Height < 8)
         {
-            if (peachImage.Width < 8 || peachImage.Height < 8)
-            {
-                // Sub-block (<8x8) images are a genuine edge case where reasonable decoders can legitimately
-                // differ in how they handle the single, partially-out-of-bounds MCU — not a fidelity bug.
-                return;
-            }
-
-            using var skiaBitmap = SKBitmap.Decode(path);
-            if (skiaBitmap is null || skiaBitmap.Width != peachImage.Width || skiaBitmap.Height != peachImage.Height)
-            {
-                return;
-            }
-
-            if (peachImage.PixelFormat is not (PixelFormat.Gray8 or PixelFormat.Rgb24 or PixelFormat.Rgba32))
-            {
-                return; // No direct RGB comparison for CMYK output.
-            }
-
-            double averageDifference = ComputeAverageChannelDifference(peachImage, skiaBitmap);
-            Assert.True(averageDifference < 12.0, $"{Path.GetFileName(path)}: average per-channel difference from SkiaSharp too high: {averageDifference:F2}");
+            // Sub-block (<8x8) images are a genuine edge case where reasonable decoders can legitimately
+            // differ in how they handle the single, partially-out-of-bounds MCU — not a fidelity bug.
+            return;
         }
+
+        using var skiaBitmap = SKBitmap.Decode(path);
+        if (skiaBitmap is null || skiaBitmap.Width != peachImage.Width || skiaBitmap.Height != peachImage.Height)
+        {
+            return;
+        }
+
+        if (peachImage.PixelFormat is not (PixelFormat.Gray8 or PixelFormat.Rgb24 or PixelFormat.Rgba32))
+        {
+            return; // No direct RGB comparison for CMYK output.
+        }
+
+        double averageDifference = ComputeAverageChannelDifference(peachImage, skiaBitmap);
+        Assert.True(averageDifference < 12.0, $"{Path.GetFileName(path)}: average per-channel difference from SkiaSharp too high: {averageDifference:F2}");
     }
 
     private static (bool Succeeded, Exception? Exception) TryDecode(string path)
@@ -75,7 +72,7 @@ internal static class CorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            using var image = JpegDecoder.Decode(stream);
+            var image = JpegDecoder.Decode(stream);
             return (true, null);
         }
         catch (Exception ex)

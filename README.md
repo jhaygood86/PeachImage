@@ -64,7 +64,7 @@ using PeachImage;
 using PeachImage.Formats.Jpeg;
 
 // Load, inspect, and convert between formats.
-using var image = Image.Load("photo.webp");
+var image = Image.Load("photo.webp");
 Console.WriteLine($"{image.Width}x{image.Height} {image.PixelFormat}");
 
 using var output = File.Create("resaved.jpg");
@@ -84,7 +84,7 @@ Console.WriteLine($"{info.Width}x{info.Height} {info.PixelFormat} ({info.FormatN
 using PeachImage;
 
 // Zero-copy access to the decoded pixel buffer.
-using var image = Image.Load("photo.png");
+var image = Image.Load("photo.png");
 Span<byte> pixels = image.GetPixelSpan();
 Span<byte> firstRow = image.GetRowSpan(0);
 ```
@@ -97,7 +97,7 @@ Multi-frame formats (GIF today) use `AnimatedImage` instead, with the same load/
 using PeachImage;
 using PeachImage.Formats.Gif;
 
-using var animation = AnimatedImage.Load("clip.gif");
+var animation = AnimatedImage.Load("clip.gif");
 
 foreach (AnimatedImageFrame frame in animation.Frames)
 {

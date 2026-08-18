@@ -58,27 +58,24 @@ internal static class PngCorpusAssertions
             return;
         }
 
-        using (peachImage)
+        if (peachImage.Width < 1 || peachImage.Height < 1)
         {
-            if (peachImage.Width < 1 || peachImage.Height < 1)
-            {
-                return;
-            }
-
-            if (peachImage.PixelFormat is PixelFormat.Rgba32 or PixelFormat.Rgba64)
-            {
-                return;
-            }
-
-            using var skiaBitmap = SKBitmap.Decode(path);
-            if (skiaBitmap is null || skiaBitmap.Width != peachImage.Width || skiaBitmap.Height != peachImage.Height)
-            {
-                return;
-            }
-
-            double averageDifference = ComputeAverageRgbDifference(peachImage, skiaBitmap);
-            Assert.True(averageDifference < 1.0, $"{Path.GetFileName(path)}: average per-channel difference from SkiaSharp too high: {averageDifference:F2}");
+            return;
         }
+
+        if (peachImage.PixelFormat is PixelFormat.Rgba32 or PixelFormat.Rgba64)
+        {
+            return;
+        }
+
+        using var skiaBitmap = SKBitmap.Decode(path);
+        if (skiaBitmap is null || skiaBitmap.Width != peachImage.Width || skiaBitmap.Height != peachImage.Height)
+        {
+            return;
+        }
+
+        double averageDifference = ComputeAverageRgbDifference(peachImage, skiaBitmap);
+        Assert.True(averageDifference < 1.0, $"{Path.GetFileName(path)}: average per-channel difference from SkiaSharp too high: {averageDifference:F2}");
     }
 
     private static (bool Succeeded, Exception? Exception) TryDecode(string path)
@@ -86,7 +83,7 @@ internal static class PngCorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            using var image = PngDecoder.Decode(stream);
+            var image = PngDecoder.Decode(stream);
             return (true, null);
         }
         catch (Exception ex)

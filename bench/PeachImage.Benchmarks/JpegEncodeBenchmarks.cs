@@ -32,7 +32,6 @@ public class JpegEncodeBenchmarks
     [GlobalCleanup]
     public void Cleanup()
     {
-        _sourceImage.Dispose();
         _skiaSource.Dispose();
     }
 

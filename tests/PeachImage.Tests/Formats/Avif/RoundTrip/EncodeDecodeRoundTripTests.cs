@@ -19,9 +19,9 @@ public class EncodeDecodeRoundTripTests
     [InlineData(1, 1)]
     public void Rgb24SolidColor_RoundTrips_ViaPublicApi(int width, int height)
     {
-        using var source = CreateSolidColorImage(width, height, 180, 90, 40);
+        var source = CreateSolidColorImage(width, height, 180, 90, 40);
 
-        using var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 80 });
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 80 });
 
         Assert.Equal(width, decoded.Width);
         Assert.Equal(height, decoded.Height);
@@ -33,9 +33,9 @@ public class EncodeDecodeRoundTripTests
     [InlineData(50, 40)]
     public void Rgb24Gradient_RoundTrips_ViaPublicApi(int width, int height)
     {
-        using var source = CreateGradientImage(width, height);
+        var source = CreateGradientImage(width, height);
 
-        using var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 90 });
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 90 });
 
         AssertPsnrAtLeast(source, decoded, minPsnrDb: 20.0);
     }
@@ -43,9 +43,9 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Gray8Image_RoundTrips_ViaPublicApi()
     {
-        using var source = CreateGrayscaleImage(48, 32);
+        var source = CreateGrayscaleImage(48, 32);
 
-        using var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 85 });
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 85 });
 
         Assert.Equal(PixelFormat.Gray8, decoded.PixelFormat);
         AssertPsnrAtLeast(source, decoded, minPsnrDb: 25.0);
@@ -54,7 +54,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Rgba32Image_FullyOpaque_RoundTrips_ViaAutoDowngrade()
     {
-        using var source = Image.Create(24, 24, PixelFormat.Rgba32);
+        var source = Image.Create(24, 24, PixelFormat.Rgba32);
         var pixels = source.GetPixelSpan();
         for (int i = 0; i < 24 * 24; i++)
         {
@@ -68,14 +68,14 @@ public class EncodeDecodeRoundTripTests
         source.Save(ms, "avif", new AvifEncoderOptions { Quality = 90 });
 
         ms.Position = 0;
-        using var decoded = Image.Load(ms);
+        var decoded = Image.Load(ms);
         Assert.Equal(PixelFormat.Rgb24, decoded.PixelFormat);
     }
 
     [Fact]
     public void Rgba32Image_NonOpaque_Throws()
     {
-        using var source = Image.Create(8, 8, PixelFormat.Rgba32);
+        var source = Image.Create(8, 8, PixelFormat.Rgba32);
         var pixels = source.GetPixelSpan();
         pixels[3] = 128; // one non-opaque pixel
 
@@ -90,7 +90,7 @@ public class EncodeDecodeRoundTripTests
     [InlineData(PixelFormat.Cmyk32)]
     public void UnsupportedPixelFormat_Throws(PixelFormat format)
     {
-        using var source = Image.Create(8, 8, format);
+        var source = Image.Create(8, 8, format);
         using var ms = new MemoryStream();
         Assert.Throws<AvifEncodingException>(() => source.Save(ms, "avif", new AvifEncoderOptions()));
     }
@@ -98,7 +98,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void DifferentQualityLevels_ProduceDifferentFileSizes()
     {
-        using var source = CreateGradientImage(64, 64);
+        var source = CreateGradientImage(64, 64);
 
         using var highQualityStream = new MemoryStream();
         source.Save(highQualityStream, "avif", new AvifEncoderOptions { Quality = 95 });
@@ -112,7 +112,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Identify_ReportsCorrectDimensionsWithoutFullDecode()
     {
-        using var source = CreateGradientImage(40, 30);
+        var source = CreateGradientImage(40, 30);
         using var ms = new MemoryStream();
         source.Save(ms, "avif", new AvifEncoderOptions());
 

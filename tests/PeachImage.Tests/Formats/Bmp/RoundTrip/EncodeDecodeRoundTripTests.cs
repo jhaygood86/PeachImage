@@ -10,9 +10,9 @@ public class EncodeDecodeRoundTripTests
     [InlineData(1, 1)]
     public void Rgb24Gradient_RoundTrips_Exactly(int width, int height)
     {
-        using var source = CreateGradientImage(width, height);
+        var source = CreateGradientImage(width, height);
 
-        using var decoded = EncodeThenDecode(source, new BmpEncoderOptions());
+        var decoded = EncodeThenDecode(source, new BmpEncoderOptions());
 
         Assert.Equal(PixelFormat.Rgb24, decoded.PixelFormat);
         Assert.Equal(source.Width, decoded.Width);
@@ -26,9 +26,9 @@ public class EncodeDecodeRoundTripTests
     [InlineData(5, 3, false)] // Non-multiple-of-4 width exercises 8bpp row padding math.
     public void Gray8Image_RoundTrips_Exactly(int width, int height, bool useRle)
     {
-        using var source = CreateGrayscaleImage(width, height);
+        var source = CreateGrayscaleImage(width, height);
 
-        using var decoded = EncodeThenDecode(source, new BmpEncoderOptions { UseRunLengthEncoding = useRle }, targetPixelFormat: PixelFormat.Gray8);
+        var decoded = EncodeThenDecode(source, new BmpEncoderOptions { UseRunLengthEncoding = useRle }, targetPixelFormat: PixelFormat.Gray8);
 
         Assert.Equal(PixelFormat.Gray8, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
@@ -37,9 +37,9 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Rgba32Image_RoundTrips_Exactly_IncludingAlpha()
     {
-        using var source = CreateRgbaImage(40, 24);
+        var source = CreateRgbaImage(40, 24);
 
-        using var decoded = EncodeThenDecode(source, new BmpEncoderOptions());
+        var decoded = EncodeThenDecode(source, new BmpEncoderOptions());
 
         Assert.Equal(PixelFormat.Rgba32, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
@@ -48,7 +48,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Cmyk32Image_Encode_Throws()
     {
-        using var source = Image.Create(4, 4, PixelFormat.Cmyk32);
+        var source = Image.Create(4, 4, PixelFormat.Cmyk32);
         using var ms = new MemoryStream();
 
         Assert.Throws<BmpEncodingException>(() => BmpEncoder.Encode(source, ms));

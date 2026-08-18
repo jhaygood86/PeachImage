@@ -14,6 +14,7 @@ internal sealed class WebpFrameCompositor
 
     private bool _previousDisposeToBackground;
     private (int X, int Y, int Width, int Height) _previousRect;
+    private Image? _lastOutput;
 
     public WebpFrameCompositor(int width, int height)
     {
@@ -25,14 +26,18 @@ internal sealed class WebpFrameCompositor
     /// <summary>
     /// Applies the previous frame's disposal, draws <paramref name="frameRgba"/> (already RGBA32, tightly
     /// packed at <paramref name="rect"/>'s own dimensions) at <paramref name="rect"/>'s position — alpha
-    /// source-over blended if <paramref name="blend"/>, or an outright overwrite otherwise — and returns a
-    /// snapshot <see cref="Image"/> of the resulting full canvas. Records <paramref name="disposeToBackground"/>
-    /// so the *next* call applies it first, matching WebP's dispose timing (applied before the next frame is
-    /// drawn, not immediately after this frame's own duration elapses) — the same lazy timing as
-    /// <c>GifFrameCompositor</c>'s disposal handling.
+    /// source-over blended if <paramref name="blend"/>, or an outright overwrite otherwise — and returns an
+    /// <see cref="Image"/> that aliases this compositor's persistent canvas — not a copy. That image is
+    /// invalidated (its pixel accessors throw) the moment the next <see cref="DrawFrame"/> call runs;
+    /// callers must call <see cref="Image.Clone"/> before then if they need to retain the frame. Records
+    /// <paramref name="disposeToBackground"/> so the *next* call applies it first, matching WebP's dispose
+    /// timing (applied before the next frame is drawn, not immediately after this frame's own duration
+    /// elapses) — the same lazy timing as <c>GifFrameCompositor</c>'s disposal handling.
     /// </summary>
     public Image DrawFrame((int X, int Y, int Width, int Height) rect, ReadOnlySpan<byte> frameRgba, bool blend, bool disposeToBackground)
     {
+        _lastOutput?.Invalidate();
+
         if (_previousDisposeToBackground)
         {
             ClearRegion(_previousRect);
@@ -47,11 +52,11 @@ internal sealed class WebpFrameCompositor
             OverwriteInto(rect, frameRgba);
         }
 
-        var output = Image.Create(_width, _height, PixelFormat.Rgba32);
-        _canvas.CopyTo(output.GetPixelSpan());
+        var output = Image.FromBuffer(_width, _height, PixelFormat.Rgba32, _canvas);
 
         _previousRect = rect;
         _previousDisposeToBackground = disposeToBackground;
+        _lastOutput = output;
 
         return output;
     }

@@ -43,7 +43,7 @@ public class FrameDecoderScanLimitTests
 
     private static byte[] EncodeMinimalJpeg()
     {
-        using var source = Image.Create(16, 16, PixelFormat.Rgb24);
+        var source = Image.Create(16, 16, PixelFormat.Rgb24);
         for (int y = 0; y < 16; y++)
         {
             var row = source.GetRowSpan(y);

@@ -29,7 +29,7 @@ public class PaletteTransparencyTests
                 [0, 2, 3], // filter type None, indices [2, 3]
             ]);
 
-        using var image = PngDecoder.Decode(new MemoryStream(file));
+        var image = PngDecoder.Decode(new MemoryStream(file));
 
         Assert.Equal(PixelFormat.Rgba32, image.PixelFormat);
         var pixels = image.GetPixelSpan();
@@ -58,7 +58,7 @@ public class PaletteTransparencyTests
             trns: null,
             scanlines: [[0, 0b0100_0000]]); // depth-1 packed: pixel0=index0, pixel1=index1, MSB-first.
 
-        using var image = PngDecoder.Decode(new MemoryStream(file));
+        var image = PngDecoder.Decode(new MemoryStream(file));
 
         Assert.Equal(PixelFormat.Rgb24, image.PixelFormat);
         var pixels = image.GetPixelSpan();

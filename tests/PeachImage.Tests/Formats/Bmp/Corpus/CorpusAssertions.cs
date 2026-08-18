@@ -54,27 +54,24 @@ internal static class CorpusAssertions
             return;
         }
 
-        using (peachImage)
+        if (peachImage.Width < 1 || peachImage.Height < 1)
         {
-            if (peachImage.Width < 1 || peachImage.Height < 1)
-            {
-                return;
-            }
-
-            if (peachImage.PixelFormat != PixelFormat.Rgb24)
-            {
-                return;
-            }
-
-            using var skiaBitmap = SKBitmap.Decode(path);
-            if (skiaBitmap is null || skiaBitmap.Width != peachImage.Width || skiaBitmap.Height != peachImage.Height)
-            {
-                return;
-            }
-
-            double averageDifference = ComputeAverageRgbDifference(peachImage, skiaBitmap);
-            Assert.True(averageDifference < 2.0, $"{Path.GetFileName(path)}: average per-channel difference from SkiaSharp too high: {averageDifference:F2}");
+            return;
         }
+
+        if (peachImage.PixelFormat != PixelFormat.Rgb24)
+        {
+            return;
+        }
+
+        using var skiaBitmap = SKBitmap.Decode(path);
+        if (skiaBitmap is null || skiaBitmap.Width != peachImage.Width || skiaBitmap.Height != peachImage.Height)
+        {
+            return;
+        }
+
+        double averageDifference = ComputeAverageRgbDifference(peachImage, skiaBitmap);
+        Assert.True(averageDifference < 2.0, $"{Path.GetFileName(path)}: average per-channel difference from SkiaSharp too high: {averageDifference:F2}");
     }
 
     private static (bool Succeeded, Exception? Exception) TryDecode(string path)
@@ -82,7 +79,7 @@ internal static class CorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            using var image = BmpDecoder.Decode(stream);
+            var image = BmpDecoder.Decode(stream);
             return (true, null);
         }
         catch (Exception ex)

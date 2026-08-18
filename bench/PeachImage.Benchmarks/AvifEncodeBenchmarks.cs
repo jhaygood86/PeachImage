@@ -27,13 +27,6 @@ public class AvifEncodeBenchmarks
         _small = Decode(Path.Combine(assetsDir, "small_32x24.avif"));
     }
 
-    [GlobalCleanup]
-    public void Cleanup()
-    {
-        _photographic420.Dispose();
-        _small.Dispose();
-    }
-
     [Benchmark]
     [BenchmarkCategory("Photographic-420")]
     public MemoryStream PeachImage_Encode_Photographic420() => Encode(_photographic420);

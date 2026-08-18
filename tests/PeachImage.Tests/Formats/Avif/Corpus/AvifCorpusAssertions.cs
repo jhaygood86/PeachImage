@@ -64,7 +64,7 @@ internal static class AvifCorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            using var image = AvifDecoder.Decode(stream);
+            var image = AvifDecoder.Decode(stream);
             return (true, null);
         }
         catch (Exception ex)

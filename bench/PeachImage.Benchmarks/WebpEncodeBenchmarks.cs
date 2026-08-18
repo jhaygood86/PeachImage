@@ -47,11 +47,6 @@ public class WebpEncodeBenchmarks
     [GlobalCleanup]
     public void Cleanup()
     {
-        _losslessPhotographicSource.Dispose();
-        _losslessAlphaSource.Dispose();
-        _losslessGraphicSource.Dispose();
-        _smallSource.Dispose();
-
         _losslessPhotographicSkiaSource.Dispose();
         _losslessAlphaSkiaSource.Dispose();
         _losslessGraphicSkiaSource.Dispose();

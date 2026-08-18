@@ -11,9 +11,9 @@ public class EncodeDecodeRoundTripTests
     [InlineData(255, 2)] // Exercises the 255-byte LZW sub-block boundary.
     public void LowColorCount_RoundTrips_Exactly(int width, int height)
     {
-        using var source = CreateTiledImage(width, height, colorCount: 16);
+        var source = CreateTiledImage(width, height, colorCount: 16);
 
-        using var decoded = EncodeThenDecode(source, new GifEncoderOptions());
+        var decoded = EncodeThenDecode(source, new GifEncoderOptions());
 
         Assert.Equal(PixelFormat.Rgb24, decoded.PixelFormat);
         Assert.Equal(source.Width, decoded.Width);
@@ -24,9 +24,9 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void ExactlyMaxColors_RoundTrips_Exactly()
     {
-        using var source = CreateTiledImage(width: 64, height: 64, colorCount: 256);
+        var source = CreateTiledImage(width: 64, height: 64, colorCount: 256);
 
-        using var decoded = EncodeThenDecode(source, new GifEncoderOptions { MaxColors = 256 });
+        var decoded = EncodeThenDecode(source, new GifEncoderOptions { MaxColors = 256 });
 
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
@@ -36,9 +36,9 @@ public class EncodeDecodeRoundTripTests
     [InlineData(true)]
     public void PhotographicImage_RoundTrips_WithinTolerance(bool dither)
     {
-        using var source = CreateGradientImage(96, 64);
+        var source = CreateGradientImage(96, 64);
 
-        using var decoded = EncodeThenDecode(source, new GifEncoderOptions { MaxColors = 256, Dither = dither });
+        var decoded = EncodeThenDecode(source, new GifEncoderOptions { MaxColors = 256, Dither = dither });
 
         Assert.Equal(source.Width, decoded.Width);
         Assert.Equal(source.Height, decoded.Height);
@@ -50,9 +50,9 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Rgba32Transparency_RoundTrips_Exactly()
     {
-        using var source = CreateImageWithTransparentBorder(48, 32);
+        var source = CreateImageWithTransparentBorder(48, 32);
 
-        using var decoded = EncodeThenDecode(source, new GifEncoderOptions());
+        var decoded = EncodeThenDecode(source, new GifEncoderOptions());
 
         Assert.Equal(PixelFormat.Rgba32, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
@@ -61,7 +61,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Cmyk32Image_Encode_Throws()
     {
-        using var source = Image.Create(4, 4, PixelFormat.Cmyk32);
+        var source = Image.Create(4, 4, PixelFormat.Cmyk32);
         using var ms = new MemoryStream();
 
         Assert.Throws<GifEncodingException>(() => GifEncoder.Encode(source, ms));
@@ -83,30 +83,19 @@ public class EncodeDecodeRoundTripTests
         ms.Position = 0;
 
         var decodedFrames = AnimatedImage.Load(ms);
-        var decoded = decodedFrames.Frames.ToList();
-        try
-        {
-            Assert.Equal(3, decoded.Count);
-            Assert.Equal(7, decodedFrames.LoopCount);
+        // Each pulled frame's Image aliases the decoder's persistent compositor canvas and is invalidated
+        // once the next frame is pulled, so every frame must be cloned as it's pulled (not just ToList()'d)
+        // to compare all of them afterward.
+        var decoded = decodedFrames.Frames.Select(frame => frame.Clone()).ToList();
 
-            for (int i = 0; i < frames.Count; i++)
-            {
-                Assert.Equal(frames[i].Disposal, decoded[i].Disposal);
-                Assert.Equal(Math.Round(frames[i].Duration.TotalMilliseconds / 10.0) * 10.0, decoded[i].Duration.TotalMilliseconds);
-                Assert.True(frames[i].Image.GetPixelSpan().SequenceEqual(decoded[i].Image.GetPixelSpan()));
-            }
-        }
-        finally
-        {
-            foreach (var frame in frames)
-            {
-                frame.Dispose();
-            }
+        Assert.Equal(3, decoded.Count);
+        Assert.Equal(7, decodedFrames.LoopCount);
 
-            foreach (var frame in decoded)
-            {
-                frame.Dispose();
-            }
+        for (int i = 0; i < frames.Count; i++)
+        {
+            Assert.Equal(frames[i].Disposal, decoded[i].Disposal);
+            Assert.Equal(Math.Round(frames[i].Duration.TotalMilliseconds / 10.0) * 10.0, decoded[i].Duration.TotalMilliseconds);
+            Assert.True(frames[i].Image.GetPixelSpan().SequenceEqual(decoded[i].Image.GetPixelSpan()));
         }
     }
 
@@ -138,25 +127,14 @@ public class EncodeDecodeRoundTripTests
         ms.Position = 0;
 
         var decodedAnimation = AnimatedImage.Load(ms);
-        var decoded = decodedAnimation.Frames.ToList();
-        try
-        {
-            Assert.Equal(2, decoded.Count);
-            Assert.True(frames[0].Image.GetPixelSpan().SequenceEqual(decoded[0].Image.GetPixelSpan()));
-            Assert.True(frames[1].Image.GetPixelSpan().SequenceEqual(decoded[1].Image.GetPixelSpan()));
-        }
-        finally
-        {
-            foreach (var frame in frames)
-            {
-                frame.Dispose();
-            }
+        // Each pulled frame's Image aliases the decoder's persistent compositor canvas and is invalidated
+        // once the next frame is pulled, so every frame must be cloned as it's pulled (not just ToList()'d)
+        // to compare all of them afterward.
+        var decoded = decodedAnimation.Frames.Select(frame => frame.Clone()).ToList();
 
-            foreach (var frame in decoded)
-            {
-                frame.Dispose();
-            }
-        }
+        Assert.Equal(2, decoded.Count);
+        Assert.True(frames[0].Image.GetPixelSpan().SequenceEqual(decoded[0].Image.GetPixelSpan()));
+        Assert.True(frames[1].Image.GetPixelSpan().SequenceEqual(decoded[1].Image.GetPixelSpan()));
     }
 
     [Fact]
@@ -164,7 +142,7 @@ public class EncodeDecodeRoundTripTests
     {
         byte[] gif = EncodeTwoFrameAnimation();
 
-        using var decoded = GifDecoder.Decode(new MemoryStream(gif));
+        var decoded = GifDecoder.Decode(new MemoryStream(gif));
         var info = GifDecoder.Identify(new MemoryStream(gif));
 
         Assert.True(decoded.IsAnimated);
@@ -174,11 +152,11 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void SingleFrameGif_DecodeAndIdentify_ReportIsAnimatedFalse()
     {
-        using var source = CreateTiledImage(8, 8, colorCount: 4);
+        var source = CreateTiledImage(8, 8, colorCount: 4);
         using var ms = new MemoryStream();
         GifEncoder.Encode(source, ms, new GifEncoderOptions());
 
-        using var decoded = GifDecoder.Decode(new MemoryStream(ms.ToArray()));
+        var decoded = GifDecoder.Decode(new MemoryStream(ms.ToArray()));
         var info = GifDecoder.Identify(new MemoryStream(ms.ToArray()));
 
         Assert.False(decoded.IsAnimated);
@@ -196,11 +174,6 @@ public class EncodeDecodeRoundTripTests
 
         using var ms = new MemoryStream();
         source.Save(ms, "gif", new GifEncoderOptions());
-
-        foreach (var frame in frames)
-        {
-            frame.Dispose();
-        }
 
         return ms.ToArray();
     }

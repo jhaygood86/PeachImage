@@ -9,7 +9,7 @@ public class ChunkFramingTests
     {
         byte[] file = BuildMinimalGrayscaleFile();
 
-        using var image = PngDecoder.Decode(new MemoryStream(file));
+        var image = PngDecoder.Decode(new MemoryStream(file));
 
         Assert.Equal(2, image.Width);
         Assert.Equal(2, image.Height);
@@ -59,7 +59,7 @@ public class ChunkFramingTests
         PngTestFileBuilder.WriteChunk(ms, "IDAT", onePixelIdat);
         PngTestFileBuilder.WriteChunk(ms, "IEND", []);
 
-        using var image = PngDecoder.Decode(new MemoryStream(ms.ToArray()));
+        var image = PngDecoder.Decode(new MemoryStream(ms.ToArray()));
         Assert.Equal(128, image.GetPixelSpan()[0]);
     }
 

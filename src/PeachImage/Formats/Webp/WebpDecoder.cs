@@ -90,7 +90,6 @@ internal static class WebpDecoder
             if (container.CanvasWidth is { } canvasWidth && container.CanvasHeight is { } canvasHeight
                 && (image.Width != canvasWidth || image.Height != canvasHeight))
             {
-                image.Dispose();
                 throw new WebpDecodingException(
                     $"WebP VP8X canvas size {canvasWidth}x{canvasHeight} does not match the decoded bitstream size {image.Width}x{image.Height}.");
             }

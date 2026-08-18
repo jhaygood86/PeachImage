@@ -38,22 +38,13 @@ public class GifEncodeBenchmarks
         using (var stream = File.OpenRead(Path.Combine(assetsDir, "animated_320x240_24frames.gif")))
         {
             var loaded = AnimatedImage.Load(stream);
-            // AnimatedImage.Load's Frames is a single-pass lazy sequence; the encode benchmark below runs
-            // many times against the same _animatedSource, so it's materialized once here (setup cost, not
-            // measured) into a List-backed AnimatedImage that supports repeated enumeration.
-            _animatedSourceFrames = loaded.Frames.ToList();
+            // AnimatedImage.Load's Frames is a single-pass lazy sequence backed by GifFrameCompositor, which
+            // reuses one persistent canvas across frames: each frame's Image is invalidated as soon as the
+            // next frame is drawn. Cloning per-frame here (setup cost, not measured) as each is pulled -- not
+            // just ToList()-ing the frames -- is required so every entry in the materialized list still has
+            // valid, independent pixel data once the whole sequence has been drawn.
+            _animatedSourceFrames = loaded.Frames.Select(frame => frame.Clone()).ToList();
             _animatedSource = new AnimatedImage(_animatedSourceFrames, loaded.Width, loaded.Height, loaded.LoopCount);
-        }
-    }
-
-    [GlobalCleanup]
-    public void Cleanup()
-    {
-        _lowColorGraphic.Dispose();
-        _photographicSource.Dispose();
-        foreach (var frame in _animatedSourceFrames)
-        {
-            frame.Dispose();
         }
     }
 

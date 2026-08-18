@@ -55,45 +55,42 @@ internal static class CorpusAssertions
             return;
         }
 
-        using (peachImage)
+        if (peachImage.Width < 1 || peachImage.Height < 1)
         {
-            if (peachImage.Width < 1 || peachImage.Height < 1)
+            return;
+        }
+
+        if (peachImage.PixelFormat == PixelFormat.Rgb24)
+        {
+            using var skiaBitmap = SKBitmap.Decode(path);
+            if (skiaBitmap is null || skiaBitmap.Width != peachImage.Width || skiaBitmap.Height != peachImage.Height)
             {
                 return;
             }
 
-            if (peachImage.PixelFormat == PixelFormat.Rgb24)
-            {
-                using var skiaBitmap = SKBitmap.Decode(path);
-                if (skiaBitmap is null || skiaBitmap.Width != peachImage.Width || skiaBitmap.Height != peachImage.Height)
-                {
-                    return;
-                }
+            var difference = ComputeDifference(peachImage, skiaBitmap, includeAlpha: false);
+            AssertWithinTolerance(path, difference, includeAlpha: false);
+            return;
+        }
 
-                var difference = ComputeDifference(peachImage, skiaBitmap, includeAlpha: false);
-                AssertWithinTolerance(path, difference, includeAlpha: false);
+        if (peachImage.PixelFormat == PixelFormat.Rgba32)
+        {
+            using var codec = SKCodec.Create(path);
+            if (codec is null)
+            {
                 return;
             }
 
-            if (peachImage.PixelFormat == PixelFormat.Rgba32)
+            var unpremulInfo = codec.Info.WithAlphaType(SKAlphaType.Unpremul);
+            using var skiaBitmap = new SKBitmap(unpremulInfo);
+            var result = codec.GetPixels(unpremulInfo, skiaBitmap.GetPixels());
+            if (result != SKCodecResult.Success || skiaBitmap.Width != peachImage.Width || skiaBitmap.Height != peachImage.Height)
             {
-                using var codec = SKCodec.Create(path);
-                if (codec is null)
-                {
-                    return;
-                }
-
-                var unpremulInfo = codec.Info.WithAlphaType(SKAlphaType.Unpremul);
-                using var skiaBitmap = new SKBitmap(unpremulInfo);
-                var result = codec.GetPixels(unpremulInfo, skiaBitmap.GetPixels());
-                if (result != SKCodecResult.Success || skiaBitmap.Width != peachImage.Width || skiaBitmap.Height != peachImage.Height)
-                {
-                    return;
-                }
-
-                var difference = ComputeDifference(peachImage, skiaBitmap, includeAlpha: true);
-                AssertWithinTolerance(path, difference, includeAlpha: true);
+                return;
             }
+
+            var difference = ComputeDifference(peachImage, skiaBitmap, includeAlpha: true);
+            AssertWithinTolerance(path, difference, includeAlpha: true);
         }
     }
 
@@ -139,7 +136,7 @@ internal static class CorpusAssertions
         try
         {
             using var stream = File.OpenRead(path);
-            using var image = WebpDecoder.Decode(stream);
+            var image = WebpDecoder.Decode(stream);
             return (true, null);
         }
         catch (Exception ex)

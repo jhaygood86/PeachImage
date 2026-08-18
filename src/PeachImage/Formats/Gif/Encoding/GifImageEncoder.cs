@@ -18,11 +18,14 @@ internal static class GifImageEncoder
         // A single enumeration of image.Frames (safe even if it's a lazily-decoded, single-pass sequence),
         // spooled into a list: GIF's Global Color Table must be written before any frame data, but building
         // it requires full-corpus color statistics across every frame, so every source Image is necessarily
-        // retained for the encode's duration regardless of whether Frames itself is lazy.
+        // retained for the encode's duration regardless of whether Frames itself is lazy. Each frame's Image
+        // is cloned while spooling because a decoder-sourced Frames sequence may hand back frames that alias
+        // shared, mutable compositor state — an Image that's still valid when read here but invalidated by
+        // the time a later frame's Image is spooled (see AnimatedImage.Frames' frame-validity contract).
         var frames = new List<(Image, TimeSpan, GifDisposalMethod)>();
         foreach (var frame in image.Frames)
         {
-            frames.Add((frame.Image, frame.Duration, ToGifDisposalMethod(frame.Disposal)));
+            frames.Add((frame.Image.Clone(), frame.Duration, ToGifDisposalMethod(frame.Disposal)));
         }
 
         EncodeFrames(stream, frames, image.LoopCount, options);

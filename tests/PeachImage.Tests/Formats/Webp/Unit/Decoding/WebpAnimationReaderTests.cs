@@ -25,7 +25,7 @@ public class WebpAnimationReaderTests
     [Fact]
     public void ReadFrames_SingleFullCanvasFrame_MatchesSourcePixels()
     {
-        using var sourceImage = SolidImage(6, 6, 200, 40, 40, 255);
+        var sourceImage = SolidImage(6, 6, 200, 40, 40, 255);
         byte[] frameData = EncodeFrameData(sourceImage);
         byte[] riff = BuildAnimatedRiff(6, 6, loopCount: 0, BuildAnmf(0, 0, 6, 6, 50, disposeToBackground: false, blend: false, frameData));
 
@@ -35,7 +35,6 @@ public class WebpAnimationReaderTests
         Assert.Equal(TimeSpan.FromMilliseconds(50), frame.Duration);
         Assert.Equal(FrameDisposalMethod.DoNotDispose, frame.Disposal);
         Assert.True(sourceImage.GetPixelSpan().SequenceEqual(frame.Image.GetPixelSpan()));
-        frame.Image.Dispose();
     }
 
     [Fact]
@@ -47,7 +46,6 @@ public class WebpAnimationReaderTests
 
         var frame = Assert.Single(frames);
         Assert.Equal(FrameDisposalMethod.RestoreToBackground, frame.Disposal);
-        frame.Image.Dispose();
     }
 
     [Fact]
@@ -56,8 +54,8 @@ public class WebpAnimationReaderTests
         // Frame 1: fully opaque red across the whole canvas, left in place. Frame 2: a fully transparent
         // (alpha=0) sub-rect with blend=false (overwrite) — the overwrite must punch the region to (0,0,0,0)
         // even though the source pixels are "transparent", proving blend=false ignores alpha entirely.
-        using var opaque = SolidImage(4, 4, 255, 0, 0, 255);
-        using var transparent = SolidImage(2, 2, 0, 0, 0, 0);
+        var opaque = SolidImage(4, 4, 255, 0, 0, 255);
+        var transparent = SolidImage(2, 2, 0, 0, 0, 0);
 
         // ANMF X/Y offsets are stored in 2-pixel units, so the sub-rect must sit on an even coordinate —
         // bottom-right 2x2 quadrant of the 4x4 canvas.
@@ -75,11 +73,6 @@ public class WebpAnimationReaderTests
         // Outside the overwritten rect, frame 1's opaque red is untouched.
         Assert.Equal((byte)255, second.GetRowSpan(0)[(0 * 4) + 0]);
         Assert.Equal((byte)255, second.GetRowSpan(0)[(0 * 4) + 3]);
-
-        foreach (var frame in frames)
-        {
-            frame.Image.Dispose();
-        }
     }
 
     [Fact]
@@ -87,8 +80,8 @@ public class WebpAnimationReaderTests
     {
         // Same setup as the overwrite test above, but blend=true this time: a fully transparent source
         // contributes nothing, so frame 1's opaque red must still show through everywhere in frame 2.
-        using var opaque = SolidImage(4, 4, 255, 0, 0, 255);
-        using var transparent = SolidImage(2, 2, 0, 0, 0, 0);
+        var opaque = SolidImage(4, 4, 255, 0, 0, 255);
+        var transparent = SolidImage(2, 2, 0, 0, 0, 0);
 
         byte[] riff = BuildAnimatedRiff(
             4, 4, loopCount: 0,
@@ -107,11 +100,6 @@ public class WebpAnimationReaderTests
                 Assert.Equal((byte)255, row[(x * 4) + 3]);
             }
         }
-
-        foreach (var frame in frames)
-        {
-            frame.Image.Dispose();
-        }
     }
 
     [Fact]
@@ -121,8 +109,8 @@ public class WebpAnimationReaderTests
         // non-overlapping 2x2 elsewhere, no disposal. Frame 1's own composited image must still show red
         // (disposal hasn't happened yet); frame 2's composited image must show frame 1's region cleared to
         // transparent (disposal applied right before frame 2 was drawn) plus the new blue region.
-        using var red = SolidImage(2, 2, 255, 0, 0, 255);
-        using var blue = SolidImage(2, 2, 0, 0, 255, 255);
+        var red = SolidImage(2, 2, 255, 0, 0, 255);
+        var blue = SolidImage(2, 2, 0, 0, 255, 255);
 
         byte[] riff = BuildAnimatedRiff(
             4, 4, loopCount: 0,
@@ -137,18 +125,13 @@ public class WebpAnimationReaderTests
         var second = frames[1].Image;
         Assert.Equal((byte)0, second.GetRowSpan(0)[3]); // frame 1's region now cleared to transparent
         Assert.Equal((byte)255, second.GetRowSpan(2)[(2 * 4) + 2]); // frame 2's own blue region
-
-        foreach (var frame in frames)
-        {
-            frame.Image.Dispose();
-        }
     }
 
     [Fact]
     public void ReadFrames_TakeFirstFrame_DoesNotTouchLaterFrameBytes()
     {
-        using var frame1 = SolidImage(4, 4, 10, 20, 30, 255);
-        using var frame2 = SolidImage(4, 4, 40, 50, 60, 255);
+        var frame1 = SolidImage(4, 4, 10, 20, 30, 255);
+        var frame2 = SolidImage(4, 4, 40, 50, 60, 255);
         byte[] riff = BuildAnimatedRiff(
             4, 4, loopCount: 0,
             BuildAnmf(0, 0, 4, 4, 10, disposeToBackground: false, blend: false, EncodeFrameData(frame1)),
@@ -163,7 +146,6 @@ public class WebpAnimationReaderTests
 
         var only = Assert.Single(lazyFrames);
         Assert.True(frame1.GetPixelSpan().SequenceEqual(only.Image.GetPixelSpan()));
-        only.Image.Dispose();
     }
 
     [Fact]
@@ -206,7 +188,7 @@ public class WebpAnimationReaderTests
     [Fact]
     public void AnmfFrameRect_ExceedsCanvas_Throws()
     {
-        using var image = SolidImage(4, 4, 1, 2, 3, 255);
+        var image = SolidImage(4, 4, 1, 2, 3, 255);
         byte[] riff = BuildAnimatedRiff(4, 4, loopCount: 0, BuildAnmf(2, 2, 4, 4, 10, false, false, EncodeFrameData(image)));
 
         Assert.Throws<WebpDecodingException>(() => ReadFrames(riff));
@@ -223,7 +205,7 @@ public class WebpAnimationReaderTests
     [Fact]
     public void AnmfFrameData_TwoImageChunks_Throws()
     {
-        using var image = SolidImage(4, 4, 1, 2, 3, 255);
+        var image = SolidImage(4, 4, 1, 2, 3, 255);
         byte[] singleFrameData = EncodeFrameData(image);
         byte[] doubled = [.. singleFrameData, .. singleFrameData];
         byte[] riff = BuildAnimatedRiff(4, 4, loopCount: 0, BuildAnmf(0, 0, 4, 4, 10, false, false, doubled));
@@ -247,7 +229,10 @@ public class WebpAnimationReaderTests
         var prelude = WebpContainerReader.ReadPrelude(stream, out _);
         var metadata = new ImageMetadata();
         var header = WebpAnimationReader.ReadHeader(stream, metadata, prelude);
-        return WebpAnimationReader.ReadFrames(stream, metadata, header).ToList();
+        // Each pulled frame's Image aliases the compositor's persistent canvas and is invalidated once the
+        // next frame is pulled, so every frame must be cloned as it's pulled to let callers inspect more
+        // than just the most-recently-pulled frame afterward.
+        return WebpAnimationReader.ReadFrames(stream, metadata, header).Select(frame => frame.Clone()).ToList();
     }
 
     private static int FirstAnmfByteLength(byte[] riff, int offsetAfterAnim)
@@ -317,7 +302,7 @@ public class WebpAnimationReaderTests
 
     private static byte[] BuildOpaqueFrame(int x, int y, int width, int height, bool disposeToBackground, bool blend)
     {
-        using var image = SolidImage(width, height, 128, 64, 32, 255);
+        var image = SolidImage(width, height, 128, 64, 32, 255);
         return BuildAnmf(x, y, width, height, 20, disposeToBackground, blend, EncodeFrameData(image));
     }
 

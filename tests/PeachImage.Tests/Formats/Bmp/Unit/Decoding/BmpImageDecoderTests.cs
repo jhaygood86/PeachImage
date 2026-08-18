@@ -26,7 +26,7 @@ public class BmpImageDecoderTests
         byte[] rleData = [0, 1];
         byte[] file = BuildRle8File(width: 2, height: 1, declaredImageSize: (uint)rleData.Length, actualDataBytes: rleData);
 
-        using var image = BmpImageDecoder.Decode(new MemoryStream(file));
+        var image = BmpImageDecoder.Decode(new MemoryStream(file));
 
         Assert.Equal(2, image.Width);
         Assert.Equal(1, image.Height);

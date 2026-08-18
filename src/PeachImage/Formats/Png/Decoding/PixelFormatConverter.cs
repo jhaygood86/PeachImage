@@ -43,7 +43,6 @@ internal static class PixelFormatConverter
             _ => throw new PngDecodingException($"Cannot convert decoded {image.PixelFormat} pixels to requested format {targetFormat}."),
         };
 
-        image.Dispose();
         return converted;
     }
 
