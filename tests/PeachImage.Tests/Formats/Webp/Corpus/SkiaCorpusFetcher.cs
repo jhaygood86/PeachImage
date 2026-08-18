@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using System.Text.Json;
 using PeachImage.Tests.Internal;
 
@@ -52,7 +53,13 @@ internal static class SkiaCorpusFetcher
     private static async Task FetchWebpFixturesAsync(HttpClient http, CancellationToken cancellationToken)
     {
         string contentsUrl = $"https://api.github.com/repos/{Owner}/{Repo}/contents/{Path}?ref={Branch}";
-        using var response = await HttpRetry.GetWithRetryAsync(http, contentsUrl, cancellationToken).ConfigureAwait(false);
+        using var response = await HttpRetry.SendWithRetryAsync(http, () =>
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, contentsUrl);
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+            GitHubAuth.Apply(request);
+            return request;
+        }, cancellationToken).ConfigureAwait(false);
 
         await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         using var document = await JsonDocument.ParseAsync(responseStream, cancellationToken: cancellationToken).ConfigureAwait(false);

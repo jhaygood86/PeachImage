@@ -1,15 +1,17 @@
 using PeachImage.Formats.Webp;
+using PeachImage.Tests.Internal;
 
 namespace PeachImage.Tests.Formats.Webp.Corpus;
 
 /// <summary>
-/// <c>MemberData</c> source enumerating the libwebp-test-data corpus. Returns an empty set (rather than
-/// throwing) when the corpus isn't available, so corpus-driven test classes simply report zero cases instead
-/// of failing; <see cref="CorpusAvailabilityTests"/> is what makes that visible.
+/// <c>MemberData</c> source enumerating the libwebp-test-data corpus. Each yields a single
+/// <see cref="CorpusSkip"/> row (rather than throwing, or returning zero rows — see <see cref="CorpusSkip"/>
+/// for why) when the corpus isn't available, so corpus-driven test classes report a genuine skip instead of
+/// failing; <see cref="CorpusAvailabilityTests"/> makes the same signal visible for its own plain <c>[Fact]</c>.
 /// </summary>
 internal static class CorpusFileSource
 {
-    public static IEnumerable<object[]> WebpFiles() => EnumerateFiles(CorpusPaths.LibwebpTestDataRoot);
+    public static IEnumerable<TheoryDataRow<string>> WebpFiles() => EnumerateFiles(CorpusPaths.LibwebpTestDataRoot);
 
     /// <summary>
     /// Every <c>.webp</c> file under Skia's <c>resources/images</c> fixture set (see <see cref="SkiaCorpusFetcher"/>)
@@ -17,10 +19,11 @@ internal static class CorpusFileSource
     /// <see cref="ImageInfo.IsAnimated"/> rather than a hardcoded filename list, so any animated fixture Skia
     /// adds later is picked up automatically without a code change here.
     /// </summary>
-    public static IEnumerable<object[]> AnimatedWebpFiles()
+    public static IEnumerable<TheoryDataRow<string>> AnimatedWebpFiles()
     {
         if (!SkiaCorpusFixture.IsAvailable || !Directory.Exists(CorpusPaths.SkiaImagesRoot))
         {
+            yield return CorpusSkip.Row("Skia's animated WebP test fixtures are not available (no network, or PEACHIMAGE_SKIP_CORPUS_FETCH is set).");
             yield break;
         }
 
@@ -39,21 +42,22 @@ internal static class CorpusFileSource
 
             if (isAnimated)
             {
-                yield return [file];
+                yield return new TheoryDataRow<string>(file);
             }
         }
     }
 
-    private static IEnumerable<object[]> EnumerateFiles(string directory)
+    private static IEnumerable<TheoryDataRow<string>> EnumerateFiles(string directory)
     {
         if (!CorpusFixture.IsAvailable || !Directory.Exists(directory))
         {
+            yield return CorpusSkip.Row("External WebP test corpus is not available (no network, or PEACHIMAGE_SKIP_CORPUS_FETCH is set).");
             yield break;
         }
 
         foreach (var file in Directory.EnumerateFiles(directory, "*.webp", SearchOption.AllDirectories))
         {
-            yield return [file];
+            yield return new TheoryDataRow<string>(file);
         }
     }
 }

@@ -32,8 +32,49 @@ jobs:
     - name: Build
       run: dotnet build tests/PeachImage.Tests/PeachImage.Tests.csproj --no-restore --configuration Release
 
+    # Corpus fetchers write into tests/corpus (gitignored) and skip re-fetching when a per-format
+    # ".fetched" marker is already present. Restoring that directory from cache means a cache-hit run
+    # never touches the network at all, eliminating the recurring "No data found" corpus-test flakiness
+    # at its root instead of just retrying it. The key is a fixed version tag (not hashFiles-derived,
+    # since the corpus isn't sourced from anything in this repo) -- bump it if a fetcher's source/filter
+    # logic changes in a way that should force a fresh fetch.
+    - name: Restore corpus cache
+      id: corpus-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: tests/corpus
+        key: corpus-v1-${{ runner.os }}
+
     - name: Test
+      env:
+        # Ambient token, no repo secret setup needed -- see GitHubAuth.cs. Raises the corpus fetchers'
+        # GitHub API calls from the unauthenticated 60-requests/hour-per-IP limit (shared across every
+        # jobs on a runner IP pool, and the actual root cause of the "No data found" flakiness once a
+        # fetch's single Trees/Contents API call gets rate-limited) to 5,000/hour per-token.
+        GITHUB_TOKEN: ${{ github.token }}
       run: dotnet test tests/PeachImage.Tests/PeachImage.Tests.csproj --no-build --configuration Release --logger "trx;LogFileName=test-results.trx" --collect:"XPlat Code Coverage" --results-directory coverage
+
+    # Only lock in a cache entry once every format's corpus fetch has actually succeeded -- caching a
+    # partial/empty result under a fixed key would be permanent (cache keys are immutable, so a bad
+    # save here could never be corrected without bumping the key). On a cache hit this is skipped
+    # entirely since there's nothing new to save.
+    - name: Check corpus fully populated
+      id: corpus-check
+      if: always() && steps.corpus-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        if [ -f "tests/corpus/.fetched" ] && [ -f "tests/corpus/png/.fetched" ] && [ -f "tests/corpus/bmp/.fetched" ] && [ -f "tests/corpus/gif/.fetched" ] && [ -f "tests/corpus/webp/.fetched" ] && [ -f "tests/corpus/avif/.fetched" ]; then
+          echo "complete=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "complete=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Save corpus cache
+      if: always() && steps.corpus-cache.outputs.cache-hit != 'true' && steps.corpus-check.outputs.complete == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: tests/corpus
+        key: corpus-v1-${{ runner.os }}
 
     - name: Upload test results
       uses: actions/upload-artifact@v4
