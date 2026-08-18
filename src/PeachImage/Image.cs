@@ -54,6 +54,13 @@ public sealed class Image : IDisposable
     /// <summary>Metadata (EXIF/ICC/etc.) captured alongside the pixel data, if any.</summary>
     public ImageMetadata Metadata { get; }
 
+    /// <summary>
+    /// Whether this <see cref="Image"/> was decoded from a multi-frame animated source (only its first frame
+    /// was decoded — see <see cref="AnimatedImage"/> to decode every frame). Always <see langword="false"/>
+    /// for images not produced by a codec's <c>Decode</c> path (e.g. <see cref="Create"/>).
+    /// </summary>
+    public bool IsAnimated { get; internal set; }
+
     /// <summary>Gets a zero-copy view of the entire tightly-packed pixel buffer.</summary>
     public Span<byte> GetPixelSpan()
     {

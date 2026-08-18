@@ -1,7 +1,7 @@
 # PeachImage vs. SkiaSharp
 
 Performance comparison of PeachImage against [SkiaSharp](https://github.com/mono/SkiaSharp) (a
-mature, real-world, native-backed image library) for JPEG, BMP, PNG, and WebP decode/encode
+mature, real-world, native-backed image library) for JPEG, BMP, GIF, PNG, and WebP decode/encode
 throughput. SkiaSharp is used as a single consistent baseline across all formats — it's also the
 corpus tests' differential oracle (see the [README](README.md)).
 
@@ -24,6 +24,17 @@ pinning note below. The numbers in this document were collected with:
 ```bash
 dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*JpegDecodeBenchmarks*" "*JpegEncodeBenchmarks*" "*BmpDecodeBenchmarks*" "*BmpEncodeBenchmarks*" "*PngDecodeBenchmarks*" "*PngEncodeBenchmarks*" "*WebpDecodeBenchmarks*" "*AvifDecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
 ```
+
+The GIF section and the WebP/GIF "Animated" rows were collected separately (same methodology, same
+session, same machine) with a filter scoped to just the `Animated-MultiFrame` category:
+
+```bash
+dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*AnimatedAllFrames*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
+```
+
+The static (non-animated) GIF decode scenarios already present in `GifDecodeBenchmarks.cs`
+(low-color graphic, dithered photographic) weren't run into this document — only the animated one
+was, since that's what this measurement pass set out to fill in.
 
 **Environment**: BenchmarkDotNet v0.15.8, Windows 11, Intel Core i9-14900K (24 physical / 32 logical
 cores), .NET 10.0.11 (SDK 10.0.400), X64 RyuJIT x86-64-v3, AVX2-capable. PeachImage also targets
@@ -138,12 +149,42 @@ source as truecolor (this encoder, `ColorMode = Truecolor`) and **2,229 bytes** 
 color for this source (its output stays color type 2/truecolor regardless of the source's color
 count), so the file-size comparison is PeachImage-only.
 
+## GIF
+
+Decode covers a low-color graphic and a dithered photographic still, plus an animated scenario
+(all 24 frames of a 320×240 animation, decoded through both libraries — PeachImage via
+`AnimatedImage.Load`, SkiaSharp via frame-indexed `SKCodec` decode — not just the first frame,
+since that's GIF's defining use case). Encode has no SkiaSharp baseline: `SKPixmap.Encode` does
+not support GIF output (confirmed empirically — it returns null), so encode throughput is tracked
+for PeachImage alone, over time.
+
+### Decode
+
+| Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
+|---|---:|---:|---:|---:|
+| Animated, all frames (24×, 320×240) | 4.63 ms | 0.54 ms | **8.59×** | 8.1 MB |
+
+This is the largest gap measured anywhere in this document — everything else stays under ~2.3×.
+It was already present in the benchmark suite before animated WebP decode was added in the same
+session that first ran and published this number, so there's no earlier recorded baseline to
+confirm whether it's a longstanding cost or a regression from later GIF decode changes; it's flagged
+here as a real gap worth a dedicated investigation, not something to read past. The static (non-animated)
+GIF decode scenarios in `GifDecodeBenchmarks.cs` (low-color graphic, dithered photographic) haven't
+been run into this document yet either.
+
+### Encode (PeachImage only — no SkiaSharp baseline)
+
+| Scenario | PeachImage Mean |
+|---|---:|
+| Animated, all frames (24×, 320×240) | 13.51 ms |
+
 ## WebP
 
 Decode covers both of WebP's bitstream codecs (VP8 lossy, VP8L lossless), with and without alpha,
-plus a small-image scenario. Encode covers both the lossless (VP8L, default) and lossy (VP8,
-`WebpEncoderOptions.Lossless = false`) bitstreams; animation is not yet implemented for either
-direction.
+a small-image scenario, and an animated scenario (all 24 frames of the same source content/dimensions
+as GIF's animated scenario above, transcoded to WebP via ffmpeg's `libwebp_anim` muxer, so the two are
+directly comparable). Encode covers both the lossless (VP8L, default) and lossy (VP8,
+`WebpEncoderOptions.Lossless = false`) bitstreams; animated encoding is not implemented (decode-only).
 
 ### Decode
 
@@ -155,6 +196,17 @@ direction.
 | Lossy, Alpha | 33.49 ms | 19.85 ms | **1.69×** | 11.1 MB |
 | Lossless, Alpha | 45.62 ms | 24.82 ms | **1.84×** | 13.0 MB |
 | Small image (32×24) | 14.24 µs | 12.69 µs | **1.12×** | 44 KB |
+| Animated, all frames (24×, 320×240) | 1.48 ms | 4.07 ms | **0.36×** | 9.1 MB |
+
+The animated scenario is the strongest result in this whole document: PeachImage decodes it roughly
+**2.8× faster** than SkiaSharp, consistent across repeated runs. Same explanation as the lossless
+small-image encode case below — SkiaSharp pays fixed per-call native marshaling overhead on every one
+of the 24 `GetPixels` calls, while PeachImage's decode is pure managed code with lower fixed
+per-frame cost. Both libraries' per-frame allocation strategy differs sharply (9.1 MB vs SkiaSharp's
+~2.4 KB): `WebpFrameCompositor`/GIF's `GifFrameCompositor` each allocate a fresh full-canvas `Image`
+per frame rather than reusing one buffer in place the way SkiaSharp's benchmark loop does — a real,
+shared design cost across both animated formats, though evidently not what's driving GIF's much
+larger 8.59× gap above, since WebP has the same allocation pattern and still comes out ahead.
 
 ### Encode (lossless)
 
@@ -211,11 +263,16 @@ PeachImage is roughly **2.12×** `ffmpeg`'s process-spawn-inclusive time on the 
 |---|---|---|
 | JPEG | 1.16×–1.37× | 1.18×–1.35× |
 | BMP | 0.38×–1.04× | no baseline (PeachImage-only) |
+| GIF | **8.59× (animated only measured so far)** | no SkiaSharp baseline (PeachImage-only) |
 | PNG | 1.06×–2.33× | 0.66×–1.15× |
-| WebP | 1.12×–2.17× | not yet benchmarked (lossless-only encode implemented) |
+| WebP | 0.36×–2.17× (animated: **0.36×**, static: 1.12×–2.17×) | 1.01×–1.44× lossless (0.16× small-image outlier), 0.88× lossy |
 | AVIF | ~2.12× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented (fixed 8x8 blocks, no partition-tree RDO yet); throughput not yet measured here |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
 and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the
-16-bit decode path. JPEG has the largest gap on both sides among the mature formats. WebP and AVIF are
-the newest formats and furthest from the 10% target on large images.
+16-bit decode path. JPEG has the largest gap on both sides among the mature formats. WebP's static
+decode and AVIF are the furthest from the 10% target on large images, but WebP's *animated* decode is
+actually the single best result in this document (SkiaSharp's fixed per-frame native marshaling
+overhead losing badly to PeachImage's managed decode loop). GIF's animated decode is the worst result
+in this document by a wide margin and is flagged in its own section above as needing dedicated
+investigation, not yet explained.

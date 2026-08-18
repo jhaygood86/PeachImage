@@ -9,40 +9,64 @@ namespace PeachImage;
 /// dispatch to whichever of <see cref="Image"/>'s built-in codecs also support animation (GIF today),
 /// rather than any single format's animation API being called directly.
 /// </summary>
-public sealed class AnimatedImage : IDisposable
+/// <remarks>
+/// Does not implement <see cref="IDisposable"/>: a decode-produced <see cref="Frames"/> sequence is lazy and
+/// may be backed by an open stream, so nothing meaningful is owned at the <see cref="AnimatedImage"/> level
+/// to dispose. Each <see cref="AnimatedImageFrame"/> pulled from <see cref="Frames"/> owns its own
+/// <see cref="AnimatedImageFrame.Image"/> and must be disposed by the caller once done with it, e.g.
+/// <c>foreach (var frame in animated.Frames) { using (frame) { ... } }</c>.
+/// </remarks>
+public sealed class AnimatedImage
 {
     private static readonly IAnimatedImageCodec[] Codecs = [.. Image.Codecs.OfType<IAnimatedImageCodec>()];
     private static readonly int MaxHeaderSize = Codecs.Length == 0 ? 0 : Codecs.Max(codec => codec.HeaderSize);
 
     /// <summary>Initializes a new instance of <see cref="AnimatedImage"/>.</summary>
-    public AnimatedImage(IReadOnlyList<AnimatedImageFrame> frames, int loopCount)
+    public AnimatedImage(IEnumerable<AnimatedImageFrame> frames, int width, int height, int loopCount)
     {
         ArgumentNullException.ThrowIfNull(frames);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(height);
         ArgumentOutOfRangeException.ThrowIfNegative(loopCount);
 
         Frames = frames;
+        Width = width;
+        Height = height;
         LoopCount = loopCount;
     }
 
-    /// <summary>The frames of this animation, in display order. Always has at least one frame.</summary>
-    public IReadOnlyList<AnimatedImageFrame> Frames { get; }
+    /// <summary>
+    /// The frames of this animation, in display order. May be a lazily-decoded, single-pass sequence backed
+    /// by an open stream — enumerate once; pass a <see cref="List{T}"/>/array to the constructor instead if
+    /// you need to enumerate more than once.
+    /// </summary>
+    public IEnumerable<AnimatedImageFrame> Frames { get; }
 
     /// <summary>How many times the animation should repeat; <c>0</c> means loop forever.</summary>
     public int LoopCount { get; }
 
     /// <summary>The canvas width, in pixels (shared by every frame).</summary>
-    public int Width => Frames[0].Image.Width;
+    public int Width { get; }
 
     /// <summary>The canvas height, in pixels (shared by every frame).</summary>
-    public int Height => Frames[0].Image.Height;
+    public int Height { get; }
 
     /// <summary>Loads an animated image from <paramref name="path"/>, auto-detecting its format.</summary>
     public static AnimatedImage Load(string path, DecoderOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(path);
 
-        using var fileStream = File.OpenRead(path);
-        return Load(fileStream, options);
+        var fileStream = File.OpenRead(path);
+        try
+        {
+            var animated = Load(fileStream, options);
+            return new AnimatedImage(DisposeStreamWhenExhausted(animated.Frames, fileStream), animated.Width, animated.Height, animated.LoopCount);
+        }
+        catch
+        {
+            fileStream.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Loads an animated image from <paramref name="stream"/>, auto-detecting its format by sniffing its header bytes.</summary>
@@ -84,12 +108,18 @@ public sealed class AnimatedImage : IDisposable
         codec.EncodeAnimation(this, stream, options);
     }
 
-    /// <inheritdoc/>
-    public void Dispose()
+    private static IEnumerable<AnimatedImageFrame> DisposeStreamWhenExhausted(IEnumerable<AnimatedImageFrame> frames, Stream stream)
     {
-        foreach (var frame in Frames)
+        try
         {
-            frame.Dispose();
+            foreach (var frame in frames)
+            {
+                yield return frame;
+            }
+        }
+        finally
+        {
+            stream.Dispose();
         }
     }
 
@@ -126,7 +156,7 @@ public sealed class AnimatedImage : IDisposable
     {
         foreach (var codec in Codecs)
         {
-            if (codec.CanEncode && string.Equals(codec.FormatName, formatName, StringComparison.OrdinalIgnoreCase))
+            if (codec.CanEncodeAnimation && string.Equals(codec.FormatName, formatName, StringComparison.OrdinalIgnoreCase))
             {
                 return codec;
             }
@@ -139,7 +169,7 @@ public sealed class AnimatedImage : IDisposable
     {
         foreach (var codec in Codecs)
         {
-            if (!codec.CanEncode)
+            if (!codec.CanEncodeAnimation)
             {
                 continue;
             }

@@ -15,7 +15,11 @@ internal static class GifImageEncoder
 
     public static void EncodeAnimation(AnimatedImage image, Stream stream, GifEncoderOptions options)
     {
-        var frames = new List<(Image, TimeSpan, GifDisposalMethod)>(image.Frames.Count);
+        // A single enumeration of image.Frames (safe even if it's a lazily-decoded, single-pass sequence),
+        // spooled into a list: GIF's Global Color Table must be written before any frame data, but building
+        // it requires full-corpus color statistics across every frame, so every source Image is necessarily
+        // retained for the encode's duration regardless of whether Frames itself is lazy.
+        var frames = new List<(Image, TimeSpan, GifDisposalMethod)>();
         foreach (var frame in image.Frames)
         {
             frames.Add((frame.Image, frame.Duration, ToGifDisposalMethod(frame.Disposal)));
