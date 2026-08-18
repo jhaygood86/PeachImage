@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
@@ -7,6 +8,8 @@ namespace PeachImage.Formats.Webp.Kernels;
 internal sealed class Vector256Vp8LTransformKernel : IVp8LTransformKernel
 {
     private static readonly Vector256<uint> GreenMask = Vector256.Create(0x0000FF00u);
+    private static readonly Vector256<int> ByteMask = Vector256.Create(0xFF);
+    private static readonly Vector256<int> KeepAlphaGreenMask = Vector256.Create(unchecked((int)0xFF00FF00));
 
     public void SubtractGreenInverse(Span<uint> pixels)
     {
@@ -52,4 +55,43 @@ internal sealed class Vector256Vp8LTransformKernel : IVp8LTransformKernel
             row[i] = (byte)(row[i] + topRow[i]);
         }
     }
+
+    public void ColorTransformInverse(Span<uint> pixels, sbyte greenToRed, sbyte greenToBlue, sbyte redToBlue)
+    {
+        int n = Vector256<int>.Count;
+        int i = 0;
+        var gtr = Vector256.Create((int)greenToRed);
+        var gtb = Vector256.Create((int)greenToBlue);
+        var rtb = Vector256.Create((int)redToBlue);
+
+        for (; i + n <= pixels.Length; i += n)
+        {
+            var argb = Vector256.LoadUnsafe(ref pixels[i]).AsInt32();
+
+            // Sign-extend the green byte (bits 8-15) to a full int32 lane, matching scalar `(sbyte)(argb >> 8)`
+            // — see Vector128Vp8LTransformKernel.ColorTransformInverse for the same approach at half width.
+            var green = SignExtendByte(Vector256.ShiftRightLogical(argb, 8) & ByteMask);
+
+            var red = Vector256.ShiftRightLogical(argb, 16) & ByteMask;
+            var blue = argb & ByteMask;
+
+            red = (red + Vector256.ShiftRightArithmetic(gtr * green, 5)) & ByteMask;
+            var redSigned = SignExtendByte(red);
+
+            blue = (blue + Vector256.ShiftRightArithmetic(gtb * green, 5)) & ByteMask;
+            blue = (blue + Vector256.ShiftRightArithmetic(rtb * redSigned, 5)) & ByteMask;
+
+            var result = (argb & KeepAlphaGreenMask) | (red << 16) | blue;
+            result.AsUInt32().StoreUnsafe(ref pixels[i]);
+        }
+
+        for (; i < pixels.Length; i++)
+        {
+            pixels[i] = ScalarVp8LTransformKernel.ColorTransformInversePixel(pixels[i], greenToRed, greenToBlue, redToBlue);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<int> SignExtendByte(Vector256<int> unsignedByteInLowLane) =>
+        Vector256.ShiftRightArithmetic(Vector256.ShiftLeft(unsignedByteInLowLane, 24), 24);
 }

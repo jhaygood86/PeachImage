@@ -40,6 +40,64 @@ scenarios measured in the *same* run) with corresponding skepticism.
 
 ## Since the last measurement
 
+### Issue #25: WebP `Vp8LColorTransform` vectorization + PNG 16-bit byte-swap
+
+Two profile-informed changes, chosen after finding that issue #25's own suggested "likely candidates"
+were mostly already shipped: WebP's loop-filter strided-edge transpose (`3f2e73c`/`3718752`) and
+all-zero-block reconstruction skip (`d1545b9`) were both already landed, and
+`Vp8LColorIndexingTransform`'s allocation was already pooled (`dd5abef`). What was actually still
+open:
+
+- **PNG**: the `directCopy16` 48bpp/64bpp fast path's big-endian-to-native byte swap was a wholly
+  extra, fully scalar per-`ushort` pass with no SIMD equivalent (the 8-bit `directCopy8` fast path
+  pays no extra pass at all). Replaced with a `Vector128<byte>` byte-pair-shuffle kernel
+  (`Png16BitByteSwap`).
+- **WebP**: `Vp8LColorTransform`'s per-pixel cross-color inverse was the one VP8L transform still
+  named as scalar in this codebase's own remarks. Its "same-pixel dependency" (blue's second delta
+  reads the just-recomputed red) is within one pixel's 3-step chain, not across pixels, so it
+  vectorizes the same way `SubtractGreenInverse`/`PredictorTopInverse` already do. Added
+  `IVp8LTransformKernel.ColorTransformInverse` at all three hardware tiers (Vector256/128/scalar).
+
+Both changes are provably bit-identical: `WebpDecodeHashTests` (full corpus plus all 6 benchmark
+assets) and `PngConformanceCorpusTests`'s SkiaSharp differential both pass unmodified, and each new
+kernel has a randomized cross-tier equivalence test alongside hand-written cases.
+
+Measured (pinned, `--warmupCount 5 --iterationCount 20 --inProcess --affinity 15`, same session,
+`git stash` on just the touched `src/` files for the "before" run):
+
+- **PNG 48bpp Truecolor decode**: 8.36 ms → 7.85 ms, Ratio 2.42× → 2.31× (~6% faster). Every other PNG
+  scenario was flat (within this machine's documented noise floor), as expected — only the 16-bit fast
+  path touches the new code.
+- **WebP decode**: no scenario in this benchmark suite moved outside the noise floor. Temporary
+  diagnostic instrumentation (not shipped) explained why: **none of the six benchmark assets have the
+  `CrossColor` transform bit set** — `Vp8LColorTransform.ApplyInverse` is never called by this corpus
+  (0 of ~2.07M pixels on the 1080p lossless assets, 0 on the graphic/small/alpha assets). The
+  vectorization is correct and verified (bit-identical, see above) but this repo's current benchmark
+  assets don't exercise it, so its real-world wall-clock contribution is unmeasured here. Encoding (or
+  sourcing) a WebP lossless asset whose encoder actually selects the cross-color transform is a
+  natural follow-up if quantifying this is worth doing.
+
+### Remaining gap (WebP decode)
+
+Restoring the profiling breakdown this issue asked for, since it had been trimmed for length
+previously: the most recent real profile (`bench/PeachImage.Benchmarks/WebpProfileHarness.cs`, commit
+`0d39dd9`) put lossy decode at **39% entropy decode, 21% upsample+convert, 17% loop filter, 1.6%
+DC-only fast path**, and lossless decode at **69% pixel stream (Huffman/LZ77/color cache), 24%
+predictor transform**. Entropy/Huffman decode is inherently sequential (bitstream-position-dependent)
+and not a realistic vectorization target — matches libwebp's own scalar approach. The loop filter is
+already vectorized in both edge orientations (`3f2e73c`/`3718752`/`b6f9979`); a further win would need
+either an Arm `AdvSimd.Arm64.ZipLow`/`ZipHigh` port (the vector loop filter is x86/SSE2-only today) or
+instruction-level profiling data this repo's coarse frame-bucket harness doesn't currently produce.
+Both are deferred rather than attempted speculatively.
+
+**Also explicitly deferred**: vectorizing PNG's `Sub`/`Average`/`Paeth` row-unfiltering on decode
+(`RowFilter.cs`) — the same same-row sequential dependency this codebase has already declined to
+vectorize elsewhere for correctness risk (e.g. WebP's predictor transform's non-"top" modes), and
+`Average`/`Paeth` compound that with nonlinear recurrences that don't reduce to a parallel-prefix
+pattern the way linear `Sub` might. This also isn't what was driving the 48bpp gap addressed above —
+the general 2× byte-count penalty from 16-bit's `bpp=6` vs 8-bit's `bpp=3` is proportionally the same
+penalty 24bpp truecolor already absorbs while staying within target (1.08×).
+
 The SIMD kernels across JPEG, PNG, and WebP were swept from bounds-checked `Vector128/256.Create(span)`
 loads and `vector.CopyTo(span)` stores to unchecked `LoadUnsafe`/`StoreUnsafe` — the loop in every
 touched call site already guarantees enough elements remain, so the bounds check `Create`/`CopyTo`
@@ -116,7 +174,7 @@ SkiaSharp's encoder doesn't support BMP output, so encode has no SkiaSharp basel
 |---|---:|---:|---:|
 | 24bpp Truecolor | 18.31 ms | 16.89 ms | 1.08× |
 | 32bpp RGBA | 24.59 ms | 21.99 ms | 1.12× |
-| 48bpp (16-bit) Truecolor | 8.01 ms | 3.44 ms | 2.33× |
+| 48bpp (16-bit) Truecolor | 7.85 ms | 3.40 ms | 2.31× |
 | 8bpp Grayscale | 10.31 ms | 9.34 ms | 1.10× |
 | Interlaced (Adam7) Truecolor | 29.19 ms | 27.60 ms | 1.06× |
 

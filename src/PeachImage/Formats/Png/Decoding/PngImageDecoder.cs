@@ -1,7 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using System.IO.Compression;
-using System.Runtime.InteropServices;
 using PeachImage.Formats.Png.Filtering;
 using PeachImage.Formats.Png.Internal;
 
@@ -156,7 +155,7 @@ internal static class PngImageDecoder
                     else if (directCopy16)
                     {
                         var resolvedRow = resolvedRowBuffer.AsSpan(0, passWidth * destBpp);
-                        SwapBigEndian16(currentRow, resolvedRow);
+                        Png16BitByteSwap.SwapBigEndian16(currentRow, resolvedRow);
                         sourceRow = resolvedRow;
                     }
                     else
@@ -204,16 +203,6 @@ internal static class PngImageDecoder
                     ArrayPool<byte>.Shared.Return(resolvedRowBuffer);
                 }
             }
-        }
-    }
-
-    /// <summary>Reads big-endian 16-bit samples from <paramref name="bigEndianBytes"/> and writes them as native-endian <see cref="ushort"/>s into <paramref name="destination"/> — the fused equivalent of an identity-LUT <see cref="PngBitUnpacker.Unpack"/> + <see cref="PngRowResolver.Resolve"/> pass for the direct-copy-eligible color types.</summary>
-    private static void SwapBigEndian16(ReadOnlySpan<byte> bigEndianBytes, Span<byte> destination)
-    {
-        var dest = MemoryMarshal.Cast<byte, ushort>(destination);
-        for (int i = 0; i < dest.Length; i++)
-        {
-            dest[i] = BinaryPrimitives.ReadUInt16BigEndian(bigEndianBytes.Slice(i * 2, 2));
         }
     }
 
