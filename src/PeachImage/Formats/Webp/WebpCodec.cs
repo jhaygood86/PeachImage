@@ -4,8 +4,8 @@ namespace PeachImage.Formats.Webp;
 /// The WebP codec. Format identity and header-sniffing live here, the single <see cref="IImageCodec"/>
 /// surface <see cref="Image"/> dispatches through; decode and encode are separate internal implementation
 /// details (<see cref="WebpDecoder"/>/<see cref="WebpEncoder"/>) composed privately rather than exposed as
-/// their own abstractions. Encoding only ever produces the lossless (VP8L) bitstream for now — VP8 lossy
-/// encoding is a separate, much larger effort left for later.
+/// their own abstractions. Encoding defaults to the lossless (VP8L) bitstream; set
+/// <see cref="WebpEncoderOptions.Lossless"/> to <see langword="false"/> for lossy VP8 encoding.
 /// </summary>
 internal sealed class WebpCodec : IImageCodec
 {

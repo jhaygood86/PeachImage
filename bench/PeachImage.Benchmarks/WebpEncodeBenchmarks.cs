@@ -5,10 +5,10 @@ using SkiaSharp;
 namespace PeachImage.Benchmarks;
 
 /// <summary>
-/// Lossless (VP8L) encode throughput: PeachImage vs. SkiaSharp's lossless WebP encoder (backed by libwebp
-/// itself). Covers photographic, alpha, and graphic/palette content, plus a small-image scenario to surface
-/// fixed per-encode overhead separately from throughput on large images. VP8 lossy encode isn't covered --
-/// this encoder only produces VP8L (see <see cref="WebpEncoderOptions"/>'s remarks).
+/// WebP encode throughput: PeachImage vs. SkiaSharp's WebP encoder (backed by libwebp itself), for both
+/// lossless (VP8L) and lossy (VP8) output. The lossless benchmarks cover photographic, alpha, and
+/// graphic/palette content, plus a small-image scenario to surface fixed per-encode overhead separately from
+/// throughput on large images; the lossy benchmarks reuse the same photographic source.
 /// </summary>
 [MemoryDiagnoser]
 [GroupBenchmarksBy(BenchmarkDotNet.Configs.BenchmarkLogicalGroupRule.ByCategory)]
@@ -16,6 +16,7 @@ namespace PeachImage.Benchmarks;
 public class WebpEncodeBenchmarks
 {
     private static readonly SKWebpEncoderOptions LosslessSkiaOptions = new(SKWebpEncoderCompression.Lossless, 100);
+    private static readonly SKWebpEncoderOptions LossySkiaOptions = new(SKWebpEncoderCompression.Lossy, 75);
 
     private Image _losslessPhotographicSource = null!;
     private Image _losslessAlphaSource = null!;
@@ -89,6 +90,14 @@ public class WebpEncodeBenchmarks
     [BenchmarkCategory("Small-Image")]
     public SKData SkiaSharp_Encode_Small() => EncodeSkia(_smallSkiaSource);
 
+    [Benchmark]
+    [BenchmarkCategory("Lossy-Photographic")]
+    public MemoryStream PeachImage_Encode_LossyPhotographic() => EncodeLossy(_losslessPhotographicSource);
+
+    [Benchmark(Baseline = true)]
+    [BenchmarkCategory("Lossy-Photographic")]
+    public SKData SkiaSharp_Encode_LossyPhotographic() => EncodeSkiaLossy(_losslessPhotographicSkiaSource);
+
     private static Image Decode(string path)
     {
         using var stream = File.OpenRead(path);
@@ -102,5 +111,14 @@ public class WebpEncodeBenchmarks
         return stream;
     }
 
+    private static MemoryStream EncodeLossy(Image image)
+    {
+        var stream = new MemoryStream();
+        WebpEncoder.Encode(image, stream, new WebpEncoderOptions { Lossless = false });
+        return stream;
+    }
+
     private static SKData EncodeSkia(SKBitmap bitmap) => SKWebpEncoder.Encode(bitmap.PeekPixels(), LosslessSkiaOptions)!;
+
+    private static SKData EncodeSkiaLossy(SKBitmap bitmap) => SKWebpEncoder.Encode(bitmap.PeekPixels(), LossySkiaOptions)!;
 }
