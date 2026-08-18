@@ -5,11 +5,12 @@ using SkiaSharp;
 namespace PeachImage.Tests.Formats.Webp.Corpus;
 
 /// <summary>
-/// Shared assertions for corpus-driven tests: decoding must never crash, hang, or throw anything other than
-/// <see cref="WebpDecodingException"/> for a file PeachImage chooses to reject (an animated WebP is the
-/// expected case here — see <see cref="WebpDecoder"/>'s docs); and whenever both PeachImage and SkiaSharp (a
-/// mature, real-world WebP decoder backed by libwebp itself) successfully decode the same file, their RGB
-/// pixel output should agree closely.
+/// Shared assertions for single-frame corpus-driven tests: decoding must never crash, hang, or throw anything
+/// other than <see cref="WebpDecodingException"/> for a file PeachImage chooses to reject; and whenever both
+/// PeachImage and SkiaSharp (a mature, real-world WebP decoder backed by libwebp itself) successfully decode
+/// the same file, their RGB pixel output should agree closely. <see cref="AnimatedCorpusAssertions"/> is the
+/// equivalent for animated WebP files (<see cref="WebpDecoder.DecodeAnimation"/>), reusing this class's pixel
+/// comparison/tolerance helpers per-frame.
 /// </summary>
 internal static class CorpusAssertions
 {
@@ -102,7 +103,7 @@ internal static class CorpusAssertions
     /// the worst difference actually observed across the corpus, so it is a real ceiling rather than a number
     /// picked to be comfortably unreachable.
     /// </summary>
-    private static void AssertWithinTolerance(string path, PixelDifference difference, bool includeAlpha)
+    internal static void AssertWithinTolerance(string path, PixelDifference difference, bool includeAlpha)
     {
         string suffix = includeAlpha ? " (incl. alpha)" : string.Empty;
 
@@ -116,7 +117,7 @@ internal static class CorpusAssertions
     }
 
     /// <summary>Mean per-channel difference ceiling, unchanged from the sampled comparison this replaced.</summary>
-    private const double MeanChannelTolerance = 4.0;
+    internal const double MeanChannelTolerance = 4.0;
 
     /// <summary>
     /// Worst-single-channel ceiling, set from the worst difference actually measured across the corpus rather
@@ -131,7 +132,7 @@ internal static class CorpusAssertions
     /// closed form where libwebp uses a two-stage shift, and the two round differently. Anything above 6 is
     /// therefore a new defect, not accumulated rounding.
     /// </remarks>
-    private const int MaxChannelTolerance = 6;
+    internal const int MaxChannelTolerance = 6;
 
     private static (bool Succeeded, Exception? Exception) TryDecode(string path)
     {
@@ -156,7 +157,7 @@ internal static class CorpusAssertions
     /// lane of each row, or only where a clamp fires, moves the mean by a rounding error while being flatly
     /// broken — and the mean-only, ~64x64-sampled comparison this replaced would have passed it.
     /// </remarks>
-    private static PixelDifference ComputeDifference(Image peachImage, SKBitmap skiaBitmap, bool includeAlpha)
+    internal static PixelDifference ComputeDifference(Image peachImage, SKBitmap skiaBitmap, bool includeAlpha)
     {
         var span = peachImage.GetPixelSpan();
         int bytesPerPixel = peachImage.PixelFormat.GetBytesPerPixel();
@@ -222,7 +223,7 @@ internal static class CorpusAssertions
     }
 
     /// <summary>Mean per-channel difference across the whole image, plus the worst single channel and where it was.</summary>
-    private readonly record struct PixelDifference(double Mean, int Max, int MaxX, int MaxY)
+    internal readonly record struct PixelDifference(double Mean, int Max, int MaxX, int MaxY)
     {
         public override string ToString() => $"mean {Mean:F3}, max {Max} at ({MaxX},{MaxY})";
     }

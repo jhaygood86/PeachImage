@@ -8,8 +8,11 @@ namespace PeachImage.Benchmarks;
 /// Decode throughput: PeachImage vs. SkiaSharp (a mature, real-world WebP decoder backed by libwebp itself —
 /// the same library used as the corpus tests' differential oracle). The acceptance bar (see the project plan)
 /// is PeachImage's Mean within 10% of SkiaSharp's Mean for every scenario below. Covers both of WebP's
-/// unrelated bitstream codecs (VP8 lossy, VP8L lossless), with and without alpha, plus a small-image scenario
-/// to surface fixed per-decode overhead separately from throughput on large images.
+/// unrelated bitstream codecs (VP8 lossy, VP8L lossless), with and without alpha, a small-image scenario to
+/// surface fixed per-decode overhead separately from throughput on large images, and an animated scenario
+/// (all frames, mirroring <see cref="GifDecodeBenchmarks"/>'s equivalent — same source content/dimensions/frame
+/// count as its <c>animated_320x240_24frames.gif</c>, transcoded via ffmpeg's libwebp_anim muxer, so the two
+/// are directly comparable).
 /// </summary>
 [MemoryDiagnoser]
 [GroupBenchmarksBy(BenchmarkDotNet.Configs.BenchmarkLogicalGroupRule.ByCategory)]
@@ -22,6 +25,7 @@ public class WebpDecodeBenchmarks
     private byte[] _lossyWithAlpha = null!;
     private byte[] _losslessWithAlpha = null!;
     private byte[] _small = null!;
+    private byte[] _animated = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -33,6 +37,7 @@ public class WebpDecodeBenchmarks
         _lossyWithAlpha = File.ReadAllBytes(Path.Combine(assetsDir, "photo_1920x1080_alpha_lossy_q80.webp"));
         _losslessWithAlpha = File.ReadAllBytes(Path.Combine(assetsDir, "photo_1920x1080_alpha_lossless.webp"));
         _small = File.ReadAllBytes(Path.Combine(assetsDir, "small_32x24_lossless.webp"));
+        _animated = File.ReadAllBytes(Path.Combine(assetsDir, "animated_320x240_24frames.webp"));
     }
 
     [Benchmark]
@@ -106,4 +111,39 @@ public class WebpDecodeBenchmarks
     [Benchmark(Baseline = true)]
     [BenchmarkCategory("Small-Image")]
     public SKBitmap SkiaSharp_Decode_Small() => SKBitmap.Decode(_small)!;
+
+    [Benchmark]
+    [BenchmarkCategory("Animated-MultiFrame")]
+    public int PeachImage_Decode_AnimatedAllFrames()
+    {
+        using var stream = new MemoryStream(_animated);
+        var animatedImage = AnimatedImage.Load(stream);
+        int count = 0;
+        foreach (var frame in animatedImage.Frames)
+        {
+            count++;
+            frame.Dispose();
+        }
+
+        return count;
+    }
+
+    [Benchmark(Baseline = true)]
+    [BenchmarkCategory("Animated-MultiFrame")]
+    public int SkiaSharp_Decode_AnimatedAllFrames()
+    {
+        using var stream = new SKMemoryStream(_animated);
+        using var codec = SKCodec.Create(stream)!;
+
+        var imageInfo = codec.Info;
+        int frameCount = codec.FrameCount;
+        using var bitmap = new SKBitmap(imageInfo);
+
+        for (int i = 0; i < frameCount; i++)
+        {
+            codec.GetPixels(imageInfo, bitmap.GetPixels(), new SKCodecOptions(i));
+        }
+
+        return frameCount;
+    }
 }

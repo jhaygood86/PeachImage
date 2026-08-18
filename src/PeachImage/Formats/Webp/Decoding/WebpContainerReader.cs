@@ -2,6 +2,9 @@ using PeachImage.Formats.Webp.Internal;
 
 namespace PeachImage.Formats.Webp.Decoding;
 
+/// <summary>The VP8X chunk's flags/canvas info, or the all-<see langword="false"/>/<see langword="null"/> default for a "simple"-format file with no VP8X chunk.</summary>
+internal readonly record struct WebpContainerPrelude(bool HasAlpha, bool HasAnimation, int? CanvasWidth, int? CanvasHeight);
+
 /// <summary>
 /// Parses a WebP file's RIFF container (the "simple" format — a bare <c>VP8 </c>/<c>VP8L</c> chunk directly
 /// after the <c>WEBP</c> form type — and the "extended" format, gated by a <c>VP8X</c> chunk that also allows
@@ -11,73 +14,139 @@ namespace PeachImage.Formats.Webp.Decoding;
 /// </summary>
 internal static class WebpContainerReader
 {
-    /// <summary>Reads the RIFF/WEBP container from <paramref name="stream"/>, collecting metadata chunks into <paramref name="metadata"/> as they're encountered.</summary>
-    public static WebpContainerInfo Read(Stream stream, ImageMetadata metadata)
+    /// <summary>
+    /// Reads "RIFF"+size+"WEBP", then the VP8X chunk if the very next chunk is VP8X (the spec-conformant,
+    /// overwhelmingly common layout). Shared by <see cref="Read(Stream, ImageMetadata)"/>, <see cref="WebpDecoder.Decode"/>,
+    /// <see cref="WebpDecoder.DecodeAnimation"/>, and <see cref="WebpDecoder.Identify"/> so the RIFF
+    /// header/VP8X chunk are only ever parsed once per call, then branched on — no peek-and-rewind or
+    /// stream-wrapping trick needed, since the stream is only ever read forward. If the next chunk is
+    /// something other than VP8X (a "simple"-format file, or a non-conformant file with VP8X not first), its
+    /// already-read 8-byte header is handed back via <paramref name="pendingHeader"/> instead of being
+    /// discarded, so the caller's own chunk loop can process it as its first iteration.
+    /// </summary>
+    internal static WebpContainerPrelude ReadPrelude(Stream stream, out WebpChunkHeader? pendingHeader)
     {
         ReadRiffHeader(stream);
 
-        int? canvasWidth = null;
-        int? canvasHeight = null;
-        bool hasAlphaFlag = false;
-        bool hasAnimationFlag = false;
+        if (!WebpChunkReader.TryReadNext(stream, out var header))
+        {
+            pendingHeader = null;
+            return default;
+        }
+
+        if (header.FourCc != "VP8X")
+        {
+            pendingHeader = header;
+            return default;
+        }
+
+        pendingHeader = null;
+        var vp8XData = WebpChunkReader.ReadPayload(stream, header.Size);
+        ParseVp8X(vp8XData, out bool hasAlpha, out bool hasAnimation, out int? canvasWidth, out int? canvasHeight);
+        return new WebpContainerPrelude(hasAlpha, hasAnimation, canvasWidth, canvasHeight);
+    }
+
+    /// <summary>Reads a non-animated WebP file's RIFF/WEBP container from <paramref name="stream"/>, collecting metadata chunks into <paramref name="metadata"/> as they're encountered.</summary>
+    public static WebpContainerInfo Read(Stream stream, ImageMetadata metadata)
+    {
+        var prelude = ReadPrelude(stream, out var pendingHeader);
+        return Read(stream, metadata, prelude, pendingHeader);
+    }
+
+    /// <summary>
+    /// Continues a non-animated read from an already-parsed <paramref name="prelude"/>/<paramref name="pendingHeader"/>
+    /// (i.e. an already-consumed <see cref="ReadPrelude"/> call) — used by <see cref="WebpDecoder.Decode"/> and
+    /// <see cref="WebpDecoder.Identify"/> so they can branch on <see cref="WebpContainerPrelude.HasAnimation"/>
+    /// themselves without this method re-reading the RIFF header/VP8X chunk a second time.
+    /// </summary>
+    internal static WebpContainerInfo Read(Stream stream, ImageMetadata metadata, WebpContainerPrelude prelude, WebpChunkHeader? pendingHeader)
+    {
+        if (prelude.HasAnimation)
+        {
+            throw AnimatedFileException();
+        }
+
+        bool hasAlphaFlag = prelude.HasAlpha;
+        int? canvasWidth = prelude.CanvasWidth;
+        int? canvasHeight = prelude.CanvasHeight;
         bool sawAnimationChunk = false;
         WebpBitstreamFormat? format = null;
         byte[]? imageBytes = null;
         byte[]? alphaBytes = null;
 
-        while (WebpChunkReader.TryReadNext(stream, out var header))
+        WebpChunkHeader? nextHeader = pendingHeader;
+        while (true)
         {
-            switch (header.FourCc)
+            WebpChunkHeader chunkHeader;
+            if (nextHeader is { } pending)
+            {
+                chunkHeader = pending;
+                nextHeader = null;
+            }
+            else if (!WebpChunkReader.TryReadNext(stream, out chunkHeader))
+            {
+                break;
+            }
+
+            switch (chunkHeader.FourCc)
             {
                 case "VP8X":
-                    var vp8XData = WebpChunkReader.ReadPayload(stream, header.Size);
-                    ParseVp8X(vp8XData, out hasAlphaFlag, out hasAnimationFlag, out canvasWidth, out canvasHeight);
+                    // A second/non-leading VP8X chunk is non-conformant but tolerated (last one wins),
+                    // matching this reader's general "strict about structural data, lenient about ordering"
+                    // posture — ReadPrelude already handled the common case where VP8X is the first chunk.
+                    var vp8XData = WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
+                    ParseVp8X(vp8XData, out hasAlphaFlag, out bool hasAnimation, out canvasWidth, out canvasHeight);
+                    if (hasAnimation)
+                    {
+                        throw AnimatedFileException();
+                    }
+
                     break;
 
                 case "VP8 ":
                     RequireNoImageChunkYet(format);
                     format = WebpBitstreamFormat.Lossy;
-                    imageBytes = WebpChunkReader.ReadPayload(stream, header.Size);
+                    imageBytes = WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
                     break;
 
                 case "VP8L":
                     RequireNoImageChunkYet(format);
                     format = WebpBitstreamFormat.Lossless;
-                    imageBytes = WebpChunkReader.ReadPayload(stream, header.Size);
+                    imageBytes = WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
                     break;
 
                 case "ALPH":
-                    alphaBytes = WebpChunkReader.ReadPayload(stream, header.Size);
+                    alphaBytes = WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
                     break;
 
                 case "ICCP":
-                    WebpMetadataReader.AddIcc(metadata, WebpChunkReader.ReadPayload(stream, header.Size));
+                    WebpMetadataReader.AddIcc(metadata, WebpChunkReader.ReadPayload(stream, chunkHeader.Size));
                     break;
 
                 case "EXIF":
-                    WebpMetadataReader.AddExif(metadata, WebpChunkReader.ReadPayload(stream, header.Size));
+                    WebpMetadataReader.AddExif(metadata, WebpChunkReader.ReadPayload(stream, chunkHeader.Size));
                     break;
 
                 case "XMP ":
-                    WebpMetadataReader.AddXmp(metadata, WebpChunkReader.ReadPayload(stream, header.Size));
+                    WebpMetadataReader.AddXmp(metadata, WebpChunkReader.ReadPayload(stream, chunkHeader.Size));
                     break;
 
                 case "ANIM":
                 case "ANMF":
                     sawAnimationChunk = true;
-                    WebpChunkReader.SkipPayload(stream, header.Size);
+                    WebpChunkReader.SkipPayload(stream, chunkHeader.Size);
                     break;
 
                 default:
                     // Unrecognized chunk (e.g. a future extension) — skip, matching PNG's ancillary-chunk leniency.
-                    WebpChunkReader.SkipPayload(stream, header.Size);
+                    WebpChunkReader.SkipPayload(stream, chunkHeader.Size);
                     break;
             }
         }
 
-        if (hasAnimationFlag || sawAnimationChunk)
+        if (sawAnimationChunk)
         {
-            throw new WebpDecodingException("Animated WebP is not supported yet; animation support is planned but not yet implemented.");
+            throw AnimatedFileException();
         }
 
         if (format is null || imageBytes is null)
@@ -106,6 +175,9 @@ internal static class WebpContainerReader
             CanvasHeight = canvasHeight,
         };
     }
+
+    private static WebpDecodingException AnimatedFileException() =>
+        new("WebP file is animated; use WebpDecoder.DecodeAnimation (or AnimatedImage.Load) instead of the single-image decode path.");
 
     private static void RequireNoImageChunkYet(WebpBitstreamFormat? format)
     {

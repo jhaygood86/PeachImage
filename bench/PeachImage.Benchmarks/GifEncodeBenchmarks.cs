@@ -18,6 +18,7 @@ public class GifEncodeBenchmarks
     private Image _lowColorGraphic = null!;
     private Image _photographicSource = null!;
     private AnimatedImage _animatedSource = null!;
+    private List<AnimatedImageFrame> _animatedSourceFrames = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -36,7 +37,12 @@ public class GifEncodeBenchmarks
 
         using (var stream = File.OpenRead(Path.Combine(assetsDir, "animated_320x240_24frames.gif")))
         {
-            _animatedSource = AnimatedImage.Load(stream);
+            var loaded = AnimatedImage.Load(stream);
+            // AnimatedImage.Load's Frames is a single-pass lazy sequence; the encode benchmark below runs
+            // many times against the same _animatedSource, so it's materialized once here (setup cost, not
+            // measured) into a List-backed AnimatedImage that supports repeated enumeration.
+            _animatedSourceFrames = loaded.Frames.ToList();
+            _animatedSource = new AnimatedImage(_animatedSourceFrames, loaded.Width, loaded.Height, loaded.LoopCount);
         }
     }
 
@@ -45,7 +51,10 @@ public class GifEncodeBenchmarks
     {
         _lowColorGraphic.Dispose();
         _photographicSource.Dispose();
-        _animatedSource.Dispose();
+        foreach (var frame in _animatedSourceFrames)
+        {
+            frame.Dispose();
+        }
     }
 
     [Benchmark]

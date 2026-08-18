@@ -8,6 +8,13 @@ namespace PeachImage;
 /// </summary>
 internal interface IAnimatedImageCodec : IImageCodec
 {
+    /// <summary>
+    /// Whether this codec can encode an <see cref="AnimatedImage"/> via <see cref="EncodeAnimation"/> — distinct
+    /// from <see cref="IImageCodec.CanEncode"/>, which only reflects single-image encode support (e.g. WebP can
+    /// encode a single still image but not an animated one).
+    /// </summary>
+    bool CanEncodeAnimation { get; }
+
     /// <summary>Fully decodes every frame of <paramref name="stream"/>'s animation into an in-memory <see cref="AnimatedImage"/>.</summary>
     AnimatedImage DecodeAnimation(Stream stream, DecoderOptions? options = null);
 

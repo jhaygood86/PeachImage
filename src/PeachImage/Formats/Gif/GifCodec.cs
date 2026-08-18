@@ -50,6 +50,9 @@ internal sealed class GifCodec : IAnimatedImageCodec
     public void Encode(Image image, Stream stream, EncoderOptions? options = null) => GifEncoder.Encode(image, stream, options);
 
     /// <inheritdoc/>
+    public bool CanEncodeAnimation => true;
+
+    /// <inheritdoc/>
     public AnimatedImage DecodeAnimation(Stream stream, DecoderOptions? options = null) => GifDecoder.DecodeAnimation(stream, options as GifDecoderOptions);
 
     /// <inheritdoc/>

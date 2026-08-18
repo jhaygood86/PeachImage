@@ -15,4 +15,13 @@ public class CorpusAvailabilityTests
             Assert.Skip("External WebP test corpus (libwebp-test-data) is not available (no network, or PEACHIMAGE_SKIP_CORPUS_FETCH is set). Corpus-driven tests will report zero cases.");
         }
     }
+
+    [Fact]
+    public void SkiaCorpus_IsAvailable()
+    {
+        if (!SkiaCorpusFixture.IsAvailable)
+        {
+            Assert.Skip("External WebP test corpus (Skia resources/images) is not available (no network, or PEACHIMAGE_SKIP_CORPUS_FETCH is set). Animated-WebP corpus tests will report zero cases.");
+        }
+    }
 }

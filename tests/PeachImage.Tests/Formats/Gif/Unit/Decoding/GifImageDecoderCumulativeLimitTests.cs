@@ -1,5 +1,6 @@
 using PeachImage.Formats.Gif;
 using PeachImage.Formats.Gif.Decoding;
+using PeachImage.Formats.Gif.Internal;
 
 namespace PeachImage.Tests.Formats.Gif.Unit.Decoding;
 
@@ -9,15 +10,13 @@ public class GifImageDecoderCumulativeLimitTests
     public void Decode_CumulativeCanvasBytesExceedsCap_ThrowsBeforeAllocatingFurtherFrames()
     {
         // Every decoded frame is composited onto, and copied out of, the *full* logical-screen canvas
-        // regardless of that frame's own size — and every copy is retained for the whole animation. Neither
-        // MaxPixelCount (bounds one canvas) nor MaxFrameCount (bounds frame count) alone stops a modest
-        // canvas times many frames from multiplying into a huge total allocation. 8x8 RGBA = 256 bytes per
-        // frame; a cap of 512 bytes allows only 2 frames, so the 5-frame animation below must be rejected
-        // partway through rather than decoding (and retaining) all 5.
+        // regardless of that frame's own size. Neither MaxPixelCount (bounds one canvas) nor MaxFrameCount
+        // (bounds frame count) alone stops a modest canvas times many frames from costing a huge amount of
+        // total compositor work. 8x8 RGBA = 256 bytes per frame; a cap of 512 bytes allows only 2 frames, so
+        // decoding the 5-frame animation below to completion must throw partway through.
         byte[] gif = EncodeAnimation(canvasWidth: 8, canvasHeight: 8, frameCount: 5);
 
-        Assert.Throws<GifDecodingException>(() =>
-            GifImageDecoder.Decode(new MemoryStream(gif), maxFrames: 100, maxCumulativeCanvasBytes: 512));
+        Assert.Throws<GifDecodingException>(() => DecodeAll(new MemoryStream(gif), maxFrames: 100, maxCumulativeCanvasBytes: 512));
     }
 
     [Fact]
@@ -25,7 +24,7 @@ public class GifImageDecoderCumulativeLimitTests
     {
         byte[] gif = EncodeAnimation(canvasWidth: 8, canvasHeight: 8, frameCount: 5);
 
-        var (frames, _) = GifImageDecoder.Decode(new MemoryStream(gif), maxFrames: 100, maxCumulativeCanvasBytes: 8 * 8 * 4 * 5);
+        var (frames, _) = DecodeAll(new MemoryStream(gif), maxFrames: 100, maxCumulativeCanvasBytes: 8 * 8 * 4 * 5);
 
         Assert.Equal(5, frames.Count);
         foreach (var frame in frames)
@@ -39,13 +38,22 @@ public class GifImageDecoderCumulativeLimitTests
     {
         byte[] gif = EncodeAnimation(canvasWidth: 8, canvasHeight: 8, frameCount: 3);
 
-        var (frames, _) = GifImageDecoder.Decode(new MemoryStream(gif), maxFrames: 100);
+        var (frames, _) = DecodeAll(new MemoryStream(gif), maxFrames: 100);
 
         Assert.Equal(3, frames.Count);
         foreach (var frame in frames)
         {
             frame.Dispose();
         }
+    }
+
+    /// <summary>Forces full enumeration of the lazy <see cref="GifImageDecoder.DecodeFrames"/> sequence into a list, so a cap-exceeded throw (which only happens as later frames are pulled) surfaces here rather than lazily at the caller's own enumeration.</summary>
+    private static (List<GifFrame> Frames, int LoopCount) DecodeAll(Stream stream, int maxFrames, long maxCumulativeCanvasBytes = GifDecodingLimits.MaxCumulativeCanvasBytes)
+    {
+        var header = GifImageDecoder.ReadHeader(stream);
+        var prelude = GifImageDecoder.ReadPrelude(stream);
+        var frames = GifImageDecoder.DecodeFrames(stream, header, prelude, maxFrames, maxCumulativeCanvasBytes).ToList();
+        return (frames, prelude.LoopCount);
     }
 
     private static byte[] EncodeAnimation(int canvasWidth, int canvasHeight, int frameCount)
@@ -66,9 +74,15 @@ public class GifImageDecoderCumulativeLimitTests
             frames.Add(new AnimatedImageFrame(image, TimeSpan.FromMilliseconds(50), FrameDisposalMethod.None));
         }
 
-        using var source = new AnimatedImage(frames, loopCount: 0);
+        var source = new AnimatedImage(frames, width: canvasWidth, height: canvasHeight, loopCount: 0);
         using var ms = new MemoryStream();
         source.Save(ms, "gif", new GifEncoderOptions());
+
+        foreach (var frame in frames)
+        {
+            frame.Dispose();
+        }
+
         return ms.ToArray();
     }
 }

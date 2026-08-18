@@ -36,4 +36,14 @@ internal static class WebpDecodingLimits
 
     /// <summary>The largest VP8 (lossy) coefficient-data partition count the bitstream may declare (2^4, the field's maximum).</summary>
     public const int MaxVp8Partitions = 16;
+
+    /// <summary>
+    /// The most ANMF frames <see cref="PeachImage.Formats.Webp.Decoding.WebpAnimationReader.ReadFrames"/> will
+    /// decode from a single stream before giving up (guards decode time/CPU against a maliciously large frame count).
+    /// Unlike Gif's <c>MaxCumulativeCanvasBytes</c>, no joint frame-count x canvas-size cap is needed here:
+    /// <c>ReadFrames</c> is lazy from the start, so peak resident memory during decode is O(1) canvases
+    /// regardless of frame count — nothing is being multiplied and retained the way Gif's (now-legacy) eager
+    /// list once was.
+    /// </summary>
+    public const int MaxFrameCount = 100_000;
 }

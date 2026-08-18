@@ -58,8 +58,15 @@ public class GifDecodeBenchmarks
     public int PeachImage_Decode_AnimatedAllFrames()
     {
         using var stream = new MemoryStream(_animated);
-        using var animatedImage = AnimatedImage.Load(stream);
-        return animatedImage.Frames.Count;
+        var animatedImage = AnimatedImage.Load(stream);
+        int count = 0;
+        foreach (var frame in animatedImage.Frames)
+        {
+            count++;
+            frame.Dispose();
+        }
+
+        return count;
     }
 
     [Benchmark(Baseline = true)]
