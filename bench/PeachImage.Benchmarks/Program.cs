@@ -19,5 +19,10 @@ if (args.Length > 0 && string.Equals(args[0], "gif-profile", StringComparison.Or
     return GifProfileHarness.Run(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "png-profile", StringComparison.OrdinalIgnoreCase))
+{
+    return PngProfileHarness.Run(args);
+}
+
 BenchmarkSwitcher.FromAssembly(Assembly.GetExecutingAssembly()).Run(args);
 return 0;
