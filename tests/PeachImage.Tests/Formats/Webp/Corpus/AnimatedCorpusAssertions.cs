@@ -43,52 +43,45 @@ internal static class AnimatedCorpusAssertions
         {
             using var stream = File.OpenRead(path);
             var animated = WebpDecoder.DecodeAnimation(stream);
-            frames = animated.Frames.ToList();
+            // Each pulled frame's Image aliases the decoder's persistent compositor canvas and is
+            // invalidated once the next frame is pulled, so every frame must be cloned as it's pulled (not
+            // just ToList()'d) to compare all of them against Skia afterward.
+            frames = animated.Frames.Select(frame => frame.Clone()).ToList();
         }
         catch (WebpDecodingException)
         {
             return;
         }
 
-        try
+        using var codec = SKCodec.Create(path);
+        if (codec is null || codec.FrameCount != frames.Count)
         {
-            using var codec = SKCodec.Create(path);
-            if (codec is null || codec.FrameCount != frames.Count)
+            return;
+        }
+
+        var info = codec.Info.WithAlphaType(SKAlphaType.Unpremul);
+        using var skiaBitmap = new SKBitmap(info);
+        int priorFrame = -1;
+
+        for (int i = 0; i < frames.Count; i++)
+        {
+            var peachFrame = frames[i].Image;
+            if (peachFrame.Width != info.Width || peachFrame.Height != info.Height)
             {
                 return;
             }
 
-            var info = codec.Info.WithAlphaType(SKAlphaType.Unpremul);
-            using var skiaBitmap = new SKBitmap(info);
-            int priorFrame = -1;
-
-            for (int i = 0; i < frames.Count; i++)
+            var options = new SKCodecOptions(i, priorFrame);
+            var result = codec.GetPixels(info, skiaBitmap.GetPixels(), options);
+            if (result != SKCodecResult.Success)
             {
-                var peachFrame = frames[i].Image;
-                if (peachFrame.Width != info.Width || peachFrame.Height != info.Height)
-                {
-                    return;
-                }
-
-                var options = new SKCodecOptions(i, priorFrame);
-                var result = codec.GetPixels(info, skiaBitmap.GetPixels(), options);
-                if (result != SKCodecResult.Success)
-                {
-                    return;
-                }
-
-                priorFrame = i;
-
-                var difference = CorpusAssertions.ComputeDifference(peachFrame, skiaBitmap, includeAlpha: true);
-                CorpusAssertions.AssertWithinTolerance($"{path} [frame {i}]", difference, includeAlpha: true);
+                return;
             }
-        }
-        finally
-        {
-            foreach (var frame in frames)
-            {
-                frame.Dispose();
-            }
+
+            priorFrame = i;
+
+            var difference = CorpusAssertions.ComputeDifference(peachFrame, skiaBitmap, includeAlpha: true);
+            CorpusAssertions.AssertWithinTolerance($"{path} [frame {i}]", difference, includeAlpha: true);
         }
     }
 
@@ -100,7 +93,7 @@ internal static class AnimatedCorpusAssertions
             var animated = WebpDecoder.DecodeAnimation(stream);
             foreach (var frame in animated.Frames)
             {
-                frame.Dispose();
+                _ = frame;
             }
 
             return (true, null);

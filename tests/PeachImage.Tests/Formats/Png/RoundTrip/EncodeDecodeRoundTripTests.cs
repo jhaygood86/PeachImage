@@ -14,9 +14,9 @@ public class EncodeDecodeRoundTripTests
     [InlineData(4, 4, true)] // Small enough that some Adam7 passes contribute zero pixels.
     public void Rgb24Gradient_RoundTrips_Exactly(int width, int height, bool interlace)
     {
-        using var source = CreateGradientImage(width, height);
+        var source = CreateGradientImage(width, height);
 
-        using var decoded = EncodeThenDecode(source, new PngEncoderOptions { Interlace = interlace });
+        var decoded = EncodeThenDecode(source, new PngEncoderOptions { Interlace = interlace });
 
         Assert.Equal(PixelFormat.Rgb24, decoded.PixelFormat);
         Assert.Equal(source.Width, decoded.Width);
@@ -30,9 +30,9 @@ public class EncodeDecodeRoundTripTests
     [InlineData(5, 3, false)]
     public void Gray8Image_RoundTrips_Exactly(int width, int height, bool interlace)
     {
-        using var source = CreateGrayscaleImage(width, height);
+        var source = CreateGrayscaleImage(width, height);
 
-        using var decoded = EncodeThenDecode(source, new PngEncoderOptions { Interlace = interlace });
+        var decoded = EncodeThenDecode(source, new PngEncoderOptions { Interlace = interlace });
 
         Assert.Equal(PixelFormat.Gray8, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
@@ -43,9 +43,9 @@ public class EncodeDecodeRoundTripTests
     [InlineData(true)]
     public void Rgba32Image_RoundTrips_Exactly_IncludingAlpha(bool interlace)
     {
-        using var source = CreateRgbaImage(40, 24);
+        var source = CreateRgbaImage(40, 24);
 
-        using var decoded = EncodeThenDecode(source, new PngEncoderOptions { Interlace = interlace });
+        var decoded = EncodeThenDecode(source, new PngEncoderOptions { Interlace = interlace });
 
         Assert.Equal(PixelFormat.Rgba32, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
@@ -56,14 +56,14 @@ public class EncodeDecodeRoundTripTests
     [InlineData(true)]
     public void Gray16Image_RoundTrips_Exactly(bool interlace)
     {
-        using var source = Image.Create(17, 11, PixelFormat.Gray16);
+        var source = Image.Create(17, 11, PixelFormat.Gray16);
         var samples = MemoryMarshal.Cast<byte, ushort>(source.GetPixelSpan());
         for (int i = 0; i < samples.Length; i++)
         {
             samples[i] = (ushort)(i * 977);
         }
 
-        using var decoded = EncodeThenDecode(source, new PngEncoderOptions { Interlace = interlace });
+        var decoded = EncodeThenDecode(source, new PngEncoderOptions { Interlace = interlace });
 
         Assert.Equal(PixelFormat.Gray16, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
@@ -74,14 +74,14 @@ public class EncodeDecodeRoundTripTests
     [InlineData(true)]
     public void Rgb48Image_RoundTrips_Exactly(bool interlace)
     {
-        using var source = Image.Create(13, 9, PixelFormat.Rgb48);
+        var source = Image.Create(13, 9, PixelFormat.Rgb48);
         var samples = MemoryMarshal.Cast<byte, ushort>(source.GetPixelSpan());
         for (int i = 0; i < samples.Length; i++)
         {
             samples[i] = (ushort)(i * 6151);
         }
 
-        using var decoded = EncodeThenDecode(source, new PngEncoderOptions { Interlace = interlace });
+        var decoded = EncodeThenDecode(source, new PngEncoderOptions { Interlace = interlace });
 
         Assert.Equal(PixelFormat.Rgb48, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
@@ -92,14 +92,14 @@ public class EncodeDecodeRoundTripTests
     [InlineData(true)]
     public void Rgba64Image_RoundTrips_Exactly(bool interlace)
     {
-        using var source = Image.Create(11, 15, PixelFormat.Rgba64);
+        var source = Image.Create(11, 15, PixelFormat.Rgba64);
         var samples = MemoryMarshal.Cast<byte, ushort>(source.GetPixelSpan());
         for (int i = 0; i < samples.Length; i++)
         {
             samples[i] = (ushort)(i * 3079);
         }
 
-        using var decoded = EncodeThenDecode(source, new PngEncoderOptions { Interlace = interlace });
+        var decoded = EncodeThenDecode(source, new PngEncoderOptions { Interlace = interlace });
 
         Assert.Equal(PixelFormat.Rgba64, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
@@ -110,7 +110,7 @@ public class EncodeDecodeRoundTripTests
     {
         const int width = 6;
         const int height = 4;
-        using var source = Image.Create(width, height, PixelFormat.Rgb24);
+        var source = Image.Create(width, height, PixelFormat.Rgb24);
         var span = source.GetPixelSpan();
         for (int i = 0; i < width * height; i++)
         {
@@ -125,7 +125,7 @@ public class EncodeDecodeRoundTripTests
         span[(keyPixelIndex * 3) + 1] = 100;
         span[(keyPixelIndex * 3) + 2] = 50;
 
-        using var decoded = EncodeThenDecode(source, new PngEncoderOptions { TransparentColor = (200, 100, 50) });
+        var decoded = EncodeThenDecode(source, new PngEncoderOptions { TransparentColor = (200, 100, 50) });
 
         Assert.Equal(PixelFormat.Rgba32, decoded.PixelFormat);
         var decodedSpan = decoded.GetPixelSpan();
@@ -142,11 +142,11 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void PhysicalResolution_RoundTrips()
     {
-        using var source = CreateGradientImage(8, 8);
+        var source = CreateGradientImage(8, 8);
         source.Metadata.HorizontalResolution = 2835; // 72 DPI in pixels-per-meter
         source.Metadata.VerticalResolution = 2835;
 
-        using var decoded = EncodeThenDecode(source, new PngEncoderOptions());
+        var decoded = EncodeThenDecode(source, new PngEncoderOptions());
 
         Assert.Equal(2835, decoded.Metadata.HorizontalResolution);
         Assert.Equal(2835, decoded.Metadata.VerticalResolution);
@@ -155,14 +155,14 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void TextEntry_RoundTrips()
     {
-        using var source = CreateGradientImage(4, 4);
+        var source = CreateGradientImage(4, 4);
         source.Metadata.Profiles.Add(new RawMetadataProfile
         {
             Kind = MetadataProfileKind.Text,
             Data = System.Text.Encoding.UTF8.GetBytes("Title\0\0\0Héllo wörld"),
         });
 
-        using var decoded = EncodeThenDecode(source, new PngEncoderOptions());
+        var decoded = EncodeThenDecode(source, new PngEncoderOptions());
 
         var textProfile = decoded.Metadata.Profiles.Single(p => p.Kind == MetadataProfileKind.Text);
         Assert.True(PngTextEntry.TryParse(textProfile, out var entry));
@@ -173,7 +173,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Cmyk32Image_Encode_Throws()
     {
-        using var source = Image.Create(4, 4, PixelFormat.Cmyk32);
+        var source = Image.Create(4, 4, PixelFormat.Cmyk32);
         using var ms = new MemoryStream();
 
         Assert.Throws<PngEncodingException>(() => PngEncoder.Encode(source, ms));

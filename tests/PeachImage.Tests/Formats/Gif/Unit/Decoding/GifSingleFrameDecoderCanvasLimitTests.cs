@@ -23,7 +23,7 @@ public class GifSingleFrameDecoderCanvasLimitTests
     {
         byte[] gif = BuildMinimalGif(screenWidth: 4, screenHeight: 4);
 
-        using var image = GifSingleFrameDecoder.Decode(new MemoryStream(gif), maxInitialCanvasBytes: 1024 * 1024);
+        var image = GifSingleFrameDecoder.Decode(new MemoryStream(gif), maxInitialCanvasBytes: 1024 * 1024);
 
         Assert.Equal(4, image.Width);
         Assert.Equal(4, image.Height);
@@ -34,7 +34,7 @@ public class GifSingleFrameDecoderCanvasLimitTests
     {
         byte[] gif = BuildMinimalGif(screenWidth: 4, screenHeight: 4);
 
-        using var image = GifSingleFrameDecoder.Decode(new MemoryStream(gif));
+        var image = GifSingleFrameDecoder.Decode(new MemoryStream(gif));
 
         Assert.Equal(4, image.Width);
         Assert.Equal(4, image.Height);

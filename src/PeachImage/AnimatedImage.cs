@@ -10,11 +10,25 @@ namespace PeachImage;
 /// rather than any single format's animation API being called directly.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Does not implement <see cref="IDisposable"/>: a decode-produced <see cref="Frames"/> sequence is lazy and
 /// may be backed by an open stream, so nothing meaningful is owned at the <see cref="AnimatedImage"/> level
-/// to dispose. Each <see cref="AnimatedImageFrame"/> pulled from <see cref="Frames"/> owns its own
-/// <see cref="AnimatedImageFrame.Image"/> and must be disposed by the caller once done with it, e.g.
-/// <c>foreach (var frame in animated.Frames) { using (frame) { ... } }</c>.
+/// to dispose.
+/// </para>
+/// <para>
+/// A decode-produced <see cref="AnimatedImageFrame.Image"/> pulled from <see cref="Frames"/> is a live view
+/// into decoder-internal state, not an independent copy: the frame compositor reuses a single persistent
+/// canvas across the whole animation for performance, so each frame's <c>Image</c> is only valid until the
+/// <em>next</em> frame is pulled from the same enumeration (the next <c>MoveNext()</c>/loop iteration).
+/// Reading pixel data (<see cref="Image.GetPixelSpan"/>, <see cref="Image.GetRowSpan"/>,
+/// <see cref="Image.PixelMemory"/>) on an invalidated frame throws <see cref="InvalidOperationException"/>.
+/// If you need to retain a frame beyond that point — e.g. to collect every frame before processing them, or
+/// to keep the previous frame around while inspecting the current one — call
+/// <see cref="AnimatedImageFrame.Clone"/> (or <see cref="Image.Clone"/> on just the pixel data) before
+/// advancing:
+/// <c>foreach (var frame in animated.Frames) { var kept = frame.Clone(); ... }</c>. No disposal is needed or
+/// possible — frames are plain, GC-managed data once cloned.
+/// </para>
 /// </remarks>
 public sealed class AnimatedImage
 {

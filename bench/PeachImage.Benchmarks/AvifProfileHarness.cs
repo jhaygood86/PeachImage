@@ -55,7 +55,7 @@ internal static class AvifProfileHarness
     private static long DecodeOnce(byte[] bytes)
     {
         using var stream = new MemoryStream(bytes);
-        using var image = AvifDecoder.Decode(stream);
+        var image = AvifDecoder.Decode(stream);
 
         var pixels = image.GetPixelSpan();
         long accumulator = pixels.Length;

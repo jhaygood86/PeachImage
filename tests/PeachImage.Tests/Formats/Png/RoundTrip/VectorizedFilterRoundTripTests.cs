@@ -28,8 +28,8 @@ public class VectorizedFilterRoundTripTests
     [MemberData(nameof(AllFixedStrategies))]
     public void Rgb24_RoundTrips_Exactly(PngFilterStrategy strategy)
     {
-        using var source = CreateNoisyRgb24(Width, Height);
-        using var decoded = EncodeThenDecode(source, strategy);
+        var source = CreateNoisyRgb24(Width, Height);
+        var decoded = EncodeThenDecode(source, strategy);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
 
@@ -37,8 +37,8 @@ public class VectorizedFilterRoundTripTests
     [MemberData(nameof(AllFixedStrategies))]
     public void Rgba32_RoundTrips_Exactly(PngFilterStrategy strategy)
     {
-        using var source = CreateNoisyImage(Width, Height, PixelFormat.Rgba32);
-        using var decoded = EncodeThenDecode(source, strategy);
+        var source = CreateNoisyImage(Width, Height, PixelFormat.Rgba32);
+        var decoded = EncodeThenDecode(source, strategy);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
 
@@ -46,8 +46,8 @@ public class VectorizedFilterRoundTripTests
     [MemberData(nameof(AllFixedStrategies))]
     public void Gray8_RoundTrips_Exactly(PngFilterStrategy strategy)
     {
-        using var source = CreateNoisyImage(Width, Height, PixelFormat.Gray8);
-        using var decoded = EncodeThenDecode(source, strategy);
+        var source = CreateNoisyImage(Width, Height, PixelFormat.Gray8);
+        var decoded = EncodeThenDecode(source, strategy);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
 
@@ -55,8 +55,8 @@ public class VectorizedFilterRoundTripTests
     [MemberData(nameof(AllFixedStrategies))]
     public void Rgb48_RoundTrips_Exactly(PngFilterStrategy strategy)
     {
-        using var source = CreateNoisy16Bit(Width, Height, PixelFormat.Rgb48);
-        using var decoded = EncodeThenDecode(source, strategy);
+        var source = CreateNoisy16Bit(Width, Height, PixelFormat.Rgb48);
+        var decoded = EncodeThenDecode(source, strategy);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
 
@@ -64,8 +64,8 @@ public class VectorizedFilterRoundTripTests
     [MemberData(nameof(AllFixedStrategies))]
     public void Rgba64_RoundTrips_Exactly(PngFilterStrategy strategy)
     {
-        using var source = CreateNoisy16Bit(Width, Height, PixelFormat.Rgba64);
-        using var decoded = EncodeThenDecode(source, strategy);
+        var source = CreateNoisy16Bit(Width, Height, PixelFormat.Rgba64);
+        var decoded = EncodeThenDecode(source, strategy);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
 
@@ -73,8 +73,8 @@ public class VectorizedFilterRoundTripTests
     [MemberData(nameof(AllFixedStrategies))]
     public void Gray16_RoundTrips_Exactly(PngFilterStrategy strategy)
     {
-        using var source = CreateNoisy16Bit(Width, Height, PixelFormat.Gray16);
-        using var decoded = EncodeThenDecode(source, strategy);
+        var source = CreateNoisy16Bit(Width, Height, PixelFormat.Gray16);
+        var decoded = EncodeThenDecode(source, strategy);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
 
@@ -84,7 +84,7 @@ public class VectorizedFilterRoundTripTests
     [InlineData(PngFilterStrategy.FixedPaeth)]
     public void EdgeCaseByteValues_RoundTripExactly(PngFilterStrategy strategy)
     {
-        using var source = Image.Create(Width, Height, PixelFormat.Rgb24);
+        var source = Image.Create(Width, Height, PixelFormat.Rgb24);
         byte[] edgeValues = [0x00, 0x01, 0x7F, 0x80, 0xFE, 0xFF];
         var span = source.GetPixelSpan();
         for (int i = 0; i < span.Length; i++)
@@ -92,7 +92,7 @@ public class VectorizedFilterRoundTripTests
             span[i] = edgeValues[i % edgeValues.Length];
         }
 
-        using var decoded = EncodeThenDecode(source, strategy);
+        var decoded = EncodeThenDecode(source, strategy);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
 

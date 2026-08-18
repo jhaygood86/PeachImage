@@ -11,13 +11,13 @@ public class EncodeDecodeRoundTripTests
     [InlineData(JpegChromaSubsampling.Yuv411)]
     public void RgbGradient_RoundTrips_WithinPsnrThreshold_AtEachSubsampling(JpegChromaSubsampling subsampling)
     {
-        using var source = CreateGradientImage(64, 48);
+        var source = CreateGradientImage(64, 48);
 
         using var ms = new MemoryStream();
         JpegEncoder.Encode(source, ms, new JpegEncoderOptions { Quality = 90, Subsampling = subsampling });
 
         ms.Position = 0;
-        using var decoded = JpegDecoder.Decode(ms);
+        var decoded = JpegDecoder.Decode(ms);
 
         Assert.Equal(source.Width, decoded.Width);
         Assert.Equal(source.Height, decoded.Height);
@@ -39,13 +39,13 @@ public class EncodeDecodeRoundTripTests
         // path — the partial last block-row/-column FrameReconstructor.ReconstructComponentPlane handles via
         // a scratch buffer, distinct from its interior-block fast path — actually gets exercised. Every other
         // round-trip test in this file uses exact-multiple-of-8 dimensions and never touches it.
-        using var source = CreateGradientImage(width, height);
+        var source = CreateGradientImage(width, height);
 
         using var ms = new MemoryStream();
         JpegEncoder.Encode(source, ms, new JpegEncoderOptions { Quality = 90, Subsampling = subsampling });
 
         ms.Position = 0;
-        using var decoded = JpegDecoder.Decode(ms);
+        var decoded = JpegDecoder.Decode(ms);
 
         Assert.Equal(source.Width, decoded.Width);
         Assert.Equal(source.Height, decoded.Height);
@@ -58,13 +58,13 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void GrayscaleImage_RoundTrips_WithinPsnrThreshold()
     {
-        using var source = CreateGrayscaleImage(32, 32);
+        var source = CreateGrayscaleImage(32, 32);
 
         using var ms = new MemoryStream();
         JpegEncoder.Encode(source, ms, new JpegEncoderOptions { Quality = 95 });
 
         ms.Position = 0;
-        using var decoded = JpegDecoder.Decode(ms);
+        var decoded = JpegDecoder.Decode(ms);
 
         Assert.Equal(PixelFormat.Gray8, decoded.PixelFormat);
         double psnr = ComputePsnr(source.GetPixelSpan(), decoded.GetPixelSpan());
@@ -74,7 +74,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void HighQuality_ProducesHigherPsnrThanLowQuality()
     {
-        using var source = CreateGradientImage(48, 48);
+        var source = CreateGradientImage(48, 48);
 
         double lowQualityPsnr = EncodeDecodeAndMeasurePsnr(source, quality: 20);
         double highQualityPsnr = EncodeDecodeAndMeasurePsnr(source, quality: 95);
@@ -85,7 +85,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void RestartIntervals_DecodeIdenticallyToWithoutRestarts()
     {
-        using var source = CreateGradientImage(80, 64);
+        var source = CreateGradientImage(80, 64);
 
         using var withoutRestarts = new MemoryStream();
         JpegEncoder.Encode(source, withoutRestarts, new JpegEncoderOptions { Quality = 90, RestartInterval = 0 });
@@ -96,8 +96,8 @@ public class EncodeDecodeRoundTripTests
         withoutRestarts.Position = 0;
         withRestarts.Position = 0;
 
-        using var decodedWithout = JpegDecoder.Decode(withoutRestarts);
-        using var decodedWith = JpegDecoder.Decode(withRestarts);
+        var decodedWithout = JpegDecoder.Decode(withoutRestarts);
+        var decodedWith = JpegDecoder.Decode(withRestarts);
 
         Assert.True(decodedWithout.GetPixelSpan().SequenceEqual(decodedWith.GetPixelSpan()));
     }
@@ -107,7 +107,7 @@ public class EncodeDecodeRoundTripTests
         using var ms = new MemoryStream();
         JpegEncoder.Encode(source, ms, new JpegEncoderOptions { Quality = quality });
         ms.Position = 0;
-        using var decoded = JpegDecoder.Decode(ms);
+        var decoded = JpegDecoder.Decode(ms);
         return ComputePsnr(source.GetPixelSpan(), decoded.GetPixelSpan());
     }
 

@@ -27,10 +27,6 @@ public class GifImageDecoderCumulativeLimitTests
         var (frames, _) = DecodeAll(new MemoryStream(gif), maxFrames: 100, maxCumulativeCanvasBytes: 8 * 8 * 4 * 5);
 
         Assert.Equal(5, frames.Count);
-        foreach (var frame in frames)
-        {
-            frame.Dispose();
-        }
     }
 
     [Fact]
@@ -41,10 +37,6 @@ public class GifImageDecoderCumulativeLimitTests
         var (frames, _) = DecodeAll(new MemoryStream(gif), maxFrames: 100);
 
         Assert.Equal(3, frames.Count);
-        foreach (var frame in frames)
-        {
-            frame.Dispose();
-        }
     }
 
     /// <summary>Forces full enumeration of the lazy <see cref="GifImageDecoder.DecodeFrames"/> sequence into a list, so a cap-exceeded throw (which only happens as later frames are pulled) surfaces here rather than lazily at the caller's own enumeration.</summary>
@@ -77,11 +69,6 @@ public class GifImageDecoderCumulativeLimitTests
         var source = new AnimatedImage(frames, width: canvasWidth, height: canvasHeight, loopCount: 0);
         using var ms = new MemoryStream();
         source.Save(ms, "gif", new GifEncoderOptions());
-
-        foreach (var frame in frames)
-        {
-            frame.Dispose();
-        }
 
         return ms.ToArray();
     }

@@ -59,37 +59,34 @@ public class WebpLossyEncodeCorpusTests
             return ComparisonResult.Ok; // Expected for files this decoder deliberately rejects (e.g. animated).
         }
 
-        using (sourceImage)
+        if (sourceImage.Width < 1 || sourceImage.Height < 1
+            || sourceImage.Width > MaxDimension || sourceImage.Height > MaxDimension)
         {
-            if (sourceImage.Width < 1 || sourceImage.Height < 1
-                || sourceImage.Width > MaxDimension || sourceImage.Height > MaxDimension)
-            {
-                return ComparisonResult.Ok;
-            }
-
-            byte[] rgb = ToRgb24(sourceImage);
-
-            byte[] vp8Bytes;
-            try
-            {
-                vp8Bytes = Vp8ImageEncoder.Encode(rgb, sourceImage.Width, sourceImage.Height, new WebpEncoderOptions { Lossless = false });
-            }
-            catch (WebpEncodingException)
-            {
-                return ComparisonResult.Ok; // e.g. a partition-length overflow on a pathological input; not this test's concern.
-            }
-
-            Vp8DecodedFrame frame = Vp8FrameDecoder.Instance.Decode(vp8Bytes, null);
-
-            using var ms = new MemoryStream(vp8Bytes);
-            using var skiaBitmap = SKBitmap.Decode(ms);
-            if (skiaBitmap is null || skiaBitmap.Width != frame.Width || skiaBitmap.Height != frame.Height)
-            {
-                return ComparisonResult.Ok; // SkiaSharp's own libwebp build may reject a file for unrelated reasons (version skew); not this test's concern.
-            }
-
-            return CompareAgainstSkia(path, frame, skiaBitmap);
+            return ComparisonResult.Ok;
         }
+
+        byte[] rgb = ToRgb24(sourceImage);
+
+        byte[] vp8Bytes;
+        try
+        {
+            vp8Bytes = Vp8ImageEncoder.Encode(rgb, sourceImage.Width, sourceImage.Height, new WebpEncoderOptions { Lossless = false });
+        }
+        catch (WebpEncodingException)
+        {
+            return ComparisonResult.Ok; // e.g. a partition-length overflow on a pathological input; not this test's concern.
+        }
+
+        Vp8DecodedFrame frame = Vp8FrameDecoder.Instance.Decode(vp8Bytes, null);
+
+        using var ms = new MemoryStream(vp8Bytes);
+        using var skiaBitmap = SKBitmap.Decode(ms);
+        if (skiaBitmap is null || skiaBitmap.Width != frame.Width || skiaBitmap.Height != frame.Height)
+        {
+            return ComparisonResult.Ok; // SkiaSharp's own libwebp build may reject a file for unrelated reasons (version skew); not this test's concern.
+        }
+
+        return CompareAgainstSkia(path, frame, skiaBitmap);
     }
 
     private static ComparisonResult CompareAgainstSkia(string path, Vp8DecodedFrame frame, SKBitmap skiaBitmap)

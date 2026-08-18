@@ -63,7 +63,6 @@ public class GifDecodeBenchmarks
         foreach (var frame in animatedImage.Frames)
         {
             count++;
-            frame.Dispose();
         }
 
         return count;

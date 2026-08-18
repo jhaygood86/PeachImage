@@ -38,7 +38,7 @@ public class HeaderOverflowTests
         byte[] file = PngTestFileBuilder.Build(width: 2, height: 2, bitDepth: 8, colorType: 0,
             palette: null, trns: null, scanlines: [[0, 10, 20], [0, 30, 40]]);
 
-        using var image = PngDecoder.Decode(new MemoryStream(file));
+        var image = PngDecoder.Decode(new MemoryStream(file));
 
         Assert.Equal(2, image.Width);
         Assert.Equal(2, image.Height);

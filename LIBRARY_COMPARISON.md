@@ -88,6 +88,36 @@ Measured (pinned, `--warmupCount 5 --iterationCount 20 --inProcess --affinity 15
   sourcing) a WebP lossless asset whose encoder actually selects the cross-color transform is a
   natural follow-up if quantifying this is worth doing.
 
+### Issue #36: GIF/WebP animated-decode compositor allocation
+
+Follow-up to #35 (GIF's LZW-decode gap, below). `GifFrameCompositor.DrawFrame`/
+`WebpFrameCompositor.DrawFrame` — the per-frame compositing step shared by both animated formats —
+allocated a brand-new full-canvas `Image` (`Image.Create` + `_canvas.CopyTo(...)`) on **every frame**,
+unlike SkiaSharp's animated decode, which reuses one bitmap buffer in place (~2.4 KB total for 24
+frames vs. PeachImage's 8–9 MB). Stage-level instrumentation in the issue attributed ~40% of GIF's
+animated-decode time to this compositor step, separate from the LZW decode loop itself (#35's scope).
+
+Fix: `DrawFrame` now wraps the compositor's persistent canvas directly via the existing
+`Image.FromBuffer` instead of allocating and copying into a new buffer — a true zero-copy return, not
+just pooling. This required loosening `AnimatedImage.Frames`' contract: a pulled frame's `Image` is now
+a live view, valid only until the next frame is pulled from the same enumeration (reading pixel data
+after that throws `InvalidOperationException`); callers that need to retain a frame call the new
+`Image.Clone()`/`AnimatedImageFrame.Clone()`. Since that removed the last reason to keep a "some day
+this might wrap a pooled buffer" `Dispose()` around (`Image.Dispose()` was already a no-op), `Image`
+and `AnimatedImageFrame` (and internal `GifFrame`) stopped implementing `IDisposable` entirely, per
+YAGNI. `GifImageEncoder.EncodeAnimation`, which must retain every frame simultaneously to build the
+Global Color Table before writing any frame data, was updated to clone each frame as it's spooled —
+without that, re-encoding a decoded animated GIF would have silently written the last frame's pixels
+24 times.
+
+Measured (pinned, `--warmupCount 5 --iterationCount 20 --inProcess --affinity 15`, same session):
+
+- **GIF animated decode**: 4.63 ms → 4.15 ms, Ratio 8.59× → 7.69×, Allocated 8.1 MB → 886 KB. The
+  remaining gap is GIF's own LZW decode loop (#35, still open, ~60% of per-frame time by the issue's
+  own breakdown) — the compositor was real but secondary for GIF.
+- **WebP animated decode**: 1.48 ms → 1.14 ms, Ratio 0.36× → 0.27×, Allocated 9.1 MB → 1.9 MB (the
+  remainder is inherent per-frame VP8/VP8L bitstream decode work, not compositing).
+
 ### Remaining gap (WebP decode)
 
 Restoring the profiling breakdown this issue asked for, since it had been trimmed for length
@@ -220,15 +250,16 @@ for PeachImage alone, over time.
 
 | Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
 |---|---:|---:|---:|---:|
-| Animated, all frames (24×, 320×240) | 4.63 ms | 0.54 ms | **8.59×** | 8.1 MB |
+| Animated, all frames (24×, 320×240) | 4.15 ms | 0.54 ms | **7.69×** | 886 KB |
 
 This is the largest gap measured anywhere in this document — everything else stays under ~2.3×.
-It was already present in the benchmark suite before animated WebP decode was added in the same
-session that first ran and published this number, so there's no earlier recorded baseline to
-confirm whether it's a longstanding cost or a regression from later GIF decode changes; it's flagged
-here as a real gap worth a dedicated investigation, not something to read past. The static (non-animated)
-GIF decode scenarios in `GifDecodeBenchmarks.cs` (low-color graphic, dithered photographic) haven't
-been run into this document yet either.
+Most of the previous 8.1 MB/frame allocation (issue #36: `GifFrameCompositor.DrawFrame` allocating a
+fresh full-canvas `Image` and copying into it on every frame) is gone — `DrawFrame` now wraps its
+persistent canvas directly via `Image.FromBuffer` instead of copying, dropping allocated memory to
+886 KB and the ratio from 8.59× to 7.69×. The remaining gap is GIF's LZW decode loop itself (issue
+#35, ~60% of per-frame time by its own stage-level breakdown), not the compositor. The static
+(non-animated) GIF decode scenarios in `GifDecodeBenchmarks.cs` (low-color graphic, dithered
+photographic) haven't been run into this document yet either.
 
 ### Encode (PeachImage only — no SkiaSharp baseline)
 
@@ -254,17 +285,21 @@ directly comparable). Encode covers both the lossless (VP8L, default) and lossy 
 | Lossy, Alpha | 33.49 ms | 19.85 ms | **1.69×** | 11.1 MB |
 | Lossless, Alpha | 45.62 ms | 24.82 ms | **1.84×** | 13.0 MB |
 | Small image (32×24) | 14.24 µs | 12.69 µs | **1.12×** | 44 KB |
-| Animated, all frames (24×, 320×240) | 1.48 ms | 4.07 ms | **0.36×** | 9.1 MB |
+| Animated, all frames (24×, 320×240) | 1.14 ms | 4.15 ms | **0.27×** | 1.9 MB |
 
 The animated scenario is the strongest result in this whole document: PeachImage decodes it roughly
-**2.8× faster** than SkiaSharp, consistent across repeated runs. Same explanation as the lossless
+**3.6× faster** than SkiaSharp, consistent across repeated runs. Same explanation as the lossless
 small-image encode case below — SkiaSharp pays fixed per-call native marshaling overhead on every one
 of the 24 `GetPixels` calls, while PeachImage's decode is pure managed code with lower fixed
-per-frame cost. Both libraries' per-frame allocation strategy differs sharply (9.1 MB vs SkiaSharp's
-~2.4 KB): `WebpFrameCompositor`/GIF's `GifFrameCompositor` each allocate a fresh full-canvas `Image`
-per frame rather than reusing one buffer in place the way SkiaSharp's benchmark loop does — a real,
-shared design cost across both animated formats, though evidently not what's driving GIF's much
-larger 8.59× gap above, since WebP has the same allocation pattern and still comes out ahead.
+per-frame cost. `WebpFrameCompositor`/GIF's `GifFrameCompositor` used to allocate a fresh full-canvas
+`Image` and copy into it on every frame instead of reusing one buffer in place the way SkiaSharp's
+benchmark loop does; issue #36 fixed this — `DrawFrame` now wraps its persistent canvas directly via
+`Image.FromBuffer`, with no per-frame allocation or copy at all (the returned `Image` is a live view,
+invalidated once the next frame is pulled — see `AnimatedImage.Frames`'s remarks). That dropped
+allocated memory from 9.1 MB to 1.9 MB (the remainder is inherent per-frame VP8/VP8L bitstream decode
+work, not compositing) and improved the ratio from 0.36× to 0.27×. GIF got the same fix but the LZW
+decode loop (issue #35) still dominates its per-frame cost, so its ratio moved far less (8.59× → 7.69×,
+see the GIF section above) — confirming the compositor was real but secondary to GIF's LZW gap.
 
 ### Encode (lossless)
 
@@ -321,9 +356,9 @@ PeachImage is roughly **2.12×** `ffmpeg`'s process-spawn-inclusive time on the 
 |---|---|---|
 | JPEG | 1.16×–1.37× | 1.18×–1.35× |
 | BMP | 0.38×–1.04× | no baseline (PeachImage-only) |
-| GIF | **8.59× (animated only measured so far)** | no SkiaSharp baseline (PeachImage-only) |
+| GIF | **7.69× (animated only measured so far)** | no SkiaSharp baseline (PeachImage-only) |
 | PNG | 1.06×–2.33× | 0.66×–1.15× |
-| WebP | 0.36×–2.17× (animated: **0.36×**, static: 1.12×–2.17×) | 1.01×–1.44× lossless (0.16× small-image outlier), 0.88× lossy |
+| WebP | 0.27×–2.17× (animated: **0.27×**, static: 1.12×–2.17×) | 1.01×–1.44× lossless (0.16× small-image outlier), 0.88× lossy |
 | AVIF | ~2.12× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented (fixed 8x8 blocks, no partition-tree RDO yet); throughput not yet measured here |
 
 BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
@@ -331,6 +366,7 @@ and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is 
 16-bit decode path. JPEG has the largest gap on both sides among the mature formats. WebP's static
 decode and AVIF are the furthest from the 10% target on large images, but WebP's *animated* decode is
 actually the single best result in this document (SkiaSharp's fixed per-frame native marshaling
-overhead losing badly to PeachImage's managed decode loop). GIF's animated decode is the worst result
-in this document by a wide margin and is flagged in its own section above as needing dedicated
-investigation, not yet explained.
+overhead losing badly to PeachImage's managed decode loop). GIF's animated decode is still the worst
+result in this document by a wide margin, but it's no longer unexplained: issue #36 fixed the shared
+per-frame compositor-allocation cost both animated formats paid (see the GIF/WebP sections above), and
+the remainder is GIF's own LZW decode loop (issue #35, still open).

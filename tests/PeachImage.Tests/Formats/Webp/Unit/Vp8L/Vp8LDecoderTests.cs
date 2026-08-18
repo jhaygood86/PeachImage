@@ -47,7 +47,7 @@ public class Vp8LDecoderTests
 
         byte[] chunk = BuildChunk(writer);
 
-        using var image = Vp8LDecoder.Decode(chunk);
+        var image = Vp8LDecoder.Decode(chunk);
 
         Assert.Equal(2, image.Width);
         Assert.Equal(2, image.Height);
@@ -85,7 +85,7 @@ public class Vp8LDecoderTests
 
         byte[] chunk = BuildChunk(writer);
 
-        using var image = Vp8LDecoder.Decode(chunk);
+        var image = Vp8LDecoder.Decode(chunk);
 
         Assert.Equal(1, image.Width);
         Assert.Equal(1, image.Height);

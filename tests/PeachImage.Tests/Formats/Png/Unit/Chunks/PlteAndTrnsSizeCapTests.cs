@@ -39,7 +39,7 @@ public class PlteAndTrnsSizeCapTests
         byte[] file = PngTestFileBuilder.Build(2, 2, bitDepth: 8, colorType: 3, palette, trns,
             scanlines: [[0, 0, 1], [0, 2, 3]]);
 
-        using var image = PngDecoder.Decode(new MemoryStream(file));
+        var image = PngDecoder.Decode(new MemoryStream(file));
 
         Assert.Equal(PixelFormat.Rgba32, image.PixelFormat);
     }

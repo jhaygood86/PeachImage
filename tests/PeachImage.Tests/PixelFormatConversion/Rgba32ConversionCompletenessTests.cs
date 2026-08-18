@@ -67,8 +67,8 @@ public class Rgba32ConversionCompletenessTests
 
     private static void AssertConvertsToRgba32(PixelFormat source, Func<Image, PixelFormat?, Image> convert)
     {
-        using var image = CreateFilledImage(3, 2, source);
-        using var converted = convert(image, PixelFormat.Rgba32);
+        var image = CreateFilledImage(3, 2, source);
+        var converted = convert(image, PixelFormat.Rgba32);
 
         Assert.Equal(PixelFormat.Rgba32, converted.PixelFormat);
         Assert.Equal(image.Width, converted.Width);
@@ -79,14 +79,14 @@ public class Rgba32ConversionCompletenessTests
     [Fact]
     public void Jpeg_Cmyk32_ConvertsToRgba32_UsingNaiveAdditiveFormula()
     {
-        using var source = Image.Create(1, 1, PixelFormat.Cmyk32);
+        var source = Image.Create(1, 1, PixelFormat.Cmyk32);
         var pixels = source.GetPixelSpan();
         pixels[0] = 10; // C
         pixels[1] = 20; // M
         pixels[2] = 30; // Y
         pixels[3] = 40; // K
 
-        using var converted = JpegConverter.ConvertIfNeeded(source, PixelFormat.Rgba32);
+        var converted = JpegConverter.ConvertIfNeeded(source, PixelFormat.Rgba32);
 
         var rgba = converted.GetPixelSpan();
         Assert.Equal(205, rgba[0]); // 255 - min(255, C + K) = 255 - 50
@@ -98,14 +98,14 @@ public class Rgba32ConversionCompletenessTests
     [Fact]
     public void Jpeg_Cmyk32_ConvertsToRgba32_ClampsInsteadOfWrapping()
     {
-        using var source = Image.Create(1, 1, PixelFormat.Cmyk32);
+        var source = Image.Create(1, 1, PixelFormat.Cmyk32);
         var pixels = source.GetPixelSpan();
         pixels[0] = 255; // C
         pixels[1] = 0;   // M
         pixels[2] = 0;   // Y
         pixels[3] = 255; // K
 
-        using var converted = JpegConverter.ConvertIfNeeded(source, PixelFormat.Rgba32);
+        var converted = JpegConverter.ConvertIfNeeded(source, PixelFormat.Rgba32);
 
         var rgba = converted.GetPixelSpan();
         Assert.Equal(0, rgba[0]); // 255 - min(255, 255 + 255) = 0, not an underflow wrap to a large byte value.
@@ -118,10 +118,10 @@ public class Rgba32ConversionCompletenessTests
     [InlineData(true)]
     public void Png_Gray16_ConvertsToRgba32_ThroughImageLoad_TopByteTruncated(bool interlace)
     {
-        using var source = Image.Create(2, 2, PixelFormat.Gray16);
+        var source = Image.Create(2, 2, PixelFormat.Gray16);
         MemoryMarshal.Cast<byte, ushort>(source.GetPixelSpan()).Fill(0xABCD);
 
-        using var decoded = EncodePngThenLoadAsRgba32(source, interlace);
+        var decoded = EncodePngThenLoadAsRgba32(source, interlace);
 
         var rgba = decoded.GetPixelSpan();
         for (int i = 0; i < rgba.Length; i += 4)
@@ -138,7 +138,7 @@ public class Rgba32ConversionCompletenessTests
     [InlineData(true)]
     public void Png_Rgb48_ConvertsToRgba32_ThroughImageLoad_TopByteTruncated(bool interlace)
     {
-        using var source = Image.Create(2, 2, PixelFormat.Rgb48);
+        var source = Image.Create(2, 2, PixelFormat.Rgb48);
         var samples = MemoryMarshal.Cast<byte, ushort>(source.GetPixelSpan());
         for (int i = 0; i < samples.Length; i += 3)
         {
@@ -147,7 +147,7 @@ public class Rgba32ConversionCompletenessTests
             samples[i + 2] = 0xFF00; // B -> 255
         }
 
-        using var decoded = EncodePngThenLoadAsRgba32(source, interlace);
+        var decoded = EncodePngThenLoadAsRgba32(source, interlace);
 
         var rgba = decoded.GetPixelSpan();
         for (int i = 0; i < rgba.Length; i += 4)
@@ -162,14 +162,14 @@ public class Rgba32ConversionCompletenessTests
     [Fact]
     public void Avif_Rgba64_ConvertsToRgba32_TopByteTruncated_IncludingAlpha()
     {
-        using var source = Image.Create(1, 1, PixelFormat.Rgba64);
+        var source = Image.Create(1, 1, PixelFormat.Rgba64);
         var samples = MemoryMarshal.Cast<byte, ushort>(source.GetPixelSpan());
         samples[0] = 0x0100; // R -> 1
         samples[1] = 0x8000; // G -> 128
         samples[2] = 0xFF00; // B -> 255
         samples[3] = 0x4000; // A -> 64
 
-        using var converted = AvifConverter.ConvertIfNeeded(source, PixelFormat.Rgba32);
+        var converted = AvifConverter.ConvertIfNeeded(source, PixelFormat.Rgba32);
 
         var rgba = converted.GetPixelSpan();
         Assert.Equal(1, rgba[0]);

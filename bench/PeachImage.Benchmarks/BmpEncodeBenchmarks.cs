@@ -34,14 +34,6 @@ public class BmpEncodeBenchmarks
         _gray8Source = BmpDecoder.Decode(grayStream, new BmpDecoderOptions { TargetPixelFormat = PixelFormat.Gray8 });
     }
 
-    [GlobalCleanup]
-    public void Cleanup()
-    {
-        _rgb24Source.Dispose();
-        _rgba32Source.Dispose();
-        _gray8Source.Dispose();
-    }
-
     [Benchmark]
     [BenchmarkCategory("24bpp-Truecolor")]
     public MemoryStream PeachImage_Encode_24bpp()

@@ -18,13 +18,13 @@ public class DecoderOptionsFormatAgnosticTests
     [InlineData("webp")]
     public void PlainDecoderOptions_RequestingRgba32_IsHonoredRegardlessOfDetectedFormat(string formatName)
     {
-        using var source = CreateGradientRgbImage(16, 12);
+        var source = CreateGradientRgbImage(16, 12);
         using var stream = new MemoryStream();
         source.Save(stream, formatName);
         stream.Position = 0;
 
         // The base type, not JpegDecoderOptions/PngDecoderOptions/etc — this is the point being tested.
-        using var decoded = Image.Load(stream, new DecoderOptions { TargetPixelFormat = PixelFormat.Rgba32 });
+        var decoded = Image.Load(stream, new DecoderOptions { TargetPixelFormat = PixelFormat.Rgba32 });
 
         Assert.Equal(PixelFormat.Rgba32, decoded.PixelFormat);
         Assert.Equal(source.Width, decoded.Width);
@@ -34,14 +34,14 @@ public class DecoderOptionsFormatAgnosticTests
     [Fact]
     public void PlainDecoderOptions_BehavesIdenticallyToTheMatchingConcreteSubtype()
     {
-        using var source = CreateGradientRgbImage(10, 8);
+        var source = CreateGradientRgbImage(10, 8);
         using var jpegStream = new MemoryStream();
         source.Save(jpegStream, "jpeg");
         jpegStream.Position = 0;
 
-        using var viaBase = Image.Load(jpegStream, new DecoderOptions { TargetPixelFormat = PixelFormat.Rgba32 });
+        var viaBase = Image.Load(jpegStream, new DecoderOptions { TargetPixelFormat = PixelFormat.Rgba32 });
         jpegStream.Position = 0;
-        using var viaConcrete = Image.Load(jpegStream, new PeachImage.Formats.Jpeg.JpegDecoderOptions { TargetPixelFormat = PixelFormat.Rgba32 });
+        var viaConcrete = Image.Load(jpegStream, new PeachImage.Formats.Jpeg.JpegDecoderOptions { TargetPixelFormat = PixelFormat.Rgba32 });
 
         Assert.Equal(viaConcrete.PixelFormat, viaBase.PixelFormat);
         Assert.True(viaConcrete.GetPixelSpan().SequenceEqual(viaBase.GetPixelSpan()));

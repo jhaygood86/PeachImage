@@ -22,32 +22,22 @@ public class AnimatedRoundTripTests
         Assert.Equal(3, animated.LoopCount);
 
         var frames = animated.Frames.ToList();
-        try
-        {
-            Assert.Equal(2, frames.Count);
-            Assert.Equal(TimeSpan.FromMilliseconds(40), frames[0].Duration);
-            Assert.Equal(TimeSpan.FromMilliseconds(60), frames[1].Duration);
-        }
-        finally
-        {
-            foreach (var frame in frames)
-            {
-                frame.Dispose();
-            }
-        }
+        Assert.Equal(2, frames.Count);
+        Assert.Equal(TimeSpan.FromMilliseconds(40), frames[0].Duration);
+        Assert.Equal(TimeSpan.FromMilliseconds(60), frames[1].Duration);
     }
 
     [Fact]
     public void Decode_AnimatedFile_ReturnsOnlyFirstFrame_MarkedIsAnimated()
     {
-        using var frame1 = SolidImage(4, 4, 10, 20, 30, 255);
+        var frame1 = SolidImage(4, 4, 10, 20, 30, 255);
         byte[] webp = BuildAnimatedWebp(
             4, 4, loopCount: 0,
             SolidFrame(4, 4, 10, 20, 30, durationMs: 25),
             SolidFrame(4, 4, 90, 80, 70, durationMs: 25));
 
         using var ms = new MemoryStream(webp);
-        using var decoded = WebpDecoder.Decode(ms);
+        var decoded = WebpDecoder.Decode(ms);
 
         Assert.True(decoded.IsAnimated);
         Assert.True(frame1.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
@@ -69,7 +59,7 @@ public class AnimatedRoundTripTests
     [Fact]
     public void Identify_NonAnimatedFile_ReportsIsAnimatedFalse()
     {
-        using var source = Image.Create(4, 4, PixelFormat.Rgb24);
+        var source = Image.Create(4, 4, PixelFormat.Rgb24);
         using var ms = new MemoryStream();
         source.Save(ms, "webp");
         ms.Position = 0;
@@ -82,12 +72,12 @@ public class AnimatedRoundTripTests
     [Fact]
     public void Decode_NonAnimatedFile_ReportsIsAnimatedFalse()
     {
-        using var source = Image.Create(4, 4, PixelFormat.Rgb24);
+        var source = Image.Create(4, 4, PixelFormat.Rgb24);
         using var ms = new MemoryStream();
         source.Save(ms, "webp");
         ms.Position = 0;
 
-        using var decoded = WebpDecoder.Decode(ms);
+        var decoded = WebpDecoder.Decode(ms);
 
         Assert.False(decoded.IsAnimated);
     }
@@ -99,17 +89,7 @@ public class AnimatedRoundTripTests
         var animated = new AnimatedImage(frames, width: 2, height: 2, loopCount: 0);
         using var ms = new MemoryStream();
 
-        try
-        {
-            Assert.Throws<UnknownImageFormatException>(() => animated.Save(ms, "webp"));
-        }
-        finally
-        {
-            foreach (var frame in frames)
-            {
-                frame.Dispose();
-            }
-        }
+        Assert.Throws<UnknownImageFormatException>(() => animated.Save(ms, "webp"));
     }
 
     [Fact]
@@ -120,23 +100,13 @@ public class AnimatedRoundTripTests
         using var ms = new MemoryStream(webp);
         var animated = AnimatedImage.Load(ms);
         var frames = animated.Frames.ToList();
-        try
-        {
-            Assert.Equal(4, animated.Width);
-            Assert.Single(frames);
-        }
-        finally
-        {
-            foreach (var frame in frames)
-            {
-                frame.Dispose();
-            }
-        }
+        Assert.Equal(4, animated.Width);
+        Assert.Single(frames);
     }
 
     private static byte[] SolidFrame(int width, int height, byte r, byte g, byte b, int durationMs)
     {
-        using var image = SolidImage(width, height, r, g, b, 255);
+        var image = SolidImage(width, height, r, g, b, 255);
         return BuildAnmf(0, 0, width, height, durationMs, disposeToBackground: false, blend: false, EncodeFrameData(image));
     }
 

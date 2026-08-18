@@ -5,7 +5,7 @@ namespace PeachImage.Formats.Gif;
 /// timing/disposal metadata. Purely internal decode/encode plumbing for <see cref="GifDecoder"/>/
 /// <see cref="GifEncoder"/> — the codec-agnostic public equivalent is <see cref="AnimatedImageFrame"/>.
 /// </summary>
-internal sealed class GifFrame : IDisposable
+internal sealed class GifFrame
 {
     /// <summary>Initializes a new instance of <see cref="GifFrame"/>.</summary>
     public GifFrame(Image image, TimeSpan duration, GifDisposalMethod disposal)
@@ -28,7 +28,4 @@ internal sealed class GifFrame : IDisposable
 
     /// <summary>How this frame's canvas region should be treated once its <see cref="Duration"/> elapses.</summary>
     public GifDisposalMethod Disposal { get; }
-
-    /// <inheritdoc/>
-    public void Dispose() => Image.Dispose();
 }

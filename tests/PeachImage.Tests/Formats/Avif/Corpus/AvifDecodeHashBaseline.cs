@@ -74,7 +74,7 @@ internal static class AvifDecodeHashBaseline
         try
         {
             using var stream = new MemoryStream(bytes);
-            using var image = AvifDecoder.Decode(stream);
+            var image = AvifDecoder.Decode(stream);
             return new AvifDecodeHashRecord(inputHash, $"{image.Width}x{image.Height}:{image.PixelFormat}:{HashPixels(image)}");
         }
         catch (AvifUnsupportedFeatureException)

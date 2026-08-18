@@ -42,7 +42,7 @@ public class Png16BitDirectCopyPathTests
             trns: null,
             scanlines: [rowBytes]);
 
-        using var image = PngDecoder.Decode(new MemoryStream(file));
+        var image = PngDecoder.Decode(new MemoryStream(file));
 
         Assert.Equal(PixelFormat.Rgb48, image.PixelFormat);
         var decodedSamples = MemoryMarshal.Cast<byte, ushort>(image.GetPixelSpan());
@@ -87,7 +87,7 @@ public class Png16BitDirectCopyPathTests
             trns: null,
             scanlines: scanlines);
 
-        using var image = PngDecoder.Decode(new MemoryStream(file));
+        var image = PngDecoder.Decode(new MemoryStream(file));
 
         var decodedSamples = MemoryMarshal.Cast<byte, ushort>(image.GetPixelSpan());
         Assert.Equal(expectedSamples, decodedSamples.ToArray());

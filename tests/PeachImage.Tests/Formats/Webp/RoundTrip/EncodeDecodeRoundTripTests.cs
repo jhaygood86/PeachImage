@@ -11,9 +11,9 @@ public class EncodeDecodeRoundTripTests
     [InlineData(17, 31)]
     public void Rgb24Gradient_RoundTrips_Exactly(int width, int height)
     {
-        using var source = CreateGradientImage(width, height);
+        var source = CreateGradientImage(width, height);
 
-        using var decoded = EncodeThenDecode(source, new WebpEncoderOptions());
+        var decoded = EncodeThenDecode(source, new WebpEncoderOptions());
 
         Assert.Equal(PixelFormat.Rgb24, decoded.PixelFormat);
         Assert.Equal(source.Width, decoded.Width);
@@ -24,9 +24,9 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Rgba32Image_RoundTrips_Exactly_IncludingAlpha()
     {
-        using var source = CreateRgbaImage(40, 24, alphaGradient: true);
+        var source = CreateRgbaImage(40, 24, alphaGradient: true);
 
-        using var decoded = EncodeThenDecode(source, new WebpEncoderOptions());
+        var decoded = EncodeThenDecode(source, new WebpEncoderOptions());
 
         Assert.Equal(PixelFormat.Rgba32, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
@@ -35,13 +35,13 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Rgba32Image_FullyOpaque_RoundTrips_Exactly_ViaAutoDowngrade()
     {
-        using var source = CreateRgbaImage(20, 16, alphaGradient: false);
+        var source = CreateRgbaImage(20, 16, alphaGradient: false);
 
         using var ms = new MemoryStream();
         WebpEncoder.Encode(source, ms, new WebpEncoderOptions());
 
         ms.Position = 0;
-        using var decoded = WebpDecoder.Decode(ms, new WebpDecoderOptions { TargetPixelFormat = PixelFormat.Rgba32 });
+        var decoded = WebpDecoder.Decode(ms, new WebpDecoderOptions { TargetPixelFormat = PixelFormat.Rgba32 });
 
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
@@ -49,9 +49,9 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Gray8Image_RoundTrips_Exactly()
     {
-        using var source = CreateGrayscaleImage(32, 32);
+        var source = CreateGrayscaleImage(32, 32);
 
-        using var decoded = EncodeThenDecode(source, new WebpEncoderOptions(), targetPixelFormat: PixelFormat.Gray8);
+        var decoded = EncodeThenDecode(source, new WebpEncoderOptions(), targetPixelFormat: PixelFormat.Gray8);
 
         Assert.Equal(PixelFormat.Gray8, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
@@ -60,9 +60,9 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void FewColorImage_RoundTrips_Exactly_ViaColorIndexingTransform()
     {
-        using var source = CreateFewColorImage(48, 40);
+        var source = CreateFewColorImage(48, 40);
 
-        using var decoded = EncodeThenDecode(source, new WebpEncoderOptions());
+        var decoded = EncodeThenDecode(source, new WebpEncoderOptions());
 
         Assert.Equal(PixelFormat.Rgb24, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
@@ -71,9 +71,9 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void ManyColorImage_RoundTrips_Exactly_ViaPredictorTransform()
     {
-        using var source = CreateNoisyImage(96, 64, seed: 12345);
+        var source = CreateNoisyImage(96, 64, seed: 12345);
 
-        using var decoded = EncodeThenDecode(source, new WebpEncoderOptions());
+        var decoded = EncodeThenDecode(source, new WebpEncoderOptions());
 
         Assert.Equal(PixelFormat.Rgb24, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
@@ -85,9 +85,9 @@ public class EncodeDecodeRoundTripTests
     [InlineData(WebpCompressionLevel.SmallestSize)]
     public void NoisyImage_RoundTrips_Exactly_AtEveryCompressionLevel(WebpCompressionLevel level)
     {
-        using var source = CreateNoisyImage(40, 32, seed: 777);
+        var source = CreateNoisyImage(40, 32, seed: 777);
 
-        using var decoded = EncodeThenDecode(source, new WebpEncoderOptions { CompressionLevel = level });
+        var decoded = EncodeThenDecode(source, new WebpEncoderOptions { CompressionLevel = level });
 
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
@@ -95,11 +95,11 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void IccProfile_RoundTrips_ViaExtendedContainer()
     {
-        using var source = CreateGradientImage(8, 8);
+        var source = CreateGradientImage(8, 8);
         byte[] iccBytes = [1, 2, 3, 4, 5, 6, 7, 8];
         source.Metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Icc, Data = iccBytes });
 
-        using var decoded = EncodeThenDecode(source, new WebpEncoderOptions());
+        var decoded = EncodeThenDecode(source, new WebpEncoderOptions());
 
         var iccProfile = Assert.Single(decoded.Metadata.Profiles, p => p.Kind == MetadataProfileKind.Icc);
         Assert.Equal(iccBytes, iccProfile.Data);
@@ -109,7 +109,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Gray16Image_Encode_Throws()
     {
-        using var source = Image.Create(4, 4, PixelFormat.Gray16);
+        var source = Image.Create(4, 4, PixelFormat.Gray16);
         using var ms = new MemoryStream();
 
         Assert.Throws<WebpEncodingException>(() => WebpEncoder.Encode(source, ms));
@@ -118,7 +118,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Rgb48Image_Encode_Throws()
     {
-        using var source = Image.Create(4, 4, PixelFormat.Rgb48);
+        var source = Image.Create(4, 4, PixelFormat.Rgb48);
         using var ms = new MemoryStream();
 
         Assert.Throws<WebpEncodingException>(() => WebpEncoder.Encode(source, ms));
@@ -127,7 +127,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Rgba64Image_Encode_Throws()
     {
-        using var source = Image.Create(4, 4, PixelFormat.Rgba64);
+        var source = Image.Create(4, 4, PixelFormat.Rgba64);
         using var ms = new MemoryStream();
 
         Assert.Throws<WebpEncodingException>(() => WebpEncoder.Encode(source, ms));
@@ -136,7 +136,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Cmyk32Image_Encode_Throws()
     {
-        using var source = Image.Create(4, 4, PixelFormat.Cmyk32);
+        var source = Image.Create(4, 4, PixelFormat.Cmyk32);
         using var ms = new MemoryStream();
 
         Assert.Throws<WebpEncodingException>(() => WebpEncoder.Encode(source, ms));
@@ -154,9 +154,9 @@ public class EncodeDecodeRoundTripTests
     [InlineData(17, 31)] // Non-macroblock-aligned dimensions exercise edge-replication padding.
     public void Rgb24Gradient_LossyRoundTrip_MeetsPsnrThreshold(int width, int height)
     {
-        using var source = CreateGradientImage(width, height);
+        var source = CreateGradientImage(width, height);
 
-        using var decoded = EncodeThenDecode(source, new WebpEncoderOptions { Lossless = false });
+        var decoded = EncodeThenDecode(source, new WebpEncoderOptions { Lossless = false });
 
         Assert.Equal(PixelFormat.Rgb24, decoded.PixelFormat);
         Assert.Equal(source.Width, decoded.Width);
@@ -167,9 +167,9 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void NoisyImage_LossyRoundTrip_MeetsPsnrThreshold()
     {
-        using var source = CreateNoisyImage(64, 48, seed: 999);
+        var source = CreateNoisyImage(64, 48, seed: 999);
 
-        using var decoded = EncodeThenDecode(source, new WebpEncoderOptions { Lossless = false });
+        var decoded = EncodeThenDecode(source, new WebpEncoderOptions { Lossless = false });
 
         // Uncorrelated per-pixel noise is worst-case content for any intra-only lossy codec (no spatial
         // redundancy for prediction to exploit); measured ~12.6 dB at default quality, asserted with a small
@@ -180,7 +180,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Lossless_DefaultOption_ProducesVp8LChunk()
     {
-        using var source = CreateGradientImage(16, 16);
+        var source = CreateGradientImage(16, 16);
         using var ms = new MemoryStream();
         WebpEncoder.Encode(source, ms, new WebpEncoderOptions());
 
@@ -190,7 +190,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Lossless_False_ProducesVp8Chunk()
     {
-        using var source = CreateGradientImage(16, 16);
+        var source = CreateGradientImage(16, 16);
         using var ms = new MemoryStream();
         WebpEncoder.Encode(source, ms, new WebpEncoderOptions { Lossless = false });
 
@@ -201,14 +201,14 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Lossless_False_OnAlphaBearingImage_FallsBackToVp8LAndPreservesAlphaExactly()
     {
-        using var source = CreateRgbaImage(24, 16, alphaGradient: true);
+        var source = CreateRgbaImage(24, 16, alphaGradient: true);
         using var ms = new MemoryStream();
         WebpEncoder.Encode(source, ms, new WebpEncoderOptions { Lossless = false });
 
         Assert.Equal("VP8L", ReadFirstPayloadChunkFourCc(ms.ToArray()));
 
         ms.Position = 0;
-        using var decoded = WebpDecoder.Decode(ms);
+        var decoded = WebpDecoder.Decode(ms);
         Assert.Equal(PixelFormat.Rgba32, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
@@ -216,7 +216,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Lossless_False_OnFullyOpaqueRgba32Image_StillEncodesLossy()
     {
-        using var source = CreateRgbaImage(24, 16, alphaGradient: false);
+        var source = CreateRgbaImage(24, 16, alphaGradient: false);
         using var ms = new MemoryStream();
         WebpEncoder.Encode(source, ms, new WebpEncoderOptions { Lossless = false });
 
@@ -228,7 +228,7 @@ public class EncodeDecodeRoundTripTests
     [Fact]
     public void Quality_HigherValue_ProducesLargerOrEqualFileSize()
     {
-        using var source = CreateNoisyImage(48, 32, seed: 2024);
+        var source = CreateNoisyImage(48, 32, seed: 2024);
 
         int lowQualitySize = EncodeAndMeasureSize(source, new WebpEncoderOptions { Lossless = false, Quality = 10 });
         int highQualitySize = EncodeAndMeasureSize(source, new WebpEncoderOptions { Lossless = false, Quality = 90 });

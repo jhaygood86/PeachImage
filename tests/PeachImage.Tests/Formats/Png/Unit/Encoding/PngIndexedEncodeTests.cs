@@ -8,12 +8,12 @@ public class PngIndexedEncodeTests
     [Fact]
     public void Auto_LowColorRgb24Source_EncodesIndexedAndRoundTripsExactly()
     {
-        using var source = CreatePaletteImage(width: 16, height: 16, colorCount: 5);
+        var source = CreatePaletteImage(width: 16, height: 16, colorCount: 5);
 
         byte[] encoded = Encode(source, new PngEncoderOptions());
 
         Assert.Equal(3, FindColorType(encoded));
-        using var decoded = PngDecoder.Decode(new MemoryStream(encoded));
+        var decoded = PngDecoder.Decode(new MemoryStream(encoded));
         Assert.Equal(PixelFormat.Rgb24, decoded.PixelFormat);
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
@@ -21,13 +21,13 @@ public class PngIndexedEncodeTests
     [Fact]
     public void Auto_HighColorRgb24Source_FallsBackToTruecolor()
     {
-        using var source = CreateGradientImage(64, 48); // Far more than 256 distinct colors.
+        var source = CreateGradientImage(64, 48); // Far more than 256 distinct colors.
 
         byte[] encoded = Encode(source, new PngEncoderOptions());
 
         Assert.Equal(2, FindColorType(encoded));
         Assert.False(HasChunk(encoded, "PLTE"));
-        using var decoded = PngDecoder.Decode(new MemoryStream(encoded));
+        var decoded = PngDecoder.Decode(new MemoryStream(encoded));
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
 
@@ -35,13 +35,13 @@ public class PngIndexedEncodeTests
     public void Auto_BinaryAlphaLowColorSource_EncodesIndexedWithPaletteTransparency()
     {
         const int transparentPixelIndex = 5;
-        using var source = CreatePaletteImageWithBinaryAlpha(width: 8, height: 8, colorCount: 3, transparentPixelIndex);
+        var source = CreatePaletteImageWithBinaryAlpha(width: 8, height: 8, colorCount: 3, transparentPixelIndex);
 
         byte[] encoded = Encode(source, new PngEncoderOptions());
 
         Assert.Equal(3, FindColorType(encoded));
         Assert.True(HasChunk(encoded, "tRNS"));
-        using var decoded = PngDecoder.Decode(new MemoryStream(encoded));
+        var decoded = PngDecoder.Decode(new MemoryStream(encoded));
         Assert.Equal(PixelFormat.Rgba32, decoded.PixelFormat);
 
         // Indexed transparency (mirroring GIF) reserves one dedicated index purely to mean "transparent",
@@ -67,7 +67,7 @@ public class PngIndexedEncodeTests
     {
         // Every pixel a distinct low-count color, but alpha ramps through intermediate values — indexed
         // color's binary per-entry transparency can't represent that losslessly, so Auto must decline.
-        using var source = Image.Create(8, 8, PixelFormat.Rgba32);
+        var source = Image.Create(8, 8, PixelFormat.Rgba32);
         var span = source.GetPixelSpan();
         for (int i = 0; i < 64; i++)
         {
@@ -80,14 +80,14 @@ public class PngIndexedEncodeTests
         byte[] encoded = Encode(source, new PngEncoderOptions());
 
         Assert.Equal(6, FindColorType(encoded));
-        using var decoded = PngDecoder.Decode(new MemoryStream(encoded));
+        var decoded = PngDecoder.Decode(new MemoryStream(encoded));
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
 
     [Fact]
     public void ColorModeTruecolor_NeverIndexesEvenLowColorSource()
     {
-        using var source = CreatePaletteImage(width: 4, height: 4, colorCount: 2);
+        var source = CreatePaletteImage(width: 4, height: 4, colorCount: 2);
 
         byte[] encoded = Encode(source, new PngEncoderOptions { ColorMode = PngColorMode.Truecolor });
 
@@ -98,7 +98,7 @@ public class PngIndexedEncodeTests
     [Fact]
     public void ColorModeIndexed_QuantizesHighColorSource_ToAtMostMaxColors()
     {
-        using var source = CreateGradientImage(64, 48);
+        var source = CreateGradientImage(64, 48);
 
         byte[] encoded = Encode(source, new PngEncoderOptions { ColorMode = PngColorMode.Indexed, MaxColors = 32 });
 
@@ -107,7 +107,7 @@ public class PngIndexedEncodeTests
         Assert.NotNull(plteLength);
         Assert.True(plteLength / 3 <= 32);
 
-        using var decoded = PngDecoder.Decode(new MemoryStream(encoded));
+        var decoded = PngDecoder.Decode(new MemoryStream(encoded));
         Assert.Equal(source.Width, decoded.Width);
         Assert.Equal(source.Height, decoded.Height);
     }
@@ -115,12 +115,12 @@ public class PngIndexedEncodeTests
     [Fact]
     public void ColorModeIndexed_WithDither_StillDecodesToSameDimensions()
     {
-        using var source = CreateGradientImage(32, 32);
+        var source = CreateGradientImage(32, 32);
 
         byte[] encoded = Encode(source, new PngEncoderOptions { ColorMode = PngColorMode.Indexed, MaxColors = 16, Dither = true });
 
         Assert.Equal(3, FindColorType(encoded));
-        using var decoded = PngDecoder.Decode(new MemoryStream(encoded));
+        var decoded = PngDecoder.Decode(new MemoryStream(encoded));
         Assert.Equal(source.Width, decoded.Width);
         Assert.Equal(source.Height, decoded.Height);
     }
@@ -128,7 +128,7 @@ public class PngIndexedEncodeTests
     [Fact]
     public void TransparentColorOption_SkipsIndexedEncodingEvenWhenLowColor()
     {
-        using var source = CreatePaletteImage(width: 4, height: 4, colorCount: 2);
+        var source = CreatePaletteImage(width: 4, height: 4, colorCount: 2);
 
         byte[] encoded = Encode(source, new PngEncoderOptions { TransparentColor = (source.GetPixelSpan()[0], source.GetPixelSpan()[1], source.GetPixelSpan()[2]) });
 
@@ -145,7 +145,7 @@ public class PngIndexedEncodeTests
     public void Auto_ChoosesSmallestSufficientBitDepthForColorCount(int colorCount, byte expectedBitDepth)
     {
         int side = (int)Math.Ceiling(Math.Sqrt(colorCount));
-        using var source = CreatePaletteImage(side, side, colorCount);
+        var source = CreatePaletteImage(side, side, colorCount);
 
         byte[] encoded = Encode(source, new PngEncoderOptions());
 
@@ -156,12 +156,12 @@ public class PngIndexedEncodeTests
     [Fact]
     public void Interlaced_LowColorSource_StillRoundTripsExactly()
     {
-        using var source = CreatePaletteImage(width: 13, height: 9, colorCount: 6);
+        var source = CreatePaletteImage(width: 13, height: 9, colorCount: 6);
 
         byte[] encoded = Encode(source, new PngEncoderOptions { Interlace = true });
 
         Assert.Equal(3, FindColorType(encoded));
-        using var decoded = PngDecoder.Decode(new MemoryStream(encoded));
+        var decoded = PngDecoder.Decode(new MemoryStream(encoded));
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
 

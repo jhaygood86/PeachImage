@@ -15,6 +15,7 @@ internal sealed class GifFrameCompositor
     private GifDisposalMethod _previousDisposal = GifDisposalMethod.None;
     private (int Left, int Top, int Width, int Height) _previousRect;
     private byte[]? _previousSnapshot;
+    private Image? _lastOutput;
 
     public GifFrameCompositor(int width, int height)
     {
@@ -26,10 +27,14 @@ internal sealed class GifFrameCompositor
     /// <summary>
     /// Applies the previous frame's disposal, draws <paramref name="indices"/> (already de-interlaced, in
     /// display row order) at <paramref name="descriptor"/>'s position using <paramref name="palette"/>, and
-    /// returns a snapshot <see cref="Image"/> of the resulting full canvas.
+    /// returns an <see cref="Image"/> that aliases this compositor's persistent canvas — not a copy. That
+    /// image is invalidated (its pixel accessors throw) the moment the next <see cref="DrawFrame"/> call
+    /// runs; callers must call <see cref="Image.Clone"/> before then if they need to retain the frame.
     /// </summary>
     public Image DrawFrame(GifImageDescriptor descriptor, byte[] indices, byte[] palette, int? transparentIndex, GifDisposalMethod disposal)
     {
+        _lastOutput?.Invalidate();
+
         ApplyPreviousDisposal();
 
         var rect = (descriptor.Left, descriptor.Top, descriptor.Width, descriptor.Height);
@@ -39,12 +44,12 @@ internal sealed class GifFrameCompositor
 
         DrawIndices(rect, indices, palette, transparentIndex);
 
-        var output = Image.Create(_width, _height, PixelFormat.Rgba32);
-        _canvas.CopyTo(output.GetPixelSpan());
+        var output = Image.FromBuffer(_width, _height, PixelFormat.Rgba32, _canvas);
 
         _previousDisposal = disposal;
         _previousRect = rect;
         _previousSnapshot = snapshotForThisFrame;
+        _lastOutput = output;
 
         return output;
     }

@@ -31,18 +31,16 @@ public class Vp8LTruncatedStreamPoolingTests
     {
         // 1. A complete stream whose every pixel is a distinctive non-black value. This is the "previous
         //    image" whose pixels must not resurface; decoding it returns its buffer to the pool, uncleared.
-        using (var poisoning = Vp8LDecoder.Decode(BuildStream(pixelBits: Width * Height)))
-        {
-            var poisoned = poisoning.GetPixelSpan();
-            Assert.Equal(0xAB, poisoned[0]);
-            Assert.Equal(0xCD, poisoned[1]);
-            Assert.Equal(0xEF, poisoned[2]);
-        }
+        var poisoning = Vp8LDecoder.Decode(BuildStream(pixelBits: Width * Height));
+        var poisoned = poisoning.GetPixelSpan();
+        Assert.Equal(0xAB, poisoned[0]);
+        Assert.Equal(0xCD, poisoned[1]);
+        Assert.Equal(0xEF, poisoned[2]);
 
         // 2. The same dimensions, but the pixel stream runs out after a quarter of the pixels. The decoder
         //    stops early by design; what matters is what it leaves behind in the rest of the buffer.
         int decodedPixels = (Width * Height) / 4;
-        using var truncated = Vp8LDecoder.Decode(BuildStream(pixelBits: decodedPixels));
+        var truncated = Vp8LDecoder.Decode(BuildStream(pixelBits: decodedPixels));
 
         Assert.Equal(Width, truncated.Width);
         Assert.Equal(Height, truncated.Height);

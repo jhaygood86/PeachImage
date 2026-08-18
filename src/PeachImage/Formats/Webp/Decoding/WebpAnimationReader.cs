@@ -115,11 +115,10 @@ internal static class WebpAnimationReader
         var decoded = WebpBitstreamDecoder.Decode(format, bitstreamData, alphaData);
         if (decoded.Width != chunk.Width || decoded.Height != chunk.Height)
         {
-            decoded.Dispose();
             throw new WebpDecodingException($"ANMF frame's decoded size {decoded.Width}x{decoded.Height} does not match its declared size {chunk.Width}x{chunk.Height}.");
         }
 
-        using var rgba = PixelFormatConverter.ConvertIfNeeded(decoded, PixelFormat.Rgba32);
+        var rgba = PixelFormatConverter.ConvertIfNeeded(decoded, PixelFormat.Rgba32);
         var composited = compositor.DrawFrame((chunk.X, chunk.Y, chunk.Width, chunk.Height), rgba.GetPixelSpan(), chunk.Blend, chunk.DisposeToBackground);
         return new AnimatedImageFrame(composited, chunk.Duration, chunk.DisposeToBackground ? FrameDisposalMethod.RestoreToBackground : FrameDisposalMethod.DoNotDispose);
     }

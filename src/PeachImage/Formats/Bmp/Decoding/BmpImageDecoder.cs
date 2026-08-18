@@ -19,21 +19,13 @@ internal static class BmpImageDecoder
         var pixelFormat = hasAlpha ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
         var image = Image.Create(header.Width, header.Height, pixelFormat);
 
-        try
+        if (header.Compression is BmpCompression.Rle8 or BmpCompression.Rle4)
         {
-            if (header.Compression is BmpCompression.Rle8 or BmpCompression.Rle4)
-            {
-                DecodeRlePixels(stream, header, palette, image);
-            }
-            else
-            {
-                DecodeUncompressedPixels(stream, header, palette, isIndexed, hasAlpha, image);
-            }
+            DecodeRlePixels(stream, header, palette, image);
         }
-        catch
+        else
         {
-            image.Dispose();
-            throw;
+            DecodeUncompressedPixels(stream, header, palette, isIndexed, hasAlpha, image);
         }
 
         return image;
