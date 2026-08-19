@@ -65,6 +65,7 @@ internal static class CorpusFetcher
         {
             var request = new HttpRequestMessage(HttpMethod.Get, treeUrl);
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+            GitHubAuth.Apply(request);
             return request;
         }, cancellationToken).ConfigureAwait(false);
 

@@ -1,3 +1,5 @@
+using PeachImage.Tests.Internal;
+
 namespace PeachImage.Tests.Formats.Png.Corpus;
 
 /// <summary>
@@ -9,20 +11,22 @@ namespace PeachImage.Tests.Formats.Png.Corpus;
 /// on decode, confirmed empirically against this same corpus) is handled directly inside
 /// <see cref="PngCorpusAssertions"/> by skipping the pixel-fidelity comparison for any decode that
 /// produces an alpha channel, rather than needing a separate corpus bucket for it.
-/// Each returns an empty set (rather than throwing) when the corpus isn't available, so corpus-driven
-/// test classes simply report zero cases instead of failing; <see cref="CorpusAvailabilityTests"/> is
-/// what makes that visible.
+/// Each yields a single <see cref="CorpusSkip"/> row (rather than throwing, or returning zero rows —
+/// see <see cref="CorpusSkip"/> for why) when the corpus isn't available, so corpus-driven test classes
+/// report a genuine skip instead of failing; <see cref="CorpusAvailabilityTests"/> makes the same signal
+/// visible for its own plain <c>[Fact]</c>.
 /// </summary>
 internal static class CorpusFileSource
 {
-    public static IEnumerable<object[]> ValidFiles() => Bucket(PngSuiteBucket.Valid);
+    public static IEnumerable<TheoryDataRow<string>> ValidFiles() => Bucket(PngSuiteBucket.Valid);
 
-    public static IEnumerable<object[]> InvalidFiles() => Bucket(PngSuiteBucket.Invalid);
+    public static IEnumerable<TheoryDataRow<string>> InvalidFiles() => Bucket(PngSuiteBucket.Invalid);
 
-    private static IEnumerable<object[]> Bucket(PngSuiteBucket target)
+    private static IEnumerable<TheoryDataRow<string>> Bucket(PngSuiteBucket target)
     {
         if (!CorpusFixture.IsAvailable || !Directory.Exists(CorpusPaths.PngSuiteRoot))
         {
+            yield return CorpusSkip.Row("External PNG test corpus (PngSuite) is not available (no network, or PEACHIMAGE_SKIP_CORPUS_FETCH is set).");
             yield break;
         }
 
@@ -30,7 +34,7 @@ internal static class CorpusFileSource
         {
             if (PngSuiteFileName.Classify(file) == target)
             {
-                yield return [file];
+                yield return new TheoryDataRow<string>(file);
             }
         }
     }
