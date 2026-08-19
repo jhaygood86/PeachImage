@@ -98,11 +98,11 @@ SkiaSharp's encoder doesn't support BMP output, so encode has no SkiaSharp basel
 
 | Scenario | PeachImage | SkiaSharp | Ratio |
 |---|---:|---:|---:|
-| 24bpp Truecolor | 18.31 ms | 16.89 ms | 1.08× |
-| 32bpp RGBA | 24.59 ms | 21.99 ms | 1.12× |
-| 48bpp (16-bit) Truecolor | 7.85 ms | 3.40 ms | 2.31× |
-| 8bpp Grayscale | 10.31 ms | 9.34 ms | 1.10× |
-| Interlaced (Adam7) Truecolor | 29.19 ms | 27.60 ms | 1.06× |
+| 24bpp Truecolor | 18.35 ms | 16.72 ms | 1.10× |
+| 32bpp RGBA | 23.36 ms | 22.10 ms | 1.06× |
+| 48bpp (16-bit) Truecolor | 4.65 ms | 3.41 ms | 1.36× |
+| 8bpp Grayscale | 8.68 ms | 9.41 ms | **0.92×** |
+| Interlaced (Adam7) Truecolor | 26.13 ms | 27.21 ms | **0.96×** |
 
 ### Encode
 
@@ -227,13 +227,14 @@ PeachImage is roughly **2.12×** `ffmpeg`'s process-spawn-inclusive time on the 
 | JPEG | 1.16×–1.37× | 1.18×–1.35× |
 | BMP | 0.38×–1.04× | no baseline (PeachImage-only) |
 | GIF | **2.08×–6.77× (animated: 6.77×, static: 2.08×–3.29×)** | no SkiaSharp baseline (PeachImage-only) |
-| PNG | 1.06×–2.33× | 0.66×–1.15× |
+| PNG | 0.92×–1.36× | 0.66×–1.15× |
 | WebP | 0.27×–2.17× (animated: **0.27×**, static: 1.12×–2.17×) | 1.01×–1.44× lossless (0.16× small-image outlier), 0.88× lossy |
 | AVIF | ~2.12× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented (fixed 8x8 blocks, no partition-tree RDO yet); throughput not yet measured here |
 
-BMP is fully within target and often faster. PNG meets or is close to target for every 8-bit scenario
-and beats SkiaSharp outright on encode for truecolor/RGBA; its remaining gap is concentrated in the
-16-bit decode path. JPEG has the largest gap on both sides among the mature formats. WebP's static
+BMP is fully within target and often faster. PNG is within target on every scenario and beats
+SkiaSharp outright on 8bpp grayscale/interlaced decode and on truecolor/RGBA encode; its remaining
+gap is the 16-bit decode path, now 1.36× (down from 2.3×). JPEG has the largest gap on both sides
+among the mature formats. WebP's static
 decode and AVIF are the furthest from the 10% target on large images, but WebP's *animated* decode is
 actually the single best result in this document (SkiaSharp's fixed per-frame native marshaling
 overhead losing badly to PeachImage's managed decode loop). GIF's animated decode is the worst result

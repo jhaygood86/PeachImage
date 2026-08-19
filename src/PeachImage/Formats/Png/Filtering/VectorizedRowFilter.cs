@@ -6,15 +6,20 @@ namespace PeachImage.Formats.Png.Filtering;
 /// <summary>
 /// SIMD (portable-width <see cref="Vector{T}"/>) implementations of PNG row filtering. Encode-side
 /// (<c>Filter*</c>) covers all 5 filter types since none has a cross-byte dependency when encoding — the
-/// raw pixel row is already fully known. Decode-side (<c>Unfilter*</c>) covers only <see cref="PngFilterType.Up"/>:
-/// <see cref="PngFilterType.Sub"/>/<see cref="PngFilterType.Average"/>/<see cref="PngFilterType.Paeth"/>
-/// defiltering has a genuine same-row sequential dependency (<c>recon[x]</c> reads the just-reconstructed
-/// <c>recon[x-bpp]</c>), and Average/Paeth are additionally *nonlinear* recurrences (floor-division,
-/// min-distance selection) that don't reduce to a parallel-prefix pattern the way a pure running sum
-/// would — see <see cref="RowFilter"/>'s scalar decode path for those. A single portable width is used
-/// (not a hand-dispatched Vector128/Vector256 pair like Jpeg's DCT/color-conversion kernels) to keep this
-/// correctness-critical code simpler to reason about and verify; the JIT still selects the best available
-/// hardware width via <see cref="Vector{T}.Count"/>.
+/// raw pixel row is already fully known, so a full vector-width chunk can be processed per step.
+/// Decode-side (<c>Unfilter*</c>) is different: <see cref="PngFilterType.Up"/> has no same-row dependency
+/// at all and is chunk-vectorized the same way encode is. <see cref="PngFilterType.Sub"/> remains scalar
+/// (see <see cref="RowFilter"/>'s class doc — issue #34 profiling found it isn't worth the risk in
+/// practice). <see cref="PngFilterType.Average"/>/<see cref="PngFilterType.Paeth"/> have a genuine
+/// same-row sequential dependency (<c>recon[x]</c> reads the just-reconstructed <c>recon[x-bpp]</c>) and
+/// are additionally *nonlinear* recurrences (floor-division, min-distance selection) that don't reduce to
+/// a chunk-at-a-time parallel-prefix pattern — <see cref="UnfilterAverage"/>/<see cref="UnfilterPaeth"/>
+/// instead vectorize at the per-pixel-step granularity: the sequential step count is unchanged (still one
+/// step per pixel), but each step's <c>bpp</c>-byte predictor math runs as one vector op with the previous
+/// step's result carried in a register, instead of <c>bpp</c> separate scalar calls — see their own doc
+/// comments. A single portable width is used (not a hand-dispatched Vector128/Vector256 pair like Jpeg's
+/// DCT/color-conversion kernels) to keep this correctness-critical code simpler to reason about and
+/// verify; the JIT still selects the best available hardware width via <see cref="Vector{T}.Count"/>.
 /// </summary>
 internal static class VectorizedRowFilter
 {
@@ -144,6 +149,119 @@ internal static class VectorizedRowFilter
         for (; x < row.Length; x++)
         {
             row[x] = (byte)(row[x] + previousRow[x]);
+        }
+    }
+
+    /// <summary>
+    /// Decode-side Average unfiltering. Unlike <see cref="FilterAverage"/> (encode), this can't process a
+    /// full <see cref="Vector{T}"/>-width chunk per step: <c>recon[x]</c> reads the just-reconstructed
+    /// <c>recon[x-bpp]</c>, and floor((a+b)/2) is not affine in <c>a</c> (its rounding depends on <c>a</c>'s
+    /// parity), so unlike <see cref="PngFilterType.Sub"/>'s pure running sum, this recurrence has no
+    /// closed-form way to combine multiple steps into one vector op ahead of time -- see <see cref="RowFilter"/>'s class doc.
+    /// What *is* available: <c>previousRow</c> has no such dependency (it's already fully resolved), so
+    /// each pixel (<c>bpp</c> bytes)'s predictor math can be done as one vector op instead of <c>bpp</c>
+    /// separate scalar calls, with the just-computed result kept in a register and fed directly into the
+    /// next pixel-step as its <c>a</c> input (no reload from memory, no per-byte branch). The sequential
+    /// step count is unchanged (still one step per pixel), but replacing <c>bpp</c> scalar iterations'
+    /// worth of loop/branch overhead with one vector op per step measured as a real win even at
+    /// <c>bpp</c> = 1 (single-channel 8-bit grayscale), not just the larger multi-channel/16-bit cases.
+    /// A full <see cref="Vector{T}"/>-width load is used per step (not just <c>bpp</c> bytes) purely to
+    /// reuse the same load/store shape as the rest of this file; the lanes beyond <c>bpp</c> are garbage
+    /// that's discarded every step (byte-wise and/xor/shift/add have no cross-lane carry, so garbage never
+    /// contaminates the low <c>bpp</c> lanes actually stored back).
+    /// </summary>
+    public static void UnfilterAverage(Span<byte> row, ReadOnlySpan<byte> previousRow, int bpp)
+    {
+        bool hasPrev = !previousRow.IsEmpty;
+        int n = Vector<byte>.Count;
+
+        int x = 0;
+        for (; x < bpp && x < row.Length; x++)
+        {
+            int b = hasPrev ? previousRow[x] : 0;
+            row[x] = (byte)(row[x] + (b / 2));
+        }
+
+        if (x + n <= row.Length)
+        {
+            var aVec = Vector.LoadUnsafe(ref row[x - bpp]);
+
+            for (; x + n <= row.Length; x += bpp)
+            {
+                var bVec = hasPrev ? Vector.LoadUnsafe(ref MemoryMarshal.GetReference(previousRow.Slice(x, n))) : Vector<byte>.Zero;
+
+                // floor((a+b)/2) without widening/overflow, same identity as FilterAverage's encode-side use.
+                var avg = (aVec & bVec) + Vector.ShiftRightLogical(aVec ^ bVec, 1);
+
+                var filtVec = Vector.LoadUnsafe(ref row[x]);
+                var result = filtVec + avg;
+
+                for (int i = 0; i < bpp; i++)
+                {
+                    row[x + i] = result[i];
+                }
+
+                aVec = result;
+            }
+        }
+
+        for (; x < row.Length; x++)
+        {
+            int a = row[x - bpp];
+            int b = hasPrev ? previousRow[x] : 0;
+            row[x] = (byte)(row[x] + ((a + b) / 2));
+        }
+    }
+
+    /// <summary>
+    /// Decode-side Paeth unfiltering. Same per-pixel-step technique as <see cref="UnfilterAverage"/> (see
+    /// its remarks) -- the min-distance predictor selection is even less amenable to a closed-form multi-step
+    /// combination than Average's floor-division, so this keeps the same one-step-per-pixel sequential
+    /// order and vectorizes only each step's <c>bpp</c>-wide predictor math, reusing <see cref="PaethVector"/>
+    /// (the same kernel <see cref="FilterPaeth"/> uses on encode, where all three inputs are already fully
+    /// resolved) with the just-reconstructed previous pixel carried in a register as its <c>a</c> input.
+    /// </summary>
+    public static void UnfilterPaeth(Span<byte> row, ReadOnlySpan<byte> previousRow, int bpp)
+    {
+        bool hasPrev = !previousRow.IsEmpty;
+        int n = Vector<byte>.Count;
+
+        int x = 0;
+        for (; x < bpp && x < row.Length; x++)
+        {
+            byte b = hasPrev ? previousRow[x] : (byte)0;
+            row[x] = (byte)(row[x] + PaethPredictor.Predict(0, b, 0));
+        }
+
+        if (x + n <= row.Length)
+        {
+            var aVec = Vector.LoadUnsafe(ref row[x - bpp]);
+
+            for (; x + n <= row.Length; x += bpp)
+            {
+                var bVec = hasPrev ? Vector.LoadUnsafe(ref MemoryMarshal.GetReference(previousRow.Slice(x, n))) : Vector<byte>.Zero;
+                var cVec = hasPrev ? Vector.LoadUnsafe(ref MemoryMarshal.GetReference(previousRow.Slice(x - bpp, n))) : Vector<byte>.Zero;
+
+                var predictor = PaethVector(aVec, bVec, cVec);
+
+                var filtVec = Vector.LoadUnsafe(ref row[x]);
+                var result = filtVec + predictor;
+
+                for (int i = 0; i < bpp; i++)
+                {
+                    row[x + i] = result[i];
+                }
+
+                aVec = result;
+            }
+        }
+
+        for (; x < row.Length; x++)
+        {
+            byte a = row[x - bpp];
+            byte b = hasPrev ? previousRow[x] : (byte)0;
+            byte c = hasPrev ? previousRow[x - bpp] : (byte)0;
+            row[x] = (byte)(row[x] + PaethPredictor.Predict(a, b, c));
         }
     }
 

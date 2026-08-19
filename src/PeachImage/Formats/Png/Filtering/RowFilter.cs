@@ -8,9 +8,15 @@ namespace PeachImage.Formats.Png.Filtering;
 /// filter types — the raw pixel row is already fully known — so all 5 dispatch to
 /// <see cref="VectorizedRowFilter"/> when worthwhile. <see cref="Unfilter"/> (decode) has a genuine
 /// same-row sequential dependency for Sub/Average/Paeth (each byte's reconstruction reads the
-/// just-reconstructed <c>recon[x-bpp]</c>), and Average/Paeth are additionally nonlinear recurrences
-/// that don't reduce to a parallel-prefix pattern — only <see cref="PngFilterType.Up"/> (which reads
-/// only the already-fully-resolved previous row, no same-row dependency at all) is vectorized on decode.
+/// just-reconstructed <c>recon[x-bpp]</c>): <see cref="PngFilterType.Up"/> has no such dependency at all
+/// (it only reads the already-fully-resolved previous row) and is fully vectorized; Average/Paeth are
+/// additionally nonlinear recurrences that don't reduce to <see cref="PngFilterType.Sub"/>'s parallel-prefix
+/// pattern, but are vectorized at the per-pixel-step granularity (see
+/// <see cref="VectorizedRowFilter.UnfilterAverage"/>/<see cref="VectorizedRowFilter.UnfilterPaeth"/>) —
+/// issue #34: profiling found Sub is ~0% of real decode time across this repo's benchmark corpus (real
+/// encoders rarely pick it for photographic content) while Average/Paeth are 13%–79%, so Sub decode
+/// remains scalar-only as not worth the risk, while Average/Paeth's per-pixel-step vectorization measured
+/// as a real win at every <c>bpp</c> tested (1 through 8), not just larger multi-channel/16-bit ones.
 /// </summary>
 internal static class RowFilter
 {
@@ -54,6 +60,12 @@ internal static class RowFilter
                 return;
 
             case PngFilterType.Average:
+                if (VectorizedRowFilter.IsWorthwhile(row.Length))
+                {
+                    VectorizedRowFilter.UnfilterAverage(row, previousRow, bpp);
+                    return;
+                }
+
                 for (int x = 0; x < row.Length; x++)
                 {
                     int a = x >= bpp ? row[x - bpp] : 0;
@@ -64,6 +76,12 @@ internal static class RowFilter
                 return;
 
             case PngFilterType.Paeth:
+                if (VectorizedRowFilter.IsWorthwhile(row.Length))
+                {
+                    VectorizedRowFilter.UnfilterPaeth(row, previousRow, bpp);
+                    return;
+                }
+
                 for (int x = 0; x < row.Length; x++)
                 {
                     byte a = x >= bpp ? row[x - bpp] : (byte)0;
