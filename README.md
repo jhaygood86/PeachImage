@@ -94,6 +94,29 @@ Span<byte> pixels = image.GetPixelSpan();
 Span<byte> firstRow = image.GetRowSpan(0);
 ```
 
+Bytes already in memory (e.g. a buffered upload) load directly — no need to wrap them in a `MemoryStream`
+first; a `byte[]` converts implicitly to `ReadOnlySpan<byte>`:
+
+```csharp
+using PeachImage;
+
+byte[] uploadedBytes = await ReadUploadIntoMemoryAsync();
+var image = Image.Load(uploadedBytes);
+
+// Encode straight to a byte array instead of a Stream.
+byte[] jpegBytes = image.Encode("jpeg", new JpegEncoderOptions { Quality = 85 });
+```
+
+`LoadAsync`/`SaveAsync` exist for async I/O call paths. Decoding/encoding themselves are CPU-bound, not
+I/O-bound, so only the actual stream/file I/O is awaited — same as the sync methods otherwise:
+
+```csharp
+using PeachImage;
+
+var image = await Image.LoadAsync(uploadedBytes); // ReadOnlyMemory<byte> overload
+await image.SaveAsync("resaved.png");
+```
+
 ### Animated images
 
 Multi-frame formats (GIF, and WebP for decode — animated WebP encode isn't implemented yet) use
