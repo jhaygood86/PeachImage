@@ -9,7 +9,7 @@
     <AssemblyName>PeachImage</AssemblyName>
     <Description>Pure .NET image format readers and writers for commonly used image formats on the web.</Description>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <PackageTags>image;jpeg;png;bmp;gif;codec;imaging</PackageTags>
+    <PackageTags>image;jpeg;png;bmp;gif;webp;avif;codec;imaging;resize</PackageTags>
     <PackageProjectUrl>https://github.com/jhaygood86/PeachImage</PackageProjectUrl>
     <RepositoryUrl>https://github.com/jhaygood86/PeachImage</RepositoryUrl>
     <RepositoryType>git</RepositoryType>

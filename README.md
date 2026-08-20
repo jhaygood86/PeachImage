@@ -18,17 +18,22 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   truecolor+alpha) at every valid bit depth (1/2/4/8/16 — including via `Gray16`/`Rgb48`/`Rgba64`
   pixel formats), Adam7 interlacing, palette + `tRNS` transparency (both per-entry and single-color-key),
   optional opt-in gamma correction (`PngDecoderOptions.ScreenGamma`), and the common ancillary chunks
-  (`gAMA`/`cHRM`/`sRGB`/`iCCP`/`pHYs`/`tEXt`/`zTXt`/`iTXt`/`tIME`/`bKGD`). Encoding doesn't yet build an
-  indexed palette from an arbitrary truecolor source — non-palette sources always encode as
-  grayscale/truecolor(+alpha).
+  (`gAMA`/`cHRM`/`sRGB`/`iCCP`/`pHYs`/`tEXt`/`zTXt`/`iTXt`/`tIME`/`bKGD`). Encoding can build an indexed
+  palette automatically (`PngEncoderOptions.ColorMode`, default `Auto`): lossless whenever the source has
+  at most `MaxColors` (default 256) distinct opaque colors and binary alpha, otherwise falling back to
+  grayscale/truecolor(+alpha) unless `ColorMode = Indexed` forces palette output via median-cut
+  quantization with optional Floyd-Steinberg dithering (`Dither`) — the same quantizer GIF encoding uses.
 - **GIF**: decode (GIF87a/GIF89a, interlacing, transparency, multi-frame animation with per-frame
   disposal methods and the NETSCAPE2.0 loop count via `AnimatedImage.Load`) and encode
   (median-cut palette quantization, optional Floyd-Steinberg dithering, animation) are implemented.
 - **WebP**: decode is implemented for both of WebP's bitstream codecs — VP8 (lossy) and VP8L
-  (lossless) — including alpha (`ALPH` chunk / VP8L's own alpha) in the RIFF "simple" and "extended"
-  (non-animated) container formats. Encode currently produces the lossless (VP8L) bitstream only —
-  predictor-transform selection, palette/color-indexing detection, subtract-green, and a color cache
-  are all supported. Animated WebP and VP8 (lossy) encode are not yet implemented.
+  (lossless) — including alpha (`ALPH` chunk / VP8L's own alpha) and animation (via `AnimatedImage.Load`,
+  including the loop count) in the RIFF "simple" and "extended" container formats. Encode supports both
+  bitstreams: lossless (VP8L, the default) with predictor-transform selection, palette/color-indexing
+  detection, subtract-green, and a color cache; and lossy (VP8, opt in via `WebpEncoderOptions { Lossless
+  = false }`) with quality-driven quantization. Alpha-bearing sources always encode as VP8L regardless of
+  `Lossless`, since lossy WebP's alpha channel isn't implemented yet. Animated WebP encode is not yet
+  implemented (decode-only for animation).
 - **AVIF**: decode is implemented for baseline still images — intra-frame AV1, the full in-loop filter
   chain (deblocking, CDEF, loop restoration), HEIF `grid` composite images, alpha via the auxiliary-item
   mechanism, and both 8-bit and 10-bit depth. Animated AVIF, film grain synthesis, gain maps, 12-bit
@@ -91,7 +96,8 @@ Span<byte> firstRow = image.GetRowSpan(0);
 
 ### Animated images
 
-Multi-frame formats (GIF today) use `AnimatedImage` instead, with the same load/save shape:
+Multi-frame formats (GIF, and WebP for decode — animated WebP encode isn't implemented yet) use
+`AnimatedImage` instead, with the same load/save shape:
 
 ```csharp
 using PeachImage;
@@ -106,6 +112,37 @@ foreach (AnimatedImageFrame frame in animation.Frames)
 
 using var output = File.Create("resaved.gif");
 animation.Save(output, "gif", new GifEncoderOptions { MaxColors = 128, Dither = true });
+```
+
+### Resizing
+
+`Image.Resize`/`AnimatedImage.Resize` support 15 resampling filters via `ResamplingFilter` — `Bicubic`
+is the default; also available: `Box`, `CatmullRom`, `Hermite`, `Lanczos2`/`Lanczos3`/`Lanczos5`/`Lanczos8`,
+`MitchellNetravali`, `NearestNeighbor`, `Robidoux`, `RobidouxSharp`, `Spline`, `Bilinear`, and `Welch`.
+
+```csharp
+using PeachImage;
+
+var image = Image.Load("photo.jpg");
+
+// Bicubic by default.
+var thumbnail = image.Resize(200, 150);
+
+// Or pick a specific filter.
+var sharpened = image.Resize(200, 150, new ResizeOptions { Filter = ResamplingFilter.Lanczos3 });
+```
+
+`AnimatedImage.Resize` resizes every frame — lazily, as `Frames` is enumerated — preserving each frame's
+duration and disposal method:
+
+```csharp
+using PeachImage;
+
+var animation = AnimatedImage.Load("clip.gif");
+var resized = animation.Resize(160, 120, new ResizeOptions { Filter = ResamplingFilter.MitchellNetravali });
+
+using var output = File.Create("resized.gif");
+resized.Save(output, "gif");
 ```
 
 ## Building & testing
