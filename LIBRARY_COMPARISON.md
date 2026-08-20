@@ -2,8 +2,8 @@
 
 Performance comparison of PeachImage against [SkiaSharp](https://github.com/mono/SkiaSharp) (a
 mature, real-world, native-backed image library) for JPEG, BMP, GIF, PNG, and WebP decode/encode
-throughput. SkiaSharp is used as a single consistent baseline across all formats — it's also the
-corpus tests' differential oracle (see the [README](README.md)).
+throughput, plus `Image.Resize`. SkiaSharp is used as a single consistent baseline across all formats
+— it's also the corpus tests' differential oracle (see the [README](README.md)).
 
 **Target**: PeachImage's Mean within 10% of SkiaSharp's Mean (`Ratio` column ≤ ~1.10) for every
 scenario. Ratios below 1.00 mean PeachImage is *faster* than SkiaSharp.
@@ -35,6 +35,15 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 The static (non-animated) GIF decode scenarios in `GifDecodeBenchmarks.cs` (low-color graphic,
 dithered photographic) were run with the same `*GifDecodeBenchmarks*` filter as the GIF section's
 `--filter "*"` command above.
+
+The Resize section's numbers were collected separately, with a reduced iteration count (3 warmup + 8
+iterations rather than the 20-iteration job above) given how many scenarios `ResizeBenchmarks.cs`
+covers — treat them with correspondingly more skepticism than the rest of this document per the noise
+floor note below:
+
+```bash
+dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*ResizeBenchmarks*" --warmupCount 3 --iterationCount 8 --inProcess --affinity 15
+```
 
 **Environment**: BenchmarkDotNet v0.15.8, Windows 11, Intel Core i9-14900K (24 physical / 32 logical
 cores), .NET 10.0.11 (SDK 10.0.400), X64 RyuJIT x86-64-v3, AVX2-capable. PeachImage also targets
@@ -201,6 +210,115 @@ The allocation gap (52 MB vs. SkiaSharp's ~1 KB) comes from unpooled per-macrobl
 allocations (a fresh `short[16]`/`short[16][]` per block); libwebp's encoder works in unmanaged
 memory throughout, so its managed allocation is near zero regardless of image size.
 
+## Resize
+
+`Image.Resize` vs. `SKBitmap.Resize`, for every `ResamplingFilter` that has a same-algorithm SkiaSharp
+equivalent — the cubic filters via `SKSamplingOptions(new SKCubicResampler(B, C))` with the exact same
+`(B, C)` constants `CubicBcKernel` uses, plus Nearest and Linear. Both directions are measured on the same
+1920×1080 photographic source: a 4× downscale (480×270, thumbnail generation) and a 2× upscale (3840×2160).
+Box, Lanczos2/3/5/8, and Welch have no SkiaSharp equivalent (Skia's public resize API exposes no
+windowed-sinc or box option), so those are PeachImage-only rows, the same pattern BMP/GIF encode use above
+for gaps in SkiaSharp's own API surface.
+
+### Downscale (1920×1080 → 480×270)
+
+| Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
+|---|---:|---:|---:|---:|
+| NearestNeighbor | 0.41 ms | 0.32 ms | 1.29× | 389 KB |
+| Bilinear | 4.25 ms | 1.19 ms | **3.58×** | 446 KB |
+| Bicubic | 5.11 ms | 3.68 ms | **1.39×** | 470 KB |
+| MitchellNetravali | 6.57 ms | 5.14 ms | 1.28× | 471 KB |
+| Hermite | 5.07 ms | 3.84 ms | **1.32×** | 470 KB |
+| Spline | 5.12 ms | 3.55 ms | **1.44×** | 470 KB |
+| Robidoux | 5.25 ms | 3.74 ms | **1.40×** | 470 KB |
+| RobidouxSharp | 5.16 ms | 3.68 ms | **1.40×** | 470 KB |
+
+### Upscale (1920×1080 → 3840×2160)
+
+| Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
+|---|---:|---:|---:|---:|
+| NearestNeighbor | 22.92 ms | 16.27 ms | 1.41× | 24.9 MB |
+| Bilinear | 41.93 ms | 70.98 ms | **0.59×** | 25.1 MB |
+| Bicubic | 49.79 ms | 230.46 ms | **0.22×** | 25.1 MB |
+| MitchellNetravali | 45.20 ms | 243.44 ms | **0.19×** | 25.1 MB |
+| Hermite | 46.32 ms | 240.13 ms | **0.19×** | 25.1 MB |
+| Spline | 48.41 ms | 225.21 ms | **0.21×** | 25.1 MB |
+| Robidoux | 48.26 ms | 229.43 ms | **0.21×** | 25.1 MB |
+| RobidouxSharp | 49.88 ms | 227.89 ms | **0.22×** | 25.1 MB |
+
+Downscale and upscale pull in opposite directions. On downscale, PeachImage widens the filter's radius by
+the scale factor before convolving (the standard "scaled filter" anti-aliasing technique — see
+`ResamplingWeightMap`), which is real extra work SkiaSharp's default (non-mipmapped) `SKBitmap.Resize` does
+not do; the more expensive that widened window gets per destination pixel (cubic family) or the cheaper
+SkiaSharp's own base case already is (Bilinear, radius 1 either way), the wider the gap. On upscale, that
+widening never triggers (the window is just the kernel's native radius), so PeachImage's throughput for the
+cubic family beats SkiaSharp outright — SkiaSharp appears to pay a comparatively larger fixed cost per
+output pixel there. NearestNeighbor, doing no windowed convolution either way, stays closest to parity in
+both directions.
+
+Four perf/allocation changes landed after this comparison was first written, all covered by
+`ResizeSkiaSharpQualityTests`/the resize unit suite so none change observable output — cumulatively, roughly
+halving the downscale ratio (e.g. Bicubic 3.42× → 1.39×) and taking the cubic-family upscale ratio well
+under half of where it started (e.g. Bicubic 0.47× → 0.22×):
+
+- **Pooled convolution buffers.** `ImageResizer` rents its intermediate `float[]` buffers from
+  `ArrayPool<float>.Shared` instead of allocating fresh ones per call, and `AnimatedImage.Resize` builds each
+  axis's `ResamplingWeightMap` once and reuses it across every frame rather than rebuilding it per frame (see
+  `AnimatedImage.ResizeFrames`). Allocation dropped from 44.0 MB (480×270 downscale) / 257 MB (3840×2160
+  upscale) to 389 KB–471 KB / 24.9–25.1 MB — a ~100× reduction downscale, ~10× upscale. What's left is
+  essentially the unavoidable output `Image`'s own pixel buffer (24.9 MB for a 3840×2160 24bpp image), not
+  pooling waste.
+- **Flat weight-map storage.** `ResamplingWeightMap.Weights` is one contiguous `float[]` (sliced per
+  destination index via `GetWeights`) instead of a `float[][]` with one small array per destination index —
+  up to thousands fewer allocations per weight map, and better cache locality while convolving.
+- **Parallelized rows, everywhere in the pipeline.** Both convolution passes' per-row loop, plus the
+  byte/ushort↔float boundary conversions (`ImageResizer.ToFloatBuffer`/`FromFloatBuffer`), now run through
+  `ResamplingParallel.For`, which switches from a sequential loop to `Parallel.For` above 64 rows (small
+  images, including this repo's many tiny-image unit tests, stay sequential — the threading overhead isn't
+  worth it below that). The boundary conversions read/write through `Image.PixelMemory` (`Memory<byte>`)
+  rather than `Image.GetPixelSpan()` (`Span<byte>`) specifically because a `Span<T>` can't be captured by the
+  closure `Parallel.For` requires — see `IResamplingConvolver`'s remarks for the same constraint on the
+  convolvers themselves. One non-obvious lesson from getting this right: **`Parallel.For`'s default degree of
+  parallelism doesn't respect the machine's actual usable core count under CPU-affinity restriction** — this
+  repo's own `--affinity <mask>` benchmarking convention (see "How to reproduce" below) pins the process to a
+  handful of cores for reproducibility, and left to its default heuristic, `Parallel.For` still tried to
+  schedule work as if all 32 logical cores were available, causing enough thread oversubscription that
+  several filters' "parallel" upscale path measured *slower* than the sequential code it replaced. Explicitly
+  capping `ParallelOptions.MaxDegreeOfParallelism` at `Environment.ProcessorCount` (which does correctly
+  reflect the affinity-restricted count) fixed it — see `ResamplingParallel`'s remarks.
+- **Pass-order selection.** The two convolution passes can run in either order (horizontal-then-vertical or
+  vertical-then-horizontal) and reach the same result — `ImageResizer.ResizeWithWeights` now picks whichever
+  order produces the smaller intermediate buffer instead of always running horizontal first, so the more
+  expensive second pass has less carried-over data to process on any resize whose two axes scale by
+  meaningfully different amounts.
+
+### PeachImage only — no SkiaSharp baseline
+
+| Scenario | Downscale | Upscale |
+|---|---:|---:|
+| Box | 4.00 ms | 44.49 ms |
+| Welch | 4.19 ms | 47.45 ms |
+| Lanczos2 | 6.97 ms | 47.78 ms |
+| Lanczos3 | 6.96 ms | 55.99 ms |
+| Lanczos5 | 9.50 ms | 59.74 ms |
+| Lanczos8 | 18.33 ms | 78.72 ms |
+
+### SIMD convolver tier (Vector128 vs. Vector256)
+
+Isolated per-pass comparison, bypassing `ResamplingConvolverSelector` and `Image.Resize` entirely (same
+approach as the JPEG chroma-upsampling tier comparison above), on the same downscale's horizontal and
+vertical passes (both now parallelized, so these are faster in absolute terms than the same comparison
+measured before parallelization, not just relative to each other):
+
+| Pass | Vector128 | Vector256 | Ratio |
+|---|---:|---:|---:|
+| Horizontal | 2.301 ms | 2.377 ms | 1.03× |
+| Vertical | 0.726 ms | 0.386 ms | **0.53×** |
+
+Matches the design intent: the vertical pass's genuine 8-lane width shows a consistent ~35-47% speedup
+across runs; the horizontal pass (which delegates straight to the Vector128 tier — see
+`Vector256ResamplingConvolver`'s remarks) shows no consistent difference, run-to-run noise aside.
+
 ## AVIF
 
 Decode-only, for baseline still images (single or grid-composited item, 8/10-bit, with or without
@@ -230,6 +348,7 @@ PeachImage is roughly **2.12×** `ffmpeg`'s process-spawn-inclusive time on the 
 | PNG | 0.92×–1.36× | 0.66×–1.15× |
 | WebP | 0.27×–2.17× (animated: **0.27×**, static: 1.12×–2.17×) | 1.01×–1.44× lossless (0.16× small-image outlier), 0.88× lossy |
 | AVIF | ~2.12× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented (fixed 8x8 blocks, no partition-tree RDO yet); throughput not yet measured here |
+| Resize | — | Downscale: 1.28×–3.58× (NearestNeighbor closest, Bilinear/cubic slower); Upscale: 1.41× (NearestNeighbor) or **0.19×–0.59×** (Bilinear/cubic family, faster than SkiaSharp) |
 
 BMP is fully within target and often faster. PNG is within target on every scenario and beats
 SkiaSharp outright on 8bpp grayscale/interlaced decode and on truecolor/RGBA encode; its remaining
@@ -239,4 +358,7 @@ decode and AVIF are the furthest from the 10% target on large images, but WebP's
 actually the single best result in this document (SkiaSharp's fixed per-frame native marshaling
 overhead losing badly to PeachImage's managed decode loop). GIF's animated decode is the worst result
 in this document by a wide margin — its own LZW decode loop, not frame compositing, is the dominant
-cost (see the GIF section above).
+cost (see the GIF section above). Resize is the one case in this document where PeachImage's ratio
+flips sign by direction — slower than SkiaSharp on downscale (it applies proper anti-aliasing filter
+widening that SkiaSharp's default resize doesn't), faster on upscale for the cubic family — though its
+allocation is now pooled and close to SkiaSharp's own footprint (see the Resize section above).

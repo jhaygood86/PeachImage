@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Resampling;
 using PeachImage.Internal;
 
 namespace PeachImage;
@@ -97,6 +98,20 @@ public sealed class AnimatedImage
         return codec.DecodeAnimation(preparedStream, options);
     }
 
+    /// <summary>
+    /// Creates a resized copy of this animation: every frame resized to the given dimensions using the same
+    /// resampling filter, same loop count and per-frame timing/disposal. Lazy, like <see cref="Frames"/>
+    /// itself — each frame is resized on demand as it's pulled, not all at once.
+    /// </summary>
+    public AnimatedImage Resize(int width, int height, ResizeOptions? options = null)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(width, 0);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(height, 0);
+
+        options ??= new ResizeOptions();
+        return new AnimatedImage(ResizeFrames(Frames, Width, Height, width, height, options), width, height, LoopCount);
+    }
+
     /// <summary>Encodes this animated image and writes it to <paramref name="path"/>, inferring the format from the file extension.</summary>
     public void Save(string path, EncoderOptions? options = null)
     {
@@ -120,6 +135,39 @@ public sealed class AnimatedImage
             ?? throw new UnknownImageFormatException($"No built-in codec can encode animated format '{formatName}'.", formatName);
 
         codec.EncodeAnimation(this, stream, options);
+    }
+
+    /// <summary>
+    /// Resizes every frame to <paramref name="width"/> x <paramref name="height"/>. For every filter except
+    /// <see cref="ResamplingFilter.NearestNeighbor"/> (which has no weight map to share — see
+    /// <see cref="ImageResizer.Resize"/>), the horizontal/vertical <see cref="ResamplingWeightMap"/>s are
+    /// built once from <paramref name="sourceWidth"/>/<paramref name="sourceHeight"/> — every frame of an
+    /// <see cref="AnimatedImage"/> shares that same canvas size by construction — and reused across every
+    /// frame via <see cref="ImageResizer.ResizeWithWeights"/>, rather than rebuilding them from scratch once
+    /// per frame the way calling <see cref="Image.Resize"/> per frame would.
+    /// </summary>
+    private static IEnumerable<AnimatedImageFrame> ResizeFrames(
+        IEnumerable<AnimatedImageFrame> frames, int sourceWidth, int sourceHeight, int width, int height, ResizeOptions options)
+    {
+        if (options.Filter == ResamplingFilter.NearestNeighbor)
+        {
+            foreach (var frame in frames)
+            {
+                yield return new AnimatedImageFrame(frame.Image.Resize(width, height, options), frame.Duration, frame.Disposal);
+            }
+
+            yield break;
+        }
+
+        var kernel = ResamplingKernelFactory.Create(options.Filter);
+        var horizontalWeights = new ResamplingWeightMap(sourceWidth, width, kernel);
+        var verticalWeights = new ResamplingWeightMap(sourceHeight, height, kernel);
+
+        foreach (var frame in frames)
+        {
+            var resizedImage = ImageResizer.ResizeWithWeights(frame.Image, width, height, horizontalWeights, verticalWeights);
+            yield return new AnimatedImageFrame(resizedImage, frame.Duration, frame.Disposal);
+        }
     }
 
     private static IEnumerable<AnimatedImageFrame> DisposeStreamWhenExhausted(IEnumerable<AnimatedImageFrame> frames, Stream stream)

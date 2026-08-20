@@ -3,6 +3,7 @@ using PeachImage.Formats.Bmp;
 using PeachImage.Formats.Gif;
 using PeachImage.Formats.Jpeg;
 using PeachImage.Formats.Png;
+using PeachImage.Formats.Shared.Resampling;
 using PeachImage.Formats.Webp;
 using PeachImage.Internal;
 
@@ -201,6 +202,19 @@ public sealed class Image
         }
 
         return codec.Identify(preparedStream);
+    }
+
+    /// <summary>
+    /// Creates a resized copy of this image using the given target dimensions and resampling filter.
+    /// Does not modify this instance (same non-mutating contract as <see cref="Clone"/>).
+    /// </summary>
+    public Image Resize(int width, int height, ResizeOptions? options = null)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(width, 0);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(height, 0);
+
+        options ??= new ResizeOptions();
+        return ImageResizer.Resize(this, width, height, options.Filter);
     }
 
     /// <summary>Encodes this image and writes it to <paramref name="path"/>, inferring the format from the file extension.</summary>
