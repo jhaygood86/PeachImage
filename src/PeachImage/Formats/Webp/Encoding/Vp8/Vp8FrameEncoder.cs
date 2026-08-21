@@ -1,5 +1,6 @@
 using PeachImage.Formats.Webp.Decoding.Vp8;
 using PeachImage.Formats.Webp.Decoding.Vp8.Dct;
+using PeachImage.Formats.Webp.Internal;
 
 namespace PeachImage.Formats.Webp.Encoding.Vp8;
 
@@ -48,56 +49,69 @@ internal static class Vp8FrameEncoder
         int uvStride = (mbCols * 8) + 1;
         int uvPaddedHeight = (mbRows * 8) + 1;
 
-        var recY = new byte[yStride * yPaddedHeight];
-        var recU = new byte[uvStride * uvPaddedHeight];
-        var recV = new byte[uvStride * uvPaddedHeight];
-        InitializeBorders(recY, yStride, yPaddedHeight);
-        InitializeBorders(recU, uvStride, uvPaddedHeight);
-        InitializeBorders(recV, uvStride, uvPaddedHeight);
-
-        int YOff(int x, int y) => ((y + 1) * yStride) + x + 1;
-        int UOff(int x, int y) => ((y + 1) * uvStride) + x + 1;
+        byte[] recY = WebpBufferPool.Shared.Rent(yStride * yPaddedHeight);
+        byte[] recU = WebpBufferPool.Shared.Rent(uvStride * uvPaddedHeight);
+        byte[] recV = WebpBufferPool.Shared.Rent(uvStride * uvPaddedHeight);
 
         int srcYStride = mbCols * 16;
         int srcYHeight = mbRows * 16;
         int srcUvStride = mbCols * 8;
         int srcUvHeight = mbRows * 8;
 
-        var srcY = new byte[srcYStride * srcYHeight];
-        var srcU = new byte[srcUvStride * srcUvHeight];
-        var srcV = new byte[srcUvStride * srcUvHeight];
+        byte[] srcY = WebpBufferPool.Shared.Rent(srcYStride * srcYHeight);
+        byte[] srcU = WebpBufferPool.Shared.Rent(srcUvStride * srcUvHeight);
+        byte[] srcV = WebpBufferPool.Shared.Rent(srcUvStride * srcUvHeight);
 
-        Vp8ForwardColorConverter.ConvertPlanes(rgb, width, height, srcY, srcYStride, srcU, srcV, srcUvStride);
-        PadPlaneToGrid(srcY, width, height, srcYStride, srcYHeight);
-        int chromaRealWidth = (width + 1) / 2;
-        int chromaRealHeight = (height + 1) / 2;
-        PadPlaneToGrid(srcU, chromaRealWidth, chromaRealHeight, srcUvStride, srcUvHeight);
-        PadPlaneToGrid(srcV, chromaRealWidth, chromaRealHeight, srcUvStride, srcUvHeight);
-
-        var modeWriter = new Vp8ModeWriter(mbCols);
-        var coeffContext = new Vp8CoefficientContext(mbCols);
-        byte[] coeffProbabilities = Vp8CoefficientProbabilities.DefaultFlat;
-
-        Span<byte> aboveRight = stackalloc byte[4];
-
-        for (int mbY = 0; mbY < mbRows; mbY++)
+        try
         {
-            modeWriter.StartRow();
-            coeffContext.StartRow();
-            bool hasAbove = mbY > 0;
+            InitializeBorders(recY, yStride, yPaddedHeight);
+            InitializeBorders(recU, uvStride, uvPaddedHeight);
+            InitializeBorders(recV, uvStride, uvPaddedHeight);
 
-            for (int mbX = 0; mbX < mbCols; mbX++)
+            int YOff(int x, int y) => ((y + 1) * yStride) + x + 1;
+            int UOff(int x, int y) => ((y + 1) * uvStride) + x + 1;
+
+            Vp8ForwardColorConverter.ConvertPlanes(rgb, width, height, srcY, srcYStride, srcU, srcV, srcUvStride);
+            PadPlaneToGrid(srcY, width, height, srcYStride, srcYHeight);
+            int chromaRealWidth = (width + 1) / 2;
+            int chromaRealHeight = (height + 1) / 2;
+            PadPlaneToGrid(srcU, chromaRealWidth, chromaRealHeight, srcUvStride, srcUvHeight);
+            PadPlaneToGrid(srcV, chromaRealWidth, chromaRealHeight, srcUvStride, srcUvHeight);
+
+            var modeWriter = new Vp8ModeWriter(mbCols);
+            var coeffContext = new Vp8CoefficientContext(mbCols);
+            byte[] coeffProbabilities = Vp8CoefficientProbabilities.DefaultFlat;
+
+            Span<byte> aboveRight = stackalloc byte[4];
+
+            for (int mbY = 0; mbY < mbRows; mbY++)
             {
-                bool hasLeft = mbX > 0;
+                modeWriter.StartRow();
+                coeffContext.StartRow();
+                bool hasAbove = mbY > 0;
 
-                ProcessMacroblock(
-                    recY, yStride, recU, recV, uvStride,
-                    srcY, srcYStride, srcU, srcV, srcUvStride,
-                    YOff, UOff, mbX, mbY, mbCols, hasAbove, hasLeft,
-                    quant, coeffContext, coeffProbabilities,
-                    modeWriter, partition0, coefficientEncoder,
-                    useSkipProbability, skipFalseProbability, aboveRight);
+                for (int mbX = 0; mbX < mbCols; mbX++)
+                {
+                    bool hasLeft = mbX > 0;
+
+                    ProcessMacroblock(
+                        recY, yStride, recU, recV, uvStride,
+                        srcY, srcYStride, srcU, srcV, srcUvStride,
+                        YOff, UOff, mbX, mbY, mbCols, hasAbove, hasLeft,
+                        quant, coeffContext, coeffProbabilities,
+                        modeWriter, partition0, coefficientEncoder,
+                        useSkipProbability, skipFalseProbability, aboveRight);
+                }
             }
+        }
+        finally
+        {
+            WebpBufferPool.Shared.Return(recY);
+            WebpBufferPool.Shared.Return(recU);
+            WebpBufferPool.Shared.Return(recV);
+            WebpBufferPool.Shared.Return(srcY);
+            WebpBufferPool.Shared.Return(srcU);
+            WebpBufferPool.Shared.Return(srcV);
         }
     }
 
@@ -110,9 +124,9 @@ internal static class Vp8FrameEncoder
         Vp8ModeWriter modeWriter, Vp8BoolEncoder partition0, Vp8BoolEncoder coefficientEncoder,
         bool useSkipProbability, int skipFalseProbability, Span<byte> aboveRight)
     {
-        var quantizedBlocks = new short[24][];
-        var lastBlocks = new int[24];
-        var y2Quantized = new short[16];
+        Span<short> quantizedBlocks = stackalloc short[24 * 16];
+        Span<int> lastBlocks = stackalloc int[24];
+        Span<short> y2Quantized = stackalloc short[16];
         int y2Last = 0;
         bool anyNonZero = false;
 
@@ -122,12 +136,12 @@ internal static class Vp8FrameEncoder
         int wholeMode = Vp8ModeDecision.SelectWholeBlockMode(recY, yOrigin, yStride, 16, hasAbove, hasLeft, srcY, srcYOrigin, srcYStride, out int wholeSad);
         bool isI4x4 = wholeSad > BPredSadThreshold;
 
-        int[]? subModes = null;
+        Span<int> subModes = stackalloc int[16];
 
         if (!isI4x4)
         {
-            var dcValues = new short[16];
-            var rawCoeffs = new short[16][];
+            Span<short> dcValues = stackalloc short[16];
+            Span<short> rawCoeffs = stackalloc short[16 * 16];
 
             for (int n = 0; n < 16; n++)
             {
@@ -136,13 +150,12 @@ internal static class Vp8FrameEncoder
                 int blockOrigin = yOff((mbX * 16) + (col * 4), (mbY * 16) + (row * 4));
                 int srcBlockOrigin = ((mbY * 16 + (row * 4)) * srcYStride) + (mbX * 16) + (col * 4);
 
-                var raw = new short[16];
+                Span<short> raw = rawCoeffs.Slice(n * 16, 16);
                 Vp8ForwardDct.Transform(srcY, srcBlockOrigin, srcYStride, recY, blockOrigin, yStride, raw);
-                rawCoeffs[n] = raw;
                 dcValues[n] = raw[0];
             }
 
-            var y2Raw = new short[16];
+            Span<short> y2Raw = stackalloc short[16];
             Vp8ForwardWht.Transform(dcValues, y2Raw);
             y2Last = Vp8ForwardQuantizer.Quantize(y2Raw, quant.Y2Dc, quant.Y2Ac, y2Quantized);
             if (y2Last > 0)
@@ -150,23 +163,22 @@ internal static class Vp8FrameEncoder
                 anyNonZero = true;
             }
 
-            var y2Dequant = new short[16];
+            Span<short> y2Dequant = stackalloc short[16];
             Vp8ForwardQuantizer.Dequantize(y2Quantized, quant.Y2Dc, quant.Y2Ac, y2Dequant);
-            var blockDc = new short[16];
+            Span<short> blockDc = stackalloc short[16];
             Vp8ScalarInverseWht.Transform(y2Dequant, blockDc);
 
+            Span<short> dequant = stackalloc short[16];
             for (int n = 0; n < 16; n++)
             {
-                var quantizedAc = new short[16];
-                int last = Vp8ForwardQuantizer.Quantize(rawCoeffs[n], quant.Y1Dc, quant.Y1Ac, quantizedAc);
-                quantizedBlocks[n] = quantizedAc;
+                Span<short> quantizedAc = quantizedBlocks.Slice(n * 16, 16);
+                int last = Vp8ForwardQuantizer.Quantize(rawCoeffs.Slice(n * 16, 16), quant.Y1Dc, quant.Y1Ac, quantizedAc);
                 lastBlocks[n] = last;
                 if (last > 1)
                 {
                     anyNonZero = true;
                 }
 
-                var dequant = new short[16];
                 Vp8ForwardQuantizer.Dequantize(quantizedAc, quant.Y1Dc, quant.Y1Ac, dequant);
                 dequant[0] = blockDc[n]; // The Y2/WHT-derived DC replaces this block's own (unused) DC token.
 
@@ -178,7 +190,8 @@ internal static class Vp8FrameEncoder
         }
         else
         {
-            subModes = new int[16];
+            Span<short> raw = stackalloc short[16];
+            Span<short> dequant = stackalloc short[16];
             for (int n = 0; n < 16; n++)
             {
                 int row = n / 4;
@@ -193,19 +206,16 @@ internal static class Vp8FrameEncoder
                 int mode = Vp8ModeDecision.SelectSubblockMode(recY, blockOrigin, yStride, ar, srcY, srcBlockOrigin, srcYStride, out _);
                 subModes[n] = mode;
 
-                var raw = new short[16];
                 Vp8ForwardDct.Transform(srcY, srcBlockOrigin, srcYStride, recY, blockOrigin, yStride, raw);
 
-                var quantizedAc = new short[16];
+                Span<short> quantizedAc = quantizedBlocks.Slice(n * 16, 16);
                 int last = Vp8ForwardQuantizer.Quantize(raw, quant.Y1Dc, quant.Y1Ac, quantizedAc);
-                quantizedBlocks[n] = quantizedAc;
                 lastBlocks[n] = last;
                 if (last > 0)
                 {
                     anyNonZero = true;
                 }
 
-                var dequant = new short[16];
                 Vp8ForwardQuantizer.Dequantize(quantizedAc, quant.Y1Dc, quant.Y1Ac, dequant);
                 Vp8ScalarInverseDct.TransformAndAdd(dequant, recY, blockOrigin, yStride);
             }
@@ -247,21 +257,20 @@ internal static class Vp8FrameEncoder
 
     private static void EncodeChromaBlock(
         byte[] srcPlane, byte[] recPlane, int srcOrigin, int recOrigin, int srcStride, int recStride,
-        Vp8QuantMatrix quant, short[][] quantizedBlocks, int[] lastBlocks, int blockIndex, ref bool anyNonZero)
+        Vp8QuantMatrix quant, Span<short> quantizedBlocks, Span<int> lastBlocks, int blockIndex, ref bool anyNonZero)
     {
-        var raw = new short[16];
+        Span<short> raw = stackalloc short[16];
         Vp8ForwardDct.Transform(srcPlane, srcOrigin, srcStride, recPlane, recOrigin, recStride, raw);
 
-        var quantized = new short[16];
+        Span<short> quantized = quantizedBlocks.Slice(blockIndex * 16, 16);
         int last = Vp8ForwardQuantizer.Quantize(raw, quant.UvDc, quant.UvAc, quantized);
-        quantizedBlocks[blockIndex] = quantized;
         lastBlocks[blockIndex] = last;
         if (last > 0)
         {
             anyNonZero = true;
         }
 
-        var dequant = new short[16];
+        Span<short> dequant = stackalloc short[16];
         Vp8ForwardQuantizer.Dequantize(quantized, quant.UvDc, quant.UvAc, dequant);
         Vp8ScalarInverseDct.TransformAndAdd(dequant, recPlane, recOrigin, recStride);
     }
@@ -269,7 +278,7 @@ internal static class Vp8FrameEncoder
     /// <summary>Entropy-encodes one macroblock's coefficient tokens in the exact order <see cref="Vp8CoefficientDecoder"/> reads them: Y2 (if not B_PRED), then the 16 luma blocks, then chroma U, then chroma V.</summary>
     private static void EncodeMacroblockCoefficients(
         Vp8BoolEncoder tokenBw, byte[] probabilities, bool isI4x4, int mbX,
-        Vp8CoefficientContext context, short[][] quantizedBlocks, int[] lastBlocks, short[] y2Quantized, int y2Last)
+        Vp8CoefficientContext context, ReadOnlySpan<short> quantizedBlocks, ReadOnlySpan<int> lastBlocks, ReadOnlySpan<short> y2Quantized, int y2Last)
     {
         if (!isI4x4)
         {
@@ -296,7 +305,7 @@ internal static class Vp8FrameEncoder
             {
                 int idx = (row * 4) + col;
                 int ctx = (rowLeft ? 1 : 0) + (colY[col] ? 1 : 0);
-                Vp8CoefficientEncoder.EncodeBlock(tokenBw, probabilities, yPlaneType, ctx, yFirst, quantizedBlocks[idx], lastBlocks[idx]);
+                Vp8CoefficientEncoder.EncodeBlock(tokenBw, probabilities, yPlaneType, ctx, yFirst, quantizedBlocks.Slice(idx * 16, 16), lastBlocks[idx]);
                 bool nz = lastBlocks[idx] > yFirst;
                 rowLeft = nz;
                 colY[col] = nz;
@@ -316,7 +325,7 @@ internal static class Vp8FrameEncoder
 
     private static void EncodeChromaPlaneTokens(
         Vp8BoolEncoder tokenBw, byte[] probabilities, int mbX, bool[] above, bool[] left,
-        short[][] quantizedBlocks, int[] lastBlocks, int blockOffset)
+        ReadOnlySpan<short> quantizedBlocks, ReadOnlySpan<int> lastBlocks, int blockOffset)
     {
         Span<bool> col = stackalloc bool[2];
         col[0] = above[(mbX * 2) + 0];
@@ -329,7 +338,7 @@ internal static class Vp8FrameEncoder
             {
                 int idx = blockOffset + (row * 2) + c;
                 int ctx = (rowLeft ? 1 : 0) + (col[c] ? 1 : 0);
-                Vp8CoefficientEncoder.EncodeBlock(tokenBw, probabilities, 2, ctx, 0, quantizedBlocks[idx], lastBlocks[idx]);
+                Vp8CoefficientEncoder.EncodeBlock(tokenBw, probabilities, 2, ctx, 0, quantizedBlocks.Slice(idx * 16, 16), lastBlocks[idx]);
                 bool nz = lastBlocks[idx] > 0;
                 rowLeft = nz;
                 col[c] = nz;

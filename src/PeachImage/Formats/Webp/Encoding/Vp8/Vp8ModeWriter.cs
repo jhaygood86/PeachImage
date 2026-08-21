@@ -23,7 +23,7 @@ internal sealed class Vp8ModeWriter
     /// <summary>Resets the left-neighbor subblock-mode context; call at the start of each macroblock row.</summary>
     public void StartRow() => Array.Fill(_leftSubblockModes, Vp8PredictionModes.BDcPred);
 
-    public void WriteMacroblockModes(Vp8BoolEncoder bw, int mbX, bool skip, bool useSkipProbability, int skipFalseProbability, bool isI4x4, int yMode, int[]? subModes, int uvMode)
+    public void WriteMacroblockModes(Vp8BoolEncoder bw, int mbX, bool skip, bool useSkipProbability, int skipFalseProbability, bool isI4x4, int yMode, ReadOnlySpan<int> subModes, int uvMode)
     {
         if (useSkipProbability)
         {
@@ -50,7 +50,7 @@ internal sealed class Vp8ModeWriter
                 for (int x = 0; x < 4; x++)
                 {
                     int aboveMode = _aboveSubblockModes[baseCol + x];
-                    int mode = subModes![(y * 4) + x];
+                    int mode = subModes[(y * 4) + x];
                     WriteSubblockMode(bw, aboveMode, leftMode, mode);
                     _aboveSubblockModes[baseCol + x] = mode;
                     leftMode = mode;
