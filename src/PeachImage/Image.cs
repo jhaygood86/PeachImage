@@ -190,23 +190,18 @@ public sealed class Image
         return Load(buffered, options);
     }
 
-    /// <summary>Loads an image from an in-memory buffer, auto-detecting its format by sniffing its header bytes.</summary>
-    public static Image Load(ReadOnlySpan<byte> data, DecoderOptions? options = null)
-    {
-        using var stream = new MemoryStream(data.ToArray());
-        return Load(stream, options);
-    }
-
     /// <summary>
-    /// Loads an image from an in-memory buffer, auto-detecting its format. Decoding is synchronous and
-    /// CPU-bound (there's no I/O to await, unlike <see cref="LoadAsync(Stream, DecoderOptions?, CancellationToken)"/>)
-    /// — this overload exists so callers with bytes already in memory (e.g. a buffered upload) can stay on an
-    /// async call path without breaking the chain to reach for a sync method.
+    /// Loads an image from an in-memory buffer, auto-detecting its format by sniffing its header bytes.
+    /// Decodes directly from <paramref name="data"/>'s pinned memory via <see cref="UnmanagedMemoryStream"/>
+    /// — no intermediate copy, unlike wrapping a <see cref="MemoryStream"/> around <c>data.ToArray()</c>.
     /// </summary>
-    public static Task<Image> LoadAsync(ReadOnlyMemory<byte> data, DecoderOptions? options = null, CancellationToken cancellationToken = default)
+    public static unsafe Image Load(ReadOnlySpan<byte> data, DecoderOptions? options = null)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(Load(data.Span, options));
+        fixed (byte* pointer = data)
+        {
+            using var stream = new UnmanagedMemoryStream(pointer, data.Length);
+            return Load(stream, options);
+        }
     }
 
     /// <summary>Reads image dimensions and format information from <paramref name="stream"/> without fully decoding pixel data.</summary>
@@ -298,14 +293,6 @@ public sealed class Image
         codec.Encode(this, buffered, options);
         buffered.Position = 0;
         await buffered.CopyToAsync(stream, cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>Encodes this image as <paramref name="formatName"/> and returns the result as a byte array — shorthand for <see cref="Save(Stream, string, EncoderOptions?)"/> into a <see cref="MemoryStream"/>.</summary>
-    public byte[] Encode(string formatName, EncoderOptions? options = null)
-    {
-        using var stream = new MemoryStream();
-        Save(stream, formatName, options);
-        return stream.ToArray();
     }
 
     /// <summary>

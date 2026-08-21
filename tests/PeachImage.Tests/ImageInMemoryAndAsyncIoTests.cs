@@ -2,12 +2,10 @@ namespace PeachImage.Tests;
 
 /// <summary>
 /// Covers the in-memory-buffer and async I/O overloads (<see cref="Image.Load(ReadOnlySpan{byte}, DecoderOptions?)"/>,
-/// <see cref="Image.LoadAsync(ReadOnlyMemory{byte}, DecoderOptions?, CancellationToken)"/>,
 /// <see cref="Image.SaveAsync(Stream, string, EncoderOptions?, CancellationToken)"/>,
-/// <see cref="Image.SaveAsync(string, EncoderOptions?, CancellationToken)"/>, <see cref="Image.Encode"/>) —
-/// each is a thin wrapper around the existing sync <see cref="Image.Load(Stream, DecoderOptions?)"/>/
-/// <see cref="Image.Save(Stream, string, EncoderOptions?)"/> path, so these pin behavioral equivalence with
-/// that path rather than re-testing decode/encode correctness itself.
+/// <see cref="Image.SaveAsync(string, EncoderOptions?, CancellationToken)"/>) — each is a thin wrapper around
+/// the existing sync <see cref="Image.Load(Stream, DecoderOptions?)"/>/<see cref="Image.Save(Stream, string, EncoderOptions?)"/>
+/// path, so these pin behavioral equivalence with that path rather than re-testing decode/encode correctness itself.
 /// </summary>
 public class ImageInMemoryAndAsyncIoTests
 {
@@ -15,7 +13,7 @@ public class ImageInMemoryAndAsyncIoTests
     public void Load_FromSpan_ProducesSameImageAsLoadFromStream()
     {
         var source = CreateGradientRgbImage(12, 9);
-        byte[] encoded = source.Encode("png");
+        byte[] encoded = EncodeToBytes(source, "png");
 
         var viaSpan = Image.Load((ReadOnlySpan<byte>)encoded);
         using var stream = new MemoryStream(encoded);
@@ -31,7 +29,7 @@ public class ImageInMemoryAndAsyncIoTests
     public void Load_FromSpan_AcceptsAByteArrayImplicitly()
     {
         var source = CreateGradientRgbImage(6, 5);
-        byte[] encoded = source.Encode("bmp");
+        byte[] encoded = EncodeToBytes(source, "bmp");
 
         var decoded = Image.Load(encoded);
 
@@ -43,7 +41,7 @@ public class ImageInMemoryAndAsyncIoTests
     public void Load_FromSpan_HonorsDecoderOptions()
     {
         var source = CreateGradientRgbImage(8, 6);
-        byte[] encoded = source.Encode("jpeg");
+        byte[] encoded = EncodeToBytes(source, "jpeg");
 
         var decoded = Image.Load((ReadOnlySpan<byte>)encoded, new DecoderOptions { TargetPixelFormat = PixelFormat.Rgba32 });
 
@@ -51,29 +49,37 @@ public class ImageInMemoryAndAsyncIoTests
     }
 
     [Fact]
-    public async Task LoadAsync_FromMemory_ProducesSameImageAsLoadFromSpan()
+    public void Load_FromSpan_DoesNotReadPastTheGivenLength()
     {
-        var source = CreateGradientRgbImage(10, 7);
-        byte[] encoded = source.Encode("png");
+        // A span that's a slice of a larger backing array must not let the decoder read trailing bytes it
+        // doesn't own — this pins that the UnmanagedMemoryStream backing Load(ReadOnlySpan<byte>) is bounded
+        // by the span's length, not the full backing array's.
+        var source = CreateGradientRgbImage(5, 4);
+        byte[] encoded = EncodeToBytes(source, "png");
 
-        var viaMemory = await Image.LoadAsync((ReadOnlyMemory<byte>)encoded, cancellationToken: TestContext.Current.CancellationToken);
-        var viaSpan = Image.Load((ReadOnlySpan<byte>)encoded);
+        byte[] padded = new byte[encoded.Length + 64];
+        encoded.CopyTo(padded, 0);
+        new Random(1).NextBytes(padded.AsSpan(encoded.Length)); // trailing garbage, not part of the image
 
-        Assert.Equal(viaSpan.Width, viaMemory.Width);
-        Assert.Equal(viaSpan.Height, viaMemory.Height);
-        Assert.Equal(viaSpan.GetPixelSpan().ToArray(), viaMemory.GetPixelSpan().ToArray());
+        var decoded = Image.Load(padded.AsSpan(0, encoded.Length));
+
+        Assert.Equal(source.Width, decoded.Width);
+        Assert.Equal(source.Height, decoded.Height);
     }
 
     [Fact]
-    public async Task LoadAsync_FromMemory_ThrowsIfCancellationAlreadyRequested()
+    public void Load_FromSpan_WorksWithAStackallocBuffer()
     {
-        var source = CreateGradientRgbImage(4, 4);
-        byte[] encoded = source.Encode("png");
-        using var cts = new CancellationTokenSource();
-        cts.Cancel();
+        var source = CreateGradientRgbImage(4, 3);
+        byte[] encoded = EncodeToBytes(source, "bmp");
 
-        await Assert.ThrowsAsync<OperationCanceledException>(
-            () => Image.LoadAsync((ReadOnlyMemory<byte>)encoded, cancellationToken: cts.Token));
+        Span<byte> stackBuffer = stackalloc byte[encoded.Length];
+        encoded.CopyTo(stackBuffer);
+
+        var decoded = Image.Load((ReadOnlySpan<byte>)stackBuffer);
+
+        Assert.Equal(source.Width, decoded.Width);
+        Assert.Equal(source.Height, decoded.Height);
     }
 
     [Theory]
@@ -126,30 +132,11 @@ public class ImageInMemoryAndAsyncIoTests
             () => source.SaveAsync(stream, "not-a-real-format", cancellationToken: TestContext.Current.CancellationToken));
     }
 
-    [Fact]
-    public void Encode_ProducesByteIdenticalOutputToSaveIntoMemoryStream()
+    private static byte[] EncodeToBytes(Image image, string formatName)
     {
-        var source = CreateGradientRgbImage(9, 7);
-
         using var stream = new MemoryStream();
-        source.Save(stream, "webp");
-        byte[] viaSave = stream.ToArray();
-
-        byte[] viaEncode = source.Encode("webp");
-
-        Assert.Equal(viaSave, viaEncode);
-    }
-
-    [Fact]
-    public void Encode_RoundTrips_ThroughLoad()
-    {
-        var source = CreateGradientRgbImage(13, 11);
-
-        byte[] encoded = source.Encode("png");
-        var decoded = Image.Load(encoded);
-
-        Assert.Equal(source.Width, decoded.Width);
-        Assert.Equal(source.Height, decoded.Height);
+        image.Save(stream, formatName);
+        return stream.ToArray();
     }
 
     private static Image CreateGradientRgbImage(int width, int height)
