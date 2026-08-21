@@ -49,6 +49,12 @@ internal static class PngDecoder
 
         var pngOptions = options as PngDecoderOptions;
         var image = PngImageDecoder.Decode(stream, pngOptions);
-        return PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
+        var result = PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
+        if (!ReferenceEquals(result, image))
+        {
+            image.Dispose();
+        }
+
+        return result;
     }
 }

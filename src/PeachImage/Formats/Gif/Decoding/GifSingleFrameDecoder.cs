@@ -99,6 +99,14 @@ internal static class GifSingleFrameDecoder
                 var image = Image.Create(header.Width, header.Height, hasAlpha ? PixelFormat.Rgba32 : PixelFormat.Rgb24);
                 try
                 {
+                    // ResolveIndices only writes pixels inside the frame descriptor's rect, and further
+                    // skips transparent/out-of-palette indices within it -- any canvas area outside the
+                    // rect, or any transparent pixel, is otherwise left untouched. Image.Create's buffer is
+                    // pool-rented (not guaranteed zero-filled), so it must be explicitly cleared first;
+                    // relying on implicit zero-fill here would leak a prior pool tenant's pixel data into
+                    // every transparent-background GIF (the common case) or any frame smaller than its
+                    // logical screen.
+                    image.GetPixelSpan().Clear();
                     ResolveIndices(image, descriptor, indices, palette, gce.TransparentColorIndex, hasAlpha);
                 }
                 finally

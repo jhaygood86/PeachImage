@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Runtime.InteropServices;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Shared.Resampling;
 
@@ -61,7 +62,7 @@ internal static class ImageResizer
         bool horizontalFirst = (long)width * source.Height <= (long)source.Width * height;
         int intermediateFloatCount = (horizontalFirst ? width * source.Height : source.Width * height) * FloatsPerPixel;
 
-        var pool = ArrayPool<float>.Shared;
+        var pool = ResamplingBufferPool.Shared;
         float[] sourceBuffer = pool.Rent(sourceFloatCount);
         float[] intermediate = pool.Rent(intermediateFloatCount);
         float[] resized = pool.Rent(resizedFloatCount);
@@ -139,7 +140,7 @@ internal static class ImageResizer
     /// on, then discarded, and never observed.
     /// </remarks>
     /// <remarks>
-    /// Runs per source row through <see cref="ResamplingParallel"/>, the same as both convolution passes.
+    /// Runs per source row through <see cref="RowParallel"/>, the same as both convolution passes.
     /// <paramref name="buffer"/> is a plain array (not <see cref="Span{T}"/>) and <see cref="Image.PixelMemory"/>
     /// (not <see cref="Image.GetPixelSpan"/>) specifically so both can be captured by that closure — see
     /// <see cref="IResamplingConvolver"/>'s remarks for why <see cref="Span{T}"/> can't be.
@@ -153,7 +154,7 @@ internal static class ImageResizer
         int rowBytes = width * bytesPerPixel;
         int rowFloats = width * FloatsPerPixel;
 
-        ResamplingParallel.For(source.Height, y =>
+        RowParallel.For(source.Height, y =>
         {
             var rowPixels = pixelMemory.Span.Slice(y * rowBytes, rowBytes);
             var rowBuffer = buffer.AsSpan(y * rowFloats, rowFloats);
@@ -215,7 +216,7 @@ internal static class ImageResizer
     /// <summary>
     /// Narrows the resized float buffer back to <paramref name="format"/>'s native sample width,
     /// un-premultiplying alpha where <see cref="ToFloatBuffer"/> premultiplied it. Runs per destination row
-    /// through <see cref="ResamplingParallel"/>, same as <see cref="ToFloatBuffer"/> and both convolution
+    /// through <see cref="RowParallel"/>, same as <see cref="ToFloatBuffer"/> and both convolution
     /// passes, and for the same reason takes <paramref name="buffer"/> as a plain array and writes through
     /// <see cref="Image.PixelMemory"/> rather than <see cref="Image.GetPixelSpan"/>.
     /// </summary>
@@ -228,7 +229,7 @@ internal static class ImageResizer
         int rowBytes = width * bytesPerPixel;
         int rowFloats = width * FloatsPerPixel;
 
-        ResamplingParallel.For(height, y =>
+        RowParallel.For(height, y =>
         {
             Span<float> channels = stackalloc float[FloatsPerPixel];
             var rowBuffer = buffer.AsSpan(y * rowFloats, rowFloats);

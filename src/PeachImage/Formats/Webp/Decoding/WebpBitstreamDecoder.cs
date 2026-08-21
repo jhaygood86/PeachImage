@@ -1,6 +1,7 @@
 using PeachImage.Formats.Webp.Decoding.Alpha;
 using PeachImage.Formats.Webp.Decoding.Vp8;
 using PeachImage.Formats.Webp.Decoding.Vp8L;
+using PeachImage.Internal;
 
 namespace PeachImage.Formats.Webp.Decoding;
 
@@ -38,6 +39,12 @@ internal static class WebpBitstreamDecoder
         }
 
         var frame = Vp8FrameDecoder.Instance.Decode(bitstreamData, alphaPlane);
-        return Image.FromBuffer(frame.Width, frame.Height, frame.PixelFormat, frame.Pixels);
+
+        // frame.Pixels is an exact-size array (other callers, including tests, rely on Pixels.Length being
+        // exact), so the pool-rented (possibly larger) buffer backing the final owned Image is a separate
+        // copy rather than frame.Pixels itself.
+        byte[] pooledPixels = ImageBufferPool.Shared.Rent(frame.Pixels.Length);
+        frame.Pixels.AsSpan().CopyTo(pooledPixels);
+        return Image.FromBuffer(frame.Width, frame.Height, frame.PixelFormat, pooledPixels, owned: true);
     }
 }

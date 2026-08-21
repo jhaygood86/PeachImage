@@ -51,6 +51,12 @@ internal static class JpegDecoder
             image.Metadata.Profiles.Add(profile);
         }
 
-        return PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
+        var result = PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
+        if (!ReferenceEquals(result, image))
+        {
+            image.Dispose();
+        }
+
+        return result;
     }
 }

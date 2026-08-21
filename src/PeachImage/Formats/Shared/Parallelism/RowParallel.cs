@@ -1,9 +1,12 @@
-namespace PeachImage.Formats.Shared.Resampling;
+namespace PeachImage.Formats.Shared.Parallelism;
 
 /// <summary>
-/// Runs a per-row convolution body either sequentially or via <see cref="Parallel.For(int, int, ParallelOptions, Action{int})"/>,
-/// depending on row count. Convolution rows are fully independent (each writes a disjoint slice of the
-/// destination buffer), so this is a pure throughput decision, not a correctness one.
+/// Runs a per-row body either sequentially or via <see cref="Parallel.For(int, int, ParallelOptions, Action{int})"/>,
+/// depending on row count. Format-agnostic: used by both the image resizer's convolution passes and JPEG
+/// decode's IDCT/chroma-upsampling/color-conversion reconstruction steps, all of which share the same
+/// shape — every row is fully independent, writing only its own disjoint slice of the destination
+/// buffer(s) — so this is purely a throughput decision, never a correctness one, provided the caller's
+/// per-row body has no cross-row dependency of its own.
 /// </summary>
 /// <remarks>
 /// A row-fused pipeline (converting bytes to float and convolving, or convolving and narrowing back to
@@ -17,7 +20,7 @@ namespace PeachImage.Formats.Shared.Resampling;
 /// through the fusion route that seemed to target it directly — treat "the profile suggests X" as a
 /// hypothesis to benchmark, not a conclusion, even when the hypothesis is well-reasoned.
 /// </remarks>
-internal static class ResamplingParallel
+internal static class RowParallel
 {
     /// <summary>
     /// Below this many rows, <see cref="Parallel.For(int, int, ParallelOptions, Action{int})"/>'s
@@ -35,7 +38,11 @@ internal static class ResamplingParallel
     /// default caused enough context-switch/oversubscription overhead to make several filters' parallel
     /// upscale path *slower* than the sequential code it replaced. Explicitly capping
     /// <c>ParallelOptions.MaxDegreeOfParallelism</c> at <see cref="Environment.ProcessorCount"/> (which does
-    /// correctly reflect the affinity-restricted count) fixed it.
+    /// correctly reflect the affinity-restricted count) fixed it. This same cap is shared by every caller
+    /// (resize and JPEG decode alike) rather than each maintaining its own — bounding one call's own
+    /// parallel fan-out, though it says nothing about many such calls running concurrently (e.g. a service
+    /// decoding/resizing many uploads at once, each independently capping at this same ceiling against the
+    /// shared process-wide thread pool) — a pre-existing tradeoff, not something either caller solves.
     /// </summary>
     private static readonly ParallelOptions Options = new() { MaxDegreeOfParallelism = Environment.ProcessorCount };
 
@@ -52,5 +59,40 @@ internal static class ResamplingParallel
         }
 
         Parallel.For(0, rowCount, Options, body);
+    }
+
+    /// <summary>
+    /// Same as <see cref="For(int, Action{int})"/>, but for a per-row body that needs mutable scratch state
+    /// (e.g. a rented buffer) — <paramref name="localFactory"/> runs once per partition (once total in the
+    /// sequential fallback, once per worker thread when parallel), not once per row, so scratch state can be
+    /// safely reused across a partition's rows without a fresh allocation/rent every row and without two
+    /// concurrent rows racing on the same buffer. <paramref name="localFinally"/>, if given, runs once per
+    /// partition after that partition's rows are done (e.g. to return a rented buffer).
+    /// </summary>
+    public static void For<TLocal>(int rowCount, Func<TLocal> localFactory, Action<int, TLocal> body, Action<TLocal>? localFinally = null)
+    {
+        if (rowCount < MinRowsForParallel)
+        {
+            TLocal local = localFactory();
+            for (int i = 0; i < rowCount; i++)
+            {
+                body(i, local);
+            }
+
+            localFinally?.Invoke(local);
+            return;
+        }
+
+        Parallel.For(
+            0,
+            rowCount,
+            Options,
+            localFactory,
+            (i, _, local) =>
+            {
+                body(i, local);
+                return local;
+            },
+            local => localFinally?.Invoke(local));
     }
 }

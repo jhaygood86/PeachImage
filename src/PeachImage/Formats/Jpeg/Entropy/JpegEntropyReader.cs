@@ -36,7 +36,8 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
 
     /// <summary>
     /// Returns the next <paramref name="count"/> bits (0-24) without consuming them, for fast-path Huffman
-    /// lookahead. Call <see cref="GetBits"/> afterward to actually consume however many bits the lookup resolved.
+    /// lookahead. Call <see cref="GetBits"/> (or, if the resolved length is no more than <paramref name="count"/>,
+    /// the cheaper <see cref="ConsumeBits"/>) afterward to actually consume however many bits the lookup resolved.
     /// </summary>
     public int PeekBits(int count)
     {
@@ -47,6 +48,31 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
 
         EnsureBits(count);
         return (int)(_buffer >> (64 - count));
+    }
+
+    /// <summary>
+    /// Consumes <paramref name="count"/> bits already guaranteed present by a just-prior <see cref="PeekBits"/>
+    /// call for the same or a larger count — unlike <see cref="GetBits"/>, does not itself re-verify/refill
+    /// the buffer, since <see cref="PeekBits"/> already established (and <see cref="EnsureBits"/> guarantees
+    /// unconditionally, even at a truncated/malformed-stream marker boundary, by zero-padding rather than
+    /// ever returning early) that at least that many bits are buffered. Only call this when that guarantee
+    /// actually holds — i.e. immediately after a <see cref="PeekBits"/> of at least <paramref name="count"/>
+    /// bits, with nothing in between that could have consumed from the buffer. Every JPEG fast-Huffman-table
+    /// lookup in <see cref="HuffmanDecodingTable"/> fits this shape (peek <c>FastTableBits</c>, then consume
+    /// at most that many) — this exists specifically so those hot-path lookups (millions of calls per large
+    /// photo) don't pay <see cref="GetBits"/>'s buffer-availability check twice per symbol for no reason.
+    /// </summary>
+    public int ConsumeBits(int count)
+    {
+        if (count == 0)
+        {
+            return 0;
+        }
+
+        int value = (int)(_buffer >> (64 - count));
+        _buffer <<= count;
+        _bitCount -= count;
+        return value;
     }
 
     /// <summary>

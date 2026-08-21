@@ -1,6 +1,7 @@
 using PeachImage.Formats.Avif.Container;
 using PeachImage.Formats.Avif.Decoding.Av1;
 using PeachImage.Formats.Avif.Internal;
+using PeachImage.Internal;
 
 namespace PeachImage.Formats.Avif;
 
@@ -96,14 +97,26 @@ internal static class AvifDecoder
         }
 
         var pixelFormat = AvifPixelFormatSelector.Choose(seq.BitDepth, seq.MonoChrome, alphaPlane is not null);
-        var image = Image.FromBuffer(container.Width, container.Height, pixelFormat, pixels);
+
+        // Av1YuvToRgbConverter.Convert returns an exact-size array (other callers, including tests, rely on
+        // that), so the pool-rented (possibly larger) buffer backing the final owned Image is a separate
+        // copy rather than `pixels` itself.
+        byte[] pooledPixels = ImageBufferPool.Shared.Rent(pixels.Length);
+        pixels.AsSpan().CopyTo(pooledPixels);
+        var image = Image.FromBuffer(container.Width, container.Height, pixelFormat, pooledPixels, owned: true);
 
         foreach (var profile in metadata.Profiles)
         {
             image.Metadata.Profiles.Add(profile);
         }
 
-        return Decoding.PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
+        var result = Decoding.PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
+        if (!ReferenceEquals(result, image))
+        {
+            image.Dispose();
+        }
+
+        return result;
     }
 
     private static bool IsAvifBrand(ReadOnlySpan<byte> brand) =>

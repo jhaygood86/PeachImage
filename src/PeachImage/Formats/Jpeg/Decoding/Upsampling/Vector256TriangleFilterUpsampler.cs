@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jpeg.Decoding.Upsampling;
 
@@ -32,8 +33,8 @@ internal sealed class Vector256TriangleFilterUpsampler : IChromaUpsampler
     private static readonly Vector256<ushort> Eight = Vector256.Create((ushort)8);
 
     public void Upsample(
-        ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        Span<byte> destination, int destinationWidth, int destinationHeight,
+        byte[] source, int sourceWidth, int sourceHeight,
+        byte[] destination, int destinationWidth, int destinationHeight,
         int horizontalRatio, int verticalRatio)
     {
         if (horizontalRatio != 2 || verticalRatio is not (1 or 2))
@@ -47,37 +48,35 @@ internal sealed class Vector256TriangleFilterUpsampler : IChromaUpsampler
 
     /// <summary>Vectorized path for <c>horizontalRatio == 2</c> — see <see cref="TriangleFilterUpsampler"/>'s remarks for the decomposition this implements.</summary>
     private static void UpsampleHorizontalDoubling(
-        ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        Span<byte> destination, int destinationWidth, int destinationHeight,
+        byte[] source, int sourceWidth, int sourceHeight,
+        byte[] destination, int destinationWidth, int destinationHeight,
         int verticalRatio)
     {
-        var aBuffer = ArrayPool<ushort>.Shared.Rent(sourceWidth + 2);
-        try
+        // Rented once per RowParallel partition (not once for the whole plane, and not fresh per row) via
+        // the TLocal hook — see TriangleFilterUpsampler.UpsampleHorizontalDoubling's remarks for why.
+        RowParallel.For<ushort[]>(
+            destinationHeight,
+            () => ArrayPool<ushort>.Shared.Rent(sourceWidth + 2),
+            (y, aBuffer) =>
         {
             Span<ushort> a = aBuffer.AsSpan(0, sourceWidth + 2);
 
-            for (int y = 0; y < destinationHeight; y++)
-            {
-                int srcY = Math.Clamp(y / verticalRatio, 0, sourceHeight - 1);
-                int srcYNeighbor = verticalRatio == 2
-                    ? Math.Clamp((y / verticalRatio) + (((y & 1) == 0) ? -1 : 1), 0, sourceHeight - 1)
-                    : srcY;
+            int srcY = Math.Clamp(y / verticalRatio, 0, sourceHeight - 1);
+            int srcYNeighbor = verticalRatio == 2
+                ? Math.Clamp((y / verticalRatio) + (((y & 1) == 0) ? -1 : 1), 0, sourceHeight - 1)
+                : srcY;
 
-                var main = source.Slice(srcY * sourceWidth, sourceWidth);
-                var vNeighbor = source.Slice(srcYNeighbor * sourceWidth, sourceWidth);
-                var dstRow = destination.Slice(y * destinationWidth, destinationWidth);
+            var main = source.AsSpan(srcY * sourceWidth, sourceWidth);
+            var vNeighbor = source.AsSpan(srcYNeighbor * sourceWidth, sourceWidth);
+            var dstRow = destination.AsSpan(y * destinationWidth, destinationWidth);
 
-                ComputeColumnBlend(main, vNeighbor, a.Slice(1, sourceWidth));
-                a[0] = a[1];
-                a[sourceWidth + 1] = a[sourceWidth];
+            ComputeColumnBlend(main, vNeighbor, a.Slice(1, sourceWidth));
+            a[0] = a[1];
+            a[sourceWidth + 1] = a[sourceWidth];
 
-                BlendRow(a, sourceWidth, dstRow);
-            }
-        }
-        finally
-        {
-            ArrayPool<ushort>.Shared.Return(aBuffer);
-        }
+            BlendRow(a, sourceWidth, dstRow);
+        },
+            aBuffer => ArrayPool<ushort>.Shared.Return(aBuffer));
     }
 
     /// <summary>Computes <c>columnBlend[c] = 3*main[c] + vNeighbor[c]</c> for every source column, 16 at a time.</summary>

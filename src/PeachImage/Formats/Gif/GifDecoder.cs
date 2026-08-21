@@ -55,6 +55,11 @@ internal static class GifDecoder
         }
 
         var result = PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
+        if (!ReferenceEquals(result, image))
+        {
+            image.Dispose();
+        }
+
         result.IsAnimated = isAnimated;
         return result;
     }

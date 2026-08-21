@@ -129,7 +129,7 @@ internal sealed class HuffmanDecodingTable
         int fastLength = _fastLength[peeked];
         if (fastLength != 0)
         {
-            reader.GetBits(fastLength);
+            reader.ConsumeBits(fastLength);
             return _fastSymbol[peeked];
         }
 
@@ -149,7 +149,7 @@ internal sealed class HuffmanDecodingTable
         byte kind = _fastAcKind[peeked];
         if (kind != 0)
         {
-            reader.GetBits(_fastAcBits[peeked]);
+            reader.ConsumeBits(_fastAcBits[peeked]);
             run = _fastAcRun[peeked];
             value = _fastAcValue[peeked];
             return (AcSymbolKind)kind;
@@ -182,7 +182,7 @@ internal sealed class HuffmanDecodingTable
         byte bits = _fastDcBits[peeked];
         if (bits != 0)
         {
-            reader.GetBits(bits);
+            reader.ConsumeBits(bits);
             return _fastDcValue[peeked];
         }
 

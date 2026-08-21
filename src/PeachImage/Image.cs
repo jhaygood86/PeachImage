@@ -12,7 +12,18 @@ namespace PeachImage;
 /// <summary>
 /// An in-memory, single-frame, tightly-packed pixel buffer decoded from (or destined for) an image file.
 /// </summary>
-public sealed class Image
+/// <remarks>
+/// Implements <see cref="IDisposable"/> because most instances rent their pixel buffer from a shared
+/// <see cref="System.Buffers.ArrayPool{T}"/> and return it on <see cref="Dispose"/>. Disposal is an
+/// opt-in performance mechanism, not a correctness requirement: an un-disposed <see cref="Image"/>'s
+/// buffer is simply garbage-collected like any other array, with no leak or corruption risk — but
+/// disposing promptly lets the pool reuse that buffer for the next decode/resize, which matters most
+/// under concurrent load (e.g. a service processing many uploads at once). Images produced by
+/// <see cref="AnimatedImage.Frames"/> (as opposed to <see cref="Image.Clone"/>) don't own a pooled
+/// buffer at all — they alias decoder-internal state — so <see cref="Dispose"/> on those is always a
+/// safe no-op.
+/// </remarks>
+public sealed class Image : IDisposable
 {
     /// <summary>
     /// The fixed set of built-in codecs. Internal rather than private so <see cref="AnimatedImage"/> can
@@ -32,14 +43,19 @@ public sealed class Image
     private static readonly int MaxHeaderSize = Codecs.Max(codec => codec.HeaderSize);
 
     private readonly byte[] _pixels;
+    private readonly int _byteLength;
+    private readonly bool _owned;
     private bool _invalidated;
+    private bool _disposed;
 
-    private Image(int width, int height, PixelFormat pixelFormat, byte[] pixels)
+    private Image(int width, int height, PixelFormat pixelFormat, byte[] pixels, bool owned)
     {
         Width = width;
         Height = height;
         PixelFormat = pixelFormat;
         _pixels = pixels;
+        _byteLength = checked(width * height * pixelFormat.GetBytesPerPixel());
+        _owned = owned;
         Metadata = new ImageMetadata();
     }
 
@@ -65,26 +81,28 @@ public sealed class Image
     /// <summary>
     /// Gets a zero-copy view of the entire tightly-packed pixel buffer.
     /// </summary>
+    /// <exception cref="ObjectDisposedException">This image has been disposed.</exception>
     /// <exception cref="InvalidOperationException">
     /// This image was produced by <see cref="AnimatedImage.Frames"/> and a later frame has since been
     /// pulled from the same enumeration — see the <c>Frames</c> remarks for the frame-validity contract.
     /// </exception>
     public Span<byte> GetPixelSpan()
     {
-        ThrowIfInvalidated();
-        return _pixels;
+        ThrowIfUnusable();
+        return _pixels.AsSpan(0, _byteLength);
     }
 
     /// <summary>
     /// Gets a zero-copy view of a single scanline.
     /// </summary>
+    /// <exception cref="ObjectDisposedException">This image has been disposed.</exception>
     /// <exception cref="InvalidOperationException">
     /// This image was produced by <see cref="AnimatedImage.Frames"/> and a later frame has since been
     /// pulled from the same enumeration — see the <c>Frames</c> remarks for the frame-validity contract.
     /// </exception>
     public Span<byte> GetRowSpan(int y)
     {
-        ThrowIfInvalidated();
+        ThrowIfUnusable();
         ArgumentOutOfRangeException.ThrowIfNegative(y);
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(y, Height);
 
@@ -95,6 +113,7 @@ public sealed class Image
     /// <summary>
     /// Gets the entire tightly-packed pixel buffer as <see cref="Memory{T}"/>, for async/non-span consumers.
     /// </summary>
+    /// <exception cref="ObjectDisposedException">This image has been disposed.</exception>
     /// <exception cref="InvalidOperationException">
     /// This image was produced by <see cref="AnimatedImage.Frames"/> and a later frame has since been
     /// pulled from the same enumeration — see the <c>Frames</c> remarks for the frame-validity contract.
@@ -103,24 +122,35 @@ public sealed class Image
     {
         get
         {
-            ThrowIfInvalidated();
-            return _pixels;
+            ThrowIfUnusable();
+            return _pixels.AsMemory(0, _byteLength);
         }
     }
 
-    /// <summary>Allocates a new, uninitialized image of the given dimensions and pixel format.</summary>
+    /// <summary>
+    /// Allocates a new, uninitialized image of the given dimensions and pixel format. The backing buffer
+    /// is rented from a shared pool — see the type-level remarks on disposal.
+    /// </summary>
     public static Image Create(int width, int height, PixelFormat pixelFormat)
     {
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(width, 0);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(height, 0);
 
         int byteCount = checked(width * height * pixelFormat.GetBytesPerPixel());
-        return new Image(width, height, pixelFormat, new byte[byteCount]);
+        return new Image(width, height, pixelFormat, ImageBufferPool.Shared.Rent(byteCount), owned: true);
     }
 
-    /// <summary>Wraps an already-allocated, tightly-packed pixel buffer without copying it. For use by codec implementations.</summary>
-    internal static Image FromBuffer(int width, int height, PixelFormat pixelFormat, byte[] buffer) =>
-        new(width, height, pixelFormat, buffer);
+    /// <summary>
+    /// Wraps an already-allocated, tightly-packed pixel buffer without copying it. For use by codec
+    /// implementations. <paramref name="owned"/> must be <see langword="true"/> only when
+    /// <paramref name="buffer"/> was itself rented from <see cref="ImageBufferPool.Shared"/> — passing
+    /// <see langword="true"/> for a buffer that wasn't would return a foreign array to the pool on
+    /// <see cref="Dispose"/>. Pass <see langword="false"/> for buffers with a lifetime the caller manages
+    /// itself (e.g. a persistent animation-compositor canvas aliased by multiple <see cref="Image"/>
+    /// instances over time), for which <see cref="Dispose"/> is then a safe no-op.
+    /// </summary>
+    internal static Image FromBuffer(int width, int height, PixelFormat pixelFormat, byte[] buffer, bool owned) =>
+        new(width, height, pixelFormat, buffer, owned);
 
     /// <summary>
     /// Creates an independent copy of this image's pixel data and metadata. Use this to retain a frame
@@ -223,7 +253,12 @@ public sealed class Image
     /// not modify this instance (same non-mutating contract as <see cref="Clone"/>) — except when
     /// <paramref name="options"/>'s <see cref="ResizeOptions.Mode"/> is <see cref="ResizeMode.Max"/> and this
     /// image already fits within <paramref name="width"/> x <paramref name="height"/>, in which case this
-    /// same instance is returned unchanged rather than allocating a needless copy.
+    /// same instance is returned unchanged rather than allocating a needless copy. Because of that fast
+    /// path, the returned <see cref="Image"/> may be <em>this same instance</em> rather than an independent
+    /// one — disposing one of the two references then makes the other throw <see cref="ObjectDisposedException"/>
+    /// on its next access, same as disposing any other shared reference twice would. If you need the source
+    /// and the resized result to have independent lifetimes regardless of which path is taken, dispose only
+    /// after you're done with both, or check <see cref="object.ReferenceEquals(object?, object?)"/> first.
     /// </summary>
     public Image Resize(int width, int height, ResizeOptions? options = null)
     {
@@ -310,12 +345,35 @@ public sealed class Image
     /// <summary>
     /// Marks this image's pixel data as no longer valid. Used internally by animated-decode frame
     /// compositors once a later frame has overwritten the shared canvas this image aliases — see
-    /// <see cref="AnimatedImage.Frames"/> for the frame-validity contract this enforces.
+    /// <see cref="AnimatedImage.Frames"/> for the frame-validity contract this enforces. Independent of
+    /// <see cref="Dispose"/>: invalidation is compositor-driven and applies to non-owned (aliased) images,
+    /// while disposal is caller-driven and only ever returns a buffer for images that own one.
     /// </summary>
     internal void Invalidate() => _invalidated = true;
 
-    private void ThrowIfInvalidated()
+    /// <summary>
+    /// Returns this image's pixel buffer to its pool, if it owns one (see the type-level remarks on
+    /// disposal). Safe to call more than once. After calling this, <see cref="GetPixelSpan"/>,
+    /// <see cref="GetRowSpan"/>, and <see cref="PixelMemory"/> throw <see cref="ObjectDisposedException"/>.
+    /// </summary>
+    public void Dispose()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        if (_owned)
+        {
+            ImageBufferPool.Shared.Return(_pixels);
+        }
+    }
+
+    private void ThrowIfUnusable()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
         if (_invalidated)
         {
             throw new InvalidOperationException(

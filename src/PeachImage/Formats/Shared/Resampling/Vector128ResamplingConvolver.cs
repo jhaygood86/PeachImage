@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Shared.Resampling;
 
@@ -12,7 +13,7 @@ namespace PeachImage.Formats.Shared.Resampling;
 /// one pixel (4 floats) per destination column, which is already the natural SIMD width for a single pixel's
 /// channels regardless of instruction set — see <see cref="Vector256ResamplingConvolver"/>'s remarks for why
 /// its horizontal pass reuses this same implementation rather than widening it. Both passes' outer per-row
-/// loop runs through <see cref="ResamplingParallel"/> — each row only reads from the source buffer and
+/// loop runs through <see cref="RowParallel"/> — each row only reads from the source buffer and
 /// writes a disjoint destination row, so rows have no cross-dependency to serialize on.
 /// </summary>
 internal sealed class Vector128ResamplingConvolver : IResamplingConvolver
@@ -21,7 +22,7 @@ internal sealed class Vector128ResamplingConvolver : IResamplingConvolver
     {
         int rowLength = width * ImageResizer.FloatsPerPixel;
 
-        ResamplingParallel.For(weightMap.DestinationSize, destY =>
+        RowParallel.For(weightMap.DestinationSize, destY =>
         {
             var destRow = destination.AsSpan(destY * rowLength, rowLength);
             destRow.Clear();
@@ -41,7 +42,7 @@ internal sealed class Vector128ResamplingConvolver : IResamplingConvolver
         const int stride = ImageResizer.FloatsPerPixel;
         int destWidth = weightMap.DestinationSize;
 
-        ResamplingParallel.For(height, y =>
+        RowParallel.For(height, y =>
         {
             var sourceRow = source.AsSpan(y * sourceWidth * stride, sourceWidth * stride);
             var destRow = destination.AsSpan(y * destWidth * stride, destWidth * stride);

@@ -118,8 +118,18 @@ internal static class WebpAnimationReader
             throw new WebpDecodingException($"ANMF frame's decoded size {decoded.Width}x{decoded.Height} does not match its declared size {chunk.Width}x{chunk.Height}.");
         }
 
+        // decoded/rgba are both owned, pool-rented Images local to this one frame -- DrawFrame copies rgba's
+        // bytes into the compositor's own persistent canvas (never aliases them), so both must be disposed
+        // here rather than left for the caller, which never sees either. This runs once per ANMF chunk, so
+        // leaving these undisposed would leak a rented buffer per animation frame, not just per file.
         var rgba = PixelFormatConverter.ConvertIfNeeded(decoded, PixelFormat.Rgba32);
+        if (!ReferenceEquals(rgba, decoded))
+        {
+            decoded.Dispose();
+        }
+
         var composited = compositor.DrawFrame((chunk.X, chunk.Y, chunk.Width, chunk.Height), rgba.GetPixelSpan(), chunk.Blend, chunk.DisposeToBackground);
+        rgba.Dispose();
         return new AnimatedImageFrame(composited, chunk.Duration, chunk.DisposeToBackground ? FrameDisposalMethod.RestoreToBackground : FrameDisposalMethod.DoNotDispose);
     }
 

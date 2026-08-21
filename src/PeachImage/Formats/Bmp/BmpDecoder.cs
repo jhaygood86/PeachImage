@@ -25,6 +25,12 @@ internal static class BmpDecoder
         ArgumentNullException.ThrowIfNull(stream);
 
         var image = BmpImageDecoder.Decode(stream);
-        return PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
+        var result = PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
+        if (!ReferenceEquals(result, image))
+        {
+            image.Dispose();
+        }
+
+        return result;
     }
 }

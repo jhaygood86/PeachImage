@@ -27,8 +27,12 @@ namespace PeachImage;
 /// to keep the previous frame around while inspecting the current one — call
 /// <see cref="AnimatedImageFrame.Clone"/> (or <see cref="Image.Clone"/> on just the pixel data) before
 /// advancing:
-/// <c>foreach (var frame in animated.Frames) { var kept = frame.Clone(); ... }</c>. No disposal is needed or
-/// possible — frames are plain, GC-managed data once cloned.
+/// <c>foreach (var frame in animated.Frames) { var kept = frame.Clone(); ... }</c>. A frame pulled directly
+/// from <see cref="Frames"/> aliases decoder-internal state rather than owning a pooled buffer, so disposing
+/// its <see cref="AnimatedImageFrame.Image"/> is unnecessary (a safe no-op if done anyway); a
+/// <see cref="AnimatedImageFrame.Clone"/>d frame's <see cref="AnimatedImageFrame.Image"/> does own a pooled
+/// buffer and may be disposed for best pooling behavior, though — same as elsewhere in this library — that's
+/// an opt-in performance choice, not a correctness requirement.
 /// </para>
 /// </remarks>
 public sealed class AnimatedImage
