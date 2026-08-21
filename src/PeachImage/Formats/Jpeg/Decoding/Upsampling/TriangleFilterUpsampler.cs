@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jpeg.Decoding.Upsampling;
 
@@ -30,8 +31,8 @@ internal sealed class TriangleFilterUpsampler : IChromaUpsampler
     private static readonly Vector128<ushort> Eight = Vector128.Create((ushort)8);
 
     public void Upsample(
-        ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        Span<byte> destination, int destinationWidth, int destinationHeight,
+        byte[] source, int sourceWidth, int sourceHeight,
+        byte[] destination, int destinationWidth, int destinationHeight,
         int horizontalRatio, int verticalRatio)
     {
         if (horizontalRatio == 1 && verticalRatio == 1)
@@ -57,41 +58,40 @@ internal sealed class TriangleFilterUpsampler : IChromaUpsampler
 
     /// <summary>Vectorized path for <c>horizontalRatio == 2</c> — see the type-level remarks for the decomposition this implements.</summary>
     private static void UpsampleHorizontalDoubling(
-        ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        Span<byte> destination, int destinationWidth, int destinationHeight,
+        byte[] source, int sourceWidth, int sourceHeight,
+        byte[] destination, int destinationWidth, int destinationHeight,
         int verticalRatio)
     {
         // a[] holds one padded row's worth of column-blend values: a[0]/a[sourceWidth+1] are the
         // edge-replicated padding, a[1..sourceWidth] the real per-column blends (a[i] holds A[i-1] in the
-        // remarks' 0-indexed notation). Rented once for the whole plane, not per row — sourceWidth can be
-        // large enough (a 12MP source's chroma plane) that a per-row stackalloc would risk a stack overflow.
-        var aBuffer = ArrayPool<ushort>.Shared.Rent(sourceWidth + 2);
-        try
+        // remarks' 0-indexed notation). Rented once per RowParallel partition (not once for the whole plane,
+        // and not fresh per row) via the TLocal hook — sourceWidth can be large enough (a 12MP source's
+        // chroma plane) that a per-row stackalloc would risk a stack overflow, and a fresh per-row rent would
+        // reintroduce allocation-rate overhead; one rental reused across a partition's whole row range keeps
+        // this at effectively zero net new allocation, same as before parallelization.
+        RowParallel.For<ushort[]>(
+            destinationHeight,
+            () => ArrayPool<ushort>.Shared.Rent(sourceWidth + 2),
+            (y, aBuffer) =>
         {
             Span<ushort> a = aBuffer.AsSpan(0, sourceWidth + 2);
 
-            for (int y = 0; y < destinationHeight; y++)
-            {
-                int srcY = Math.Clamp(y / verticalRatio, 0, sourceHeight - 1);
-                int srcYNeighbor = verticalRatio == 2
-                    ? Math.Clamp((y / verticalRatio) + (((y & 1) == 0) ? -1 : 1), 0, sourceHeight - 1)
-                    : srcY;
+            int srcY = Math.Clamp(y / verticalRatio, 0, sourceHeight - 1);
+            int srcYNeighbor = verticalRatio == 2
+                ? Math.Clamp((y / verticalRatio) + (((y & 1) == 0) ? -1 : 1), 0, sourceHeight - 1)
+                : srcY;
 
-                var main = source.Slice(srcY * sourceWidth, sourceWidth);
-                var vNeighbor = source.Slice(srcYNeighbor * sourceWidth, sourceWidth);
-                var dstRow = destination.Slice(y * destinationWidth, destinationWidth);
+            var main = source.AsSpan(srcY * sourceWidth, sourceWidth);
+            var vNeighbor = source.AsSpan(srcYNeighbor * sourceWidth, sourceWidth);
+            var dstRow = destination.AsSpan(y * destinationWidth, destinationWidth);
 
-                ComputeColumnBlend(main, vNeighbor, a.Slice(1, sourceWidth));
-                a[0] = a[1];
-                a[sourceWidth + 1] = a[sourceWidth];
+            ComputeColumnBlend(main, vNeighbor, a.Slice(1, sourceWidth));
+            a[0] = a[1];
+            a[sourceWidth + 1] = a[sourceWidth];
 
-                BlendRow(a, sourceWidth, dstRow);
-            }
-        }
-        finally
-        {
-            ArrayPool<ushort>.Shared.Return(aBuffer);
-        }
+            BlendRow(a, sourceWidth, dstRow);
+        },
+            aBuffer => ArrayPool<ushort>.Shared.Return(aBuffer));
     }
 
     /// <summary>Computes <c>columnBlend[c] = 3*main[c] + vNeighbor[c]</c> for every source column.</summary>
@@ -156,20 +156,20 @@ internal sealed class TriangleFilterUpsampler : IChromaUpsampler
 
     /// <summary>Original per-pixel scalar path — kept for <c>horizontalRatio == 1</c> (vertical-only subsampling, essentially never seen in real files, not worth vectorizing).</summary>
     private static void UpsampleScalar(
-        ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight,
-        Span<byte> destination, int destinationWidth, int destinationHeight,
+        byte[] source, int sourceWidth, int sourceHeight,
+        byte[] destination, int destinationWidth, int destinationHeight,
         int horizontalRatio, int verticalRatio)
     {
-        for (int y = 0; y < destinationHeight; y++)
+        RowParallel.For(destinationHeight, y =>
         {
             int srcY = Math.Clamp(y / verticalRatio, 0, sourceHeight - 1);
             int srcYNeighbor = verticalRatio == 2
                 ? Math.Clamp(((y / verticalRatio) + (((y & 1) == 0) ? -1 : 1)), 0, sourceHeight - 1)
                 : srcY;
 
-            var dstRow = destination.Slice(y * destinationWidth, destinationWidth);
-            var srcRowMain = source.Slice(srcY * sourceWidth, sourceWidth);
-            var srcRowNeighbor = source.Slice(srcYNeighbor * sourceWidth, sourceWidth);
+            var dstRow = destination.AsSpan(y * destinationWidth, destinationWidth);
+            var srcRowMain = source.AsSpan(srcY * sourceWidth, sourceWidth);
+            var srcRowNeighbor = source.AsSpan(srcYNeighbor * sourceWidth, sourceWidth);
 
             for (int x = 0; x < destinationWidth; x++)
             {
@@ -188,6 +188,6 @@ internal sealed class TriangleFilterUpsampler : IChromaUpsampler
                 int blended = ((main * 9) + (horizontalNeighbor * 3) + (verticalNeighbor * 3) + diagonalNeighbor + 8) / 16;
                 dstRow[x] = (byte)Math.Clamp(blended, 0, 255);
             }
-        }
+        });
     }
 }

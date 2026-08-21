@@ -1,3 +1,5 @@
+using PeachImage.Formats.Shared.Parallelism;
+
 namespace PeachImage.Formats.Shared.Resampling;
 
 /// <summary>
@@ -9,7 +11,7 @@ namespace PeachImage.Formats.Shared.Resampling;
 /// </summary>
 /// <remarks>
 /// Buffers are plain arrays, not <see cref="Span{T}"/>/<see cref="ReadOnlySpan{T}"/>, specifically so
-/// implementations can parallelize their per-row loop with <see cref="ResamplingParallel"/> —
+/// implementations can parallelize their per-row loop with <see cref="RowParallel"/> —
 /// <see cref="Span{T}"/> is a ref struct and can't be captured by the closure <c>Parallel.For</c> requires.
 /// A caller-owned array may be larger than the logical region a call reads/writes (e.g. an
 /// <see cref="System.Buffers.ArrayPool{T}"/> rental) — every index a call touches is bounded by its own

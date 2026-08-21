@@ -2,6 +2,8 @@ using System.Buffers;
 using PeachImage.Formats.Jpeg.ColorConversion;
 using PeachImage.Formats.Jpeg.Decoding.Upsampling;
 using PeachImage.Formats.Jpeg.Dct;
+using PeachImage.Formats.Shared.Parallelism;
+using PeachImage.Internal;
 
 namespace PeachImage.Formats.Jpeg.Decoding;
 
@@ -47,7 +49,7 @@ internal static class FrameReconstructor
             int pixelCount = width * height;
             return frame.ColorSpace switch
             {
-                JpegColorSpace.Grayscale => Image.FromBuffer(width, height, PixelFormat.Gray8, planes[0].AsSpan(0, pixelCount).ToArray()),
+                JpegColorSpace.Grayscale => BuildGrayscaleImage(planes[0], width, height, pixelCount),
                 JpegColorSpace.YCbCr => BuildYCbCrImage(planes, width, height),
                 JpegColorSpace.Rgb => BuildDirectRgbImage(planes, width, height),
                 JpegColorSpace.Cmyk => BuildDirectCmykImage(planes, width, height, frame.IsAdobeInverted),
@@ -82,15 +84,25 @@ internal static class FrameReconstructor
         // a multiple of 8 * samplingFactor, not just "the last block" — goes through a local 8x8 scratch
         // buffer first, and only the valid rows/columns are copied out; a block entirely past the boundary
         // (possible with sampling factors > 1) skips the transform altogether.
-        Span<byte> scratch = stackalloc byte[64];
-        for (int by = 0; by < component.Coefficients.BlocksHigh; by++)
+        //
+        // Dispatched one block-row (`by`) at a time via RowParallel.For<TLocal> — different `by` values
+        // always write disjoint row ranges of `cropped` (see blockTop below), so this is safe to run
+        // concurrently; the 8x8 scratch buffer for boundary blocks is rented per RowParallel partition
+        // (not once for the whole plane, and not fresh per block, and not a raw `new byte[]` either — same
+        // ArrayPool<byte>.Shared this method's own Rent helper already uses) via the TLocal hook, so
+        // concurrent partitions never share one scratch buffer and no per-block-row allocation is added.
+        RowParallel.For<byte[]>(
+            component.Coefficients.BlocksHigh,
+            () => ArrayPool<byte>.Shared.Rent(64),
+            (by, scratchBuffer) =>
         {
             int blockTop = by * 8;
             if (blockTop >= actualHeight)
             {
-                break;
+                return;
             }
 
+            var scratch = scratchBuffer.AsSpan(0, 64);
             int rowsInBlock = Math.Min(8, actualHeight - blockTop);
 
             for (int bx = 0; bx < component.Coefficients.BlocksWide; bx++)
@@ -118,7 +130,8 @@ internal static class FrameReconstructor
                     }
                 }
             }
-        }
+        },
+            scratchBuffer => ArrayPool<byte>.Shared.Return(scratchBuffer));
 
         int hRatio = hMax / component.Frame.HorizontalSamplingFactor;
         int vRatio = vMax / component.Frame.VerticalSamplingFactor;
@@ -161,45 +174,99 @@ internal static class FrameReconstructor
         return result;
     }
 
+    private static Image BuildGrayscaleImage(byte[] plane, int width, int height, int pixelCount)
+    {
+        byte[] gray = ImageBufferPool.Shared.Rent(pixelCount);
+        plane.AsSpan(0, pixelCount).CopyTo(gray);
+        return Image.FromBuffer(width, height, PixelFormat.Gray8, gray, owned: true);
+    }
+
     private static Image BuildYCbCrImage(byte[][] planes, int width, int height)
     {
         int pixelCount = width * height;
-        var rgb = new byte[pixelCount * 3];
-        ColorConverterSelector.Instance.YCbCrToRgb(planes[0], planes[1], planes[2], rgb, pixelCount);
-        return Image.FromBuffer(width, height, PixelFormat.Rgb24, rgb);
+        byte[] rgb = ImageBufferPool.Shared.Rent(pixelCount * 3);
+        var converter = ColorConverterSelector.Instance;
+        RowParallel.For(height, y =>
+        {
+            int rowOffset = y * width;
+            converter.YCbCrToRgb(
+                planes[0].AsSpan(rowOffset, width),
+                planes[1].AsSpan(rowOffset, width),
+                planes[2].AsSpan(rowOffset, width),
+                rgb.AsSpan(rowOffset * 3, width * 3),
+                width);
+        });
+
+        return Image.FromBuffer(width, height, PixelFormat.Rgb24, rgb, owned: true);
     }
 
     private static Image BuildDirectRgbImage(byte[][] planes, int width, int height)
     {
         int pixelCount = width * height;
-        var rgb = new byte[pixelCount * 3];
-        InterleaveThree(planes[0], planes[1], planes[2], rgb, pixelCount);
-        return Image.FromBuffer(width, height, PixelFormat.Rgb24, rgb);
+        byte[] rgb = ImageBufferPool.Shared.Rent(pixelCount * 3);
+        RowParallel.For(height, y =>
+        {
+            int rowOffset = y * width;
+            InterleaveThree(
+                planes[0].AsSpan(rowOffset, width),
+                planes[1].AsSpan(rowOffset, width),
+                planes[2].AsSpan(rowOffset, width),
+                rgb.AsSpan(rowOffset * 3, width * 3),
+                width);
+        });
+
+        return Image.FromBuffer(width, height, PixelFormat.Rgb24, rgb, owned: true);
     }
 
     private static Image BuildDirectCmykImage(byte[][] planes, int width, int height, bool isAdobeInverted)
     {
         int pixelCount = width * height;
-        var cmyk = new byte[pixelCount * 4];
-        InterleaveFour(planes[0], planes[1], planes[2], planes[3], cmyk, pixelCount);
+        byte[] cmyk = ImageBufferPool.Shared.Rent(pixelCount * 4);
+        RowParallel.For(height, y =>
+        {
+            int rowOffset = y * width;
+            InterleaveFour(
+                planes[0].AsSpan(rowOffset, width),
+                planes[1].AsSpan(rowOffset, width),
+                planes[2].AsSpan(rowOffset, width),
+                planes[3].AsSpan(rowOffset, width),
+                cmyk.AsSpan(rowOffset * 4, width * 4),
+                width);
+        });
 
         if (isAdobeInverted)
         {
-            for (int i = 0; i < cmyk.Length; i++)
+            RowParallel.For(height, y =>
             {
-                cmyk[i] = (byte)(255 - cmyk[i]);
-            }
+                var row = cmyk.AsSpan(y * width * 4, width * 4);
+                for (int i = 0; i < row.Length; i++)
+                {
+                    row[i] = (byte)(255 - row[i]);
+                }
+            });
         }
 
-        return Image.FromBuffer(width, height, PixelFormat.Cmyk32, cmyk);
+        return Image.FromBuffer(width, height, PixelFormat.Cmyk32, cmyk, owned: true);
     }
 
     private static Image BuildYcckImage(byte[][] planes, int width, int height)
     {
         int pixelCount = width * height;
-        var cmyk = new byte[pixelCount * 4];
-        ColorConverterSelector.Instance.YcckToCmyk(planes[0], planes[1], planes[2], planes[3], cmyk, pixelCount);
-        return Image.FromBuffer(width, height, PixelFormat.Cmyk32, cmyk);
+        byte[] cmyk = ImageBufferPool.Shared.Rent(pixelCount * 4);
+        var converter = ColorConverterSelector.Instance;
+        RowParallel.For(height, y =>
+        {
+            int rowOffset = y * width;
+            converter.YcckToCmyk(
+                planes[0].AsSpan(rowOffset, width),
+                planes[1].AsSpan(rowOffset, width),
+                planes[2].AsSpan(rowOffset, width),
+                planes[3].AsSpan(rowOffset, width),
+                cmyk.AsSpan(rowOffset * 4, width * 4),
+                width);
+        });
+
+        return Image.FromBuffer(width, height, PixelFormat.Cmyk32, cmyk, owned: true);
     }
 
     private static void InterleaveThree(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, ReadOnlySpan<byte> c, Span<byte> destination, int pixelCount)

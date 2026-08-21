@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using PeachImage.Formats.Webp.Internal;
+using PeachImage.Internal;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8L;
 
@@ -46,7 +47,7 @@ internal static class Vp8LDecoder
         {
             var pixelFormat = alphaIsUsed ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
             byte[] packed = PackPixels(argb.AsSpan(0, pixelCount), pixelFormat);
-            return Image.FromBuffer(width, height, pixelFormat, packed);
+            return Image.FromBuffer(width, height, pixelFormat, packed, owned: true);
         }
         finally
         {
@@ -151,7 +152,8 @@ internal static class Vp8LDecoder
     private static byte[] PackPixels(ReadOnlySpan<uint> argb, PixelFormat format)
     {
         int bytesPerPixel = format == PixelFormat.Rgba32 ? 4 : 3;
-        var buffer = new byte[(long)argb.Length * bytesPerPixel];
+        int byteCount = checked((int)((long)argb.Length * bytesPerPixel));
+        var buffer = ImageBufferPool.Shared.Rent(byteCount);
 
         int o = 0;
         for (int i = 0; i < argb.Length; i++)

@@ -21,7 +21,10 @@ internal static class Av1YuvToRgbConverter
     /// are 8-bit when <paramref name="bitDepth"/> is 8, otherwise 16-bit (native-endian <c>ushort</c>,
     /// matching this repo's existing <c>Rgb48</c>/<c>Rgba64</c>/<c>Gray16</c> convention -- see
     /// <c>PngImageDecoder</c>'s <c>MemoryMarshal.Cast&lt;byte, ushort&gt;</c> usage), proportionally scaled
-    /// from the source bit depth (not left-shift replication).
+    /// from the source bit depth (not left-shift replication). The returned array is exactly
+    /// <c>outWidth * outHeight * channels * bytesPerChannel</c> bytes -- callers (including tests) rely on
+    /// that exact size, so it is a plain heap allocation rather than a (possibly larger) pool rental; a
+    /// caller that wants a pooled buffer for the final <see cref="Image"/> rents and copies separately.
     /// </summary>
     public static byte[] Convert(
         int[][] colorPlanes,

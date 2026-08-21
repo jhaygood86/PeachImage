@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Shared.Resampling;
 
@@ -28,7 +29,7 @@ internal sealed class Vector256ResamplingConvolver : IResamplingConvolver
     {
         int rowLength = width * ImageResizer.FloatsPerPixel;
 
-        ResamplingParallel.For(weightMap.DestinationSize, destY =>
+        RowParallel.For(weightMap.DestinationSize, destY =>
         {
             var destRow = destination.AsSpan(destY * rowLength, rowLength);
             destRow.Clear();

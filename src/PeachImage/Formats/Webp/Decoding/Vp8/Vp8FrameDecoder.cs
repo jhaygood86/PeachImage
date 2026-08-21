@@ -608,6 +608,8 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
     {
         IVp8ColorConverter converter = Vp8ColorConverterSelector.Instance;
         int bytesPerPixel = alphaPlane is null ? 3 : 4;
+        // Exactly width * height * bytesPerPixel bytes -- callers (including tests) rely on Pixels.Length
+        // being exact, so this is a plain heap allocation, not a pool rental.
         byte[] output = new byte[(long)width * height * bytesPerPixel];
 
         int chromaWidth = mbCols * 8;

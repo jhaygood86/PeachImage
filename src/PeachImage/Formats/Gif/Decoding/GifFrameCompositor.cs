@@ -44,7 +44,7 @@ internal sealed class GifFrameCompositor
 
         DrawIndices(rect, indices, palette, transparentIndex);
 
-        var output = Image.FromBuffer(_width, _height, PixelFormat.Rgba32, _canvas);
+        var output = Image.FromBuffer(_width, _height, PixelFormat.Rgba32, _canvas, owned: false);
 
         _previousDisposal = disposal;
         _previousRect = rect;

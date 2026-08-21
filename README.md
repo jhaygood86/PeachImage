@@ -69,7 +69,7 @@ using PeachImage;
 using PeachImage.Formats.Jpeg;
 
 // Load, inspect, and convert between formats.
-var image = Image.Load("photo.webp");
+using var image = Image.Load("photo.webp");
 Console.WriteLine($"{image.Width}x{image.Height} {image.PixelFormat}");
 
 using var output = File.Create("resaved.jpg");
@@ -89,7 +89,7 @@ Console.WriteLine($"{info.Width}x{info.Height} {info.PixelFormat} ({info.FormatN
 using PeachImage;
 
 // Zero-copy access to the decoded pixel buffer.
-var image = Image.Load("photo.png");
+using var image = Image.Load("photo.png");
 Span<byte> pixels = image.GetPixelSpan();
 Span<byte> firstRow = image.GetRowSpan(0);
 ```
@@ -102,7 +102,7 @@ memory with no intermediate copy:
 using PeachImage;
 
 byte[] uploadedBytes = await ReadUploadIntoMemoryAsync();
-var image = Image.Load(uploadedBytes);
+using var image = Image.Load(uploadedBytes);
 ```
 
 `SaveAsync` exists for async I/O call paths. Encoding itself is CPU-bound, not I/O-bound, so only the
@@ -114,6 +114,17 @@ using PeachImage;
 using var output = File.Create("resaved.jpg");
 await image.SaveAsync(output, "jpeg", new JpegEncoderOptions { Quality = 85 });
 ```
+
+### Disposal & buffer pooling
+
+`Image` implements `IDisposable`: most instances rent their pixel buffer from a shared `ArrayPool`, and
+`Dispose` returns it for reuse by the next decode/resize/etc. This is a performance optimization, not a
+correctness requirement — an un-disposed `Image` is simply garbage-collected like any other object, with
+no leak or corruption risk. It matters most under concurrent load (e.g. a service resizing many uploads
+at once), where reusing pooled buffers meaningfully cuts allocation and GC pressure compared to a fresh
+buffer per call. `AnimatedImage`/`AnimatedImageFrame` don't need disposal: a frame pulled from
+`AnimatedImage.Frames` aliases decoder-internal state rather than owning a pooled buffer (disposing it
+anyway is a safe no-op), and only `AnimatedImageFrame.Clone()`/`Image.Clone()` results own one.
 
 ### Animated images
 
@@ -144,18 +155,20 @@ is the default; also available: `Box`, `CatmullRom`, `Hermite`, `Lanczos2`/`Lanc
 ```csharp
 using PeachImage;
 
-var image = Image.Load("photo.jpg");
+using var image = Image.Load("photo.jpg");
 
 // Bicubic by default.
-var thumbnail = image.Resize(200, 150);
+using var thumbnail = image.Resize(200, 150);
 
 // Or pick a specific filter.
-var sharpened = image.Resize(200, 150, new ResizeOptions { Filter = ResamplingFilter.Lanczos3 });
+using var sharpened = image.Resize(200, 150, new ResizeOptions { Filter = ResamplingFilter.Lanczos3 });
 
 // ResizeMode.Max treats width/height as a bounding box instead of an exact target: scales down to the
 // largest size that fits while preserving aspect ratio, and never upscales — if the source already fits,
-// the same instance is returned unchanged rather than allocating a needless copy.
-var thumbnailWithinBox = image.Resize(200, 200, new ResizeOptions { Mode = ResizeMode.Max });
+// the same instance is returned unchanged rather than allocating a needless copy (so this may end up
+// disposing `image` itself — safe, since disposing twice is a no-op, but don't keep using `image`
+// afterward without checking for that case first).
+using var thumbnailWithinBox = image.Resize(200, 200, new ResizeOptions { Mode = ResizeMode.Max });
 ```
 
 `AnimatedImage.Resize` resizes every frame — lazily, as `Frames` is enumerated — preserving each frame's
