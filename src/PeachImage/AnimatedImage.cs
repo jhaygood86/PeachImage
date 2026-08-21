@@ -101,7 +101,10 @@ public sealed class AnimatedImage
     /// <summary>
     /// Creates a resized copy of this animation: every frame resized to the given dimensions using the same
     /// resampling filter, same loop count and per-frame timing/disposal. Lazy, like <see cref="Frames"/>
-    /// itself — each frame is resized on demand as it's pulled, not all at once.
+    /// itself — each frame is resized on demand as it's pulled, not all at once. When
+    /// <paramref name="options"/>'s <see cref="ResizeOptions.Mode"/> is <see cref="ResizeMode.Max"/> and this
+    /// animation's canvas already fits within <paramref name="width"/> x <paramref name="height"/>, returns
+    /// this same instance unchanged rather than resizing every frame for no reason.
     /// </summary>
     public AnimatedImage Resize(int width, int height, ResizeOptions? options = null)
     {
@@ -109,27 +112,17 @@ public sealed class AnimatedImage
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(height, 0);
 
         options ??= new ResizeOptions();
+        if (options.Mode == ResizeMode.Max)
+        {
+            (width, height) = ResizeToFitCalculator.ComputeFitDimensions(Width, Height, width, height);
+            if (width == Width && height == Height)
+            {
+                return this;
+            }
+        }
+
         return new AnimatedImage(ResizeFrames(Frames, Width, Height, width, height, options), width, height, LoopCount);
     }
-
-    /// <summary>
-    /// Creates a copy of this animation scaled down to fit within a <paramref name="maxWidth"/> x
-    /// <paramref name="maxHeight"/> box, preserving aspect ratio — every frame resized the same way <see
-    /// cref="Resize"/> does. Shrink-only: if this animation's canvas already fits, returns this same instance
-    /// unchanged rather than resizing every frame for no reason.
-    /// </summary>
-    public AnimatedImage ResizeToFit(int maxWidth, int maxHeight, ResizeOptions? options = null)
-    {
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(maxWidth, 0);
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(maxHeight, 0);
-
-        var (width, height) = ResizeToFitCalculator.ComputeFitDimensions(Width, Height, maxWidth, maxHeight);
-        return width == Width && height == Height ? this : Resize(width, height, options);
-    }
-
-    /// <summary>Shorthand for <see cref="ResizeToFit(int, int, ResizeOptions?)"/> with a single bounding dimension applied to both axes.</summary>
-    public AnimatedImage ResizeToFit(int maxDimension, ResizeOptions? options = null) =>
-        ResizeToFit(maxDimension, maxDimension, options);
 
     /// <summary>Encodes this animated image and writes it to <paramref name="path"/>, inferring the format from the file extension.</summary>
     public void Save(string path, EncoderOptions? options = null)

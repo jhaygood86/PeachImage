@@ -3,7 +3,7 @@ namespace PeachImage.Tests.Resizing;
 public class AnimatedImageResizeToFitTests
 {
     [Fact]
-    public void ResizeToFit_ScalesDownToFitBounds_PreservingAspectRatio_ForEveryFrame()
+    public void Resize_ModeMax_ScalesDownToFitBounds_PreservingAspectRatio_ForEveryFrame()
     {
         var frames = new List<AnimatedImageFrame>
         {
@@ -12,7 +12,7 @@ public class AnimatedImageResizeToFitTests
         };
         var animated = new AnimatedImage(frames, 400, 200, loopCount: 3);
 
-        var fitted = animated.ResizeToFit(100, 100);
+        var fitted = animated.Resize(100, 100, new ResizeOptions { Mode = ResizeMode.Max });
 
         Assert.Equal(100, fitted.Width);
         Assert.Equal(50, fitted.Height);
@@ -26,7 +26,7 @@ public class AnimatedImageResizeToFitTests
     }
 
     [Fact]
-    public void ResizeToFit_DoesNotUpscale_ReturnsSameInstance_WhenCanvasAlreadyFits()
+    public void Resize_ModeMax_DoesNotUpscale_ReturnsSameInstance_WhenCanvasAlreadyFits()
     {
         var frames = new List<AnimatedImageFrame>
         {
@@ -34,26 +34,26 @@ public class AnimatedImageResizeToFitTests
         };
         var animated = new AnimatedImage(frames, 50, 30, loopCount: 0);
 
-        var fitted = animated.ResizeToFit(100, 100);
+        var fitted = animated.Resize(100, 100, new ResizeOptions { Mode = ResizeMode.Max });
 
         Assert.Same(animated, fitted);
     }
 
     [Fact]
-    public void ResizeToFit_SingleMaxDimensionOverload_MatchesExplicitSquareBox()
+    public void Resize_ModeExact_IsTheDefault_AndAlwaysProducesTheExactRequestedDimensions()
     {
-        var frames = new List<AnimatedImageFrame> { new(MakeFrame(400, 200), TimeSpan.FromMilliseconds(100), FrameDisposalMethod.None) };
-        var animated = new AnimatedImage(frames, 400, 200, loopCount: 0);
+        var frames = new List<AnimatedImageFrame> { new(MakeFrame(50, 30), TimeSpan.FromMilliseconds(100), FrameDisposalMethod.None) };
+        var animated = new AnimatedImage(frames, 50, 30, loopCount: 0);
 
-        var viaSingleArg = animated.ResizeToFit(100);
-        var viaExplicitBox = animated.ResizeToFit(100, 100);
+        var resized = animated.Resize(100, 100);
 
-        Assert.Equal(viaExplicitBox.Width, viaSingleArg.Width);
-        Assert.Equal(viaExplicitBox.Height, viaSingleArg.Height);
+        Assert.NotSame(animated, resized);
+        Assert.Equal(100, resized.Width);
+        Assert.Equal(100, resized.Height);
     }
 
     [Fact]
-    public void ResizeToFit_IsLazy_DoesNotResizeUntilFramesAreEnumerated()
+    public void Resize_ModeMax_IsLazy_DoesNotResizeUntilFramesAreEnumerated()
     {
         int resizedCount = 0;
         IEnumerable<AnimatedImageFrame> CountingFrames()
@@ -66,7 +66,7 @@ public class AnimatedImageResizeToFitTests
         }
 
         var animated = new AnimatedImage(CountingFrames(), 400, 200, loopCount: 0);
-        var fitted = animated.ResizeToFit(100, 100);
+        var fitted = animated.Resize(100, 100, new ResizeOptions { Mode = ResizeMode.Max });
 
         Assert.Equal(0, resizedCount);
 
@@ -76,13 +76,14 @@ public class AnimatedImageResizeToFitTests
     }
 
     [Fact]
-    public void ResizeToFit_ThrowsForNonPositiveBounds()
+    public void Resize_ThrowsForNonPositiveDimensions_RegardlessOfMode()
     {
         var animated = new AnimatedImage([new AnimatedImageFrame(MakeFrame(4, 4), TimeSpan.Zero, FrameDisposalMethod.None)], 4, 4, 0);
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => animated.ResizeToFit(0, 4));
-        Assert.Throws<ArgumentOutOfRangeException>(() => animated.ResizeToFit(4, 0));
-        Assert.Throws<ArgumentOutOfRangeException>(() => animated.ResizeToFit(0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => animated.Resize(0, 4));
+        Assert.Throws<ArgumentOutOfRangeException>(() => animated.Resize(4, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => animated.Resize(0, 4, new ResizeOptions { Mode = ResizeMode.Max }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => animated.Resize(4, 0, new ResizeOptions { Mode = ResizeMode.Max }));
     }
 
     private static Image MakeFrame(int width, int height)

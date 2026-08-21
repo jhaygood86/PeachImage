@@ -205,8 +205,11 @@ public sealed class Image
     }
 
     /// <summary>
-    /// Creates a resized copy of this image using the given target dimensions and resampling filter.
-    /// Does not modify this instance (same non-mutating contract as <see cref="Clone"/>).
+    /// Creates a resized copy of this image using the given target dimensions and resampling filter. Does
+    /// not modify this instance (same non-mutating contract as <see cref="Clone"/>) — except when
+    /// <paramref name="options"/>'s <see cref="ResizeOptions.Mode"/> is <see cref="ResizeMode.Max"/> and this
+    /// image already fits within <paramref name="width"/> x <paramref name="height"/>, in which case this
+    /// same instance is returned unchanged rather than allocating a needless copy.
     /// </summary>
     public Image Resize(int width, int height, ResizeOptions? options = null)
     {
@@ -214,27 +217,17 @@ public sealed class Image
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(height, 0);
 
         options ??= new ResizeOptions();
+        if (options.Mode == ResizeMode.Max)
+        {
+            (width, height) = ResizeToFitCalculator.ComputeFitDimensions(Width, Height, width, height);
+            if (width == Width && height == Height)
+            {
+                return this;
+            }
+        }
+
         return ImageResizer.Resize(this, width, height, options.Filter);
     }
-
-    /// <summary>
-    /// Creates a copy of this image scaled down to fit within a <paramref name="maxWidth"/> x
-    /// <paramref name="maxHeight"/> box, preserving aspect ratio. Shrink-only: if this image already fits,
-    /// returns this same instance unchanged (unlike <see cref="Resize"/>, which always produces a new
-    /// <see cref="Image"/> even for a same-size resize) rather than allocating a needless copy.
-    /// </summary>
-    public Image ResizeToFit(int maxWidth, int maxHeight, ResizeOptions? options = null)
-    {
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(maxWidth, 0);
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(maxHeight, 0);
-
-        var (width, height) = ResizeToFitCalculator.ComputeFitDimensions(Width, Height, maxWidth, maxHeight);
-        return width == Width && height == Height ? this : Resize(width, height, options);
-    }
-
-    /// <summary>Shorthand for <see cref="ResizeToFit(int, int, ResizeOptions?)"/> with a single bounding dimension applied to both axes.</summary>
-    public Image ResizeToFit(int maxDimension, ResizeOptions? options = null) =>
-        ResizeToFit(maxDimension, maxDimension, options);
 
     /// <summary>Encodes this image and writes it to <paramref name="path"/>, inferring the format from the file extension.</summary>
     public void Save(string path, EncoderOptions? options = null)

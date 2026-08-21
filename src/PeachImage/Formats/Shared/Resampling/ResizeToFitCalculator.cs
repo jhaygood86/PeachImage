@@ -2,9 +2,9 @@ namespace PeachImage.Formats.Shared.Resampling;
 
 /// <summary>
 /// Computes the largest size that fits within a bounding box while preserving aspect ratio, without ever
-/// upscaling — shared by <see cref="Image.ResizeToFit(int, int, ResizeOptions?)"/> and
-/// <see cref="AnimatedImage.ResizeToFit(int, int, ResizeOptions?)"/> so both apply the identical
-/// shrink-only, aspect-preserving math.
+/// upscaling — shared by <see cref="Image.Resize(int, int, ResizeOptions?)"/> and
+/// <see cref="AnimatedImage.Resize(int, int, ResizeOptions?)"/> so both apply the identical shrink-only,
+/// aspect-preserving math when <see cref="ResizeOptions.Mode"/> is <see cref="ResizeMode.Max"/>.
 /// </summary>
 internal static class ResizeToFitCalculator
 {

@@ -131,14 +131,14 @@ var thumbnail = image.Resize(200, 150);
 // Or pick a specific filter.
 var sharpened = image.Resize(200, 150, new ResizeOptions { Filter = ResamplingFilter.Lanczos3 });
 
-// Scale down to fit within a box, preserving aspect ratio; never upscales. Returns the same instance
-// unchanged if the source already fits. `ResizeToFit(maxDimension)` is shorthand for a square box.
-var thumbnailWithinBox = image.ResizeToFit(200, 200);
-var thumbnailWithinSquare = image.ResizeToFit(200);
+// ResizeMode.Max treats width/height as a bounding box instead of an exact target: scales down to the
+// largest size that fits while preserving aspect ratio, and never upscales — if the source already fits,
+// the same instance is returned unchanged rather than allocating a needless copy.
+var thumbnailWithinBox = image.Resize(200, 200, new ResizeOptions { Mode = ResizeMode.Max });
 ```
 
-`AnimatedImage.Resize`/`AnimatedImage.ResizeToFit` resize every frame — lazily, as `Frames` is enumerated — preserving each frame's
-duration and disposal method:
+`AnimatedImage.Resize` resizes every frame — lazily, as `Frames` is enumerated — preserving each frame's
+duration and disposal method; `ResizeOptions.Mode` works the same way there too:
 
 ```csharp
 using PeachImage;
