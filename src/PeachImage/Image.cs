@@ -190,6 +190,20 @@ public sealed class Image
         return Load(buffered, options);
     }
 
+    /// <summary>
+    /// Loads an image from an in-memory buffer, auto-detecting its format by sniffing its header bytes.
+    /// Decodes directly from <paramref name="data"/>'s pinned memory via <see cref="UnmanagedMemoryStream"/>
+    /// — no intermediate copy, unlike wrapping a <see cref="MemoryStream"/> around <c>data.ToArray()</c>.
+    /// </summary>
+    public static unsafe Image Load(ReadOnlySpan<byte> data, DecoderOptions? options = null)
+    {
+        fixed (byte* pointer = data)
+        {
+            using var stream = new UnmanagedMemoryStream(pointer, data.Length);
+            return Load(stream, options);
+        }
+    }
+
     /// <summary>Reads image dimensions and format information from <paramref name="stream"/> without fully decoding pixel data.</summary>
     public static ImageInfo Identify(Stream stream)
     {
@@ -252,6 +266,45 @@ public sealed class Image
             ?? throw new UnknownImageFormatException($"No built-in codec can encode format '{formatName}'.", formatName);
 
         codec.Encode(this, stream, options);
+    }
+
+    /// <summary>
+    /// Encodes this image and writes it to <paramref name="path"/>, inferring the format from the file
+    /// extension. Encoding itself is synchronous and CPU-bound, same as <see cref="LoadAsync(Stream, DecoderOptions?, CancellationToken)"/>'s
+    /// decode — only the file write is awaited.
+    /// </summary>
+    public async Task SaveAsync(string path, EncoderOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        string extension = Path.GetExtension(path).TrimStart('.');
+        var codec = FindCodecByExtension(extension)
+            ?? throw new UnknownImageFormatException($"No built-in codec can encode files with extension '.{extension}'.");
+
+        using var fileStream = File.Create(path);
+        using var buffered = new MemoryStream();
+        codec.Encode(this, buffered, options);
+        buffered.Position = 0;
+        await buffered.CopyToAsync(fileStream, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Encodes this image as <paramref name="formatName"/> and writes it to <paramref name="stream"/>.
+    /// Encoding itself is synchronous and CPU-bound, same as <see cref="LoadAsync(Stream, DecoderOptions?, CancellationToken)"/>'s
+    /// decode — only the write to <paramref name="stream"/> is awaited.
+    /// </summary>
+    public async Task SaveAsync(Stream stream, string formatName, EncoderOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        ArgumentNullException.ThrowIfNull(formatName);
+
+        var codec = FindCodecByFormatName(formatName)
+            ?? throw new UnknownImageFormatException($"No built-in codec can encode format '{formatName}'.", formatName);
+
+        using var buffered = new MemoryStream();
+        codec.Encode(this, buffered, options);
+        buffered.Position = 0;
+        await buffered.CopyToAsync(stream, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
