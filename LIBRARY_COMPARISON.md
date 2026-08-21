@@ -204,11 +204,13 @@ libwebp encoder on throughput at the same quality setting:
 
 | Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
 |---|---:|---:|---:|---:|
-| Photographic (quality 75) | 99.10 ms | 112.57 ms | **0.88×** | 51.9 MB |
+| Photographic (quality 75) | 102.8 ms | 111.0 ms | **0.93×** | 8.29 MB |
 
-The allocation gap (52 MB vs. SkiaSharp's ~1 KB) comes from unpooled per-macroblock scratch
-allocations (a fresh `short[16]`/`short[16][]` per block); libwebp's encoder works in unmanaged
-memory throughout, so its managed allocation is near zero regardless of image size.
+The remaining allocation gap (8.3 MB vs. SkiaSharp's ~1 KB) comes from one-time per-image buffers
+(RGB-to-YUV conversion, final bitstream chunk assembly); libwebp's encoder works in unmanaged memory
+throughout, so its managed allocation is near zero regardless of image size. The per-macroblock
+scratch allocations that previously dominated this figure (a fresh `short[16]`/`short[16][]` per
+block, ~52 MB for this scenario) are now stack-allocated instead.
 
 ## Resize
 
