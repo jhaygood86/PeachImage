@@ -31,6 +31,10 @@ internal static class CorpusFileSource
     public static IEnumerable<TheoryDataRow<string>> MozjpegFiles() =>
         ToTheoryData(EnumerateJpegFiles(Path.Combine(CorpusPaths.ImazenRoot, "mozjpeg")));
 
+    /// <summary>The first 10 mozjpeg files, for checks that re-encode each file (progressive round-trip)
+    /// rather than just decode it — capped to keep that cost modest, not for coverage breadth.</summary>
+    public static IEnumerable<TheoryDataRow<string>> MozjpegFilesSample() => MozjpegFiles().Take(10);
+
     public static IEnumerable<TheoryDataRow<string>> ZuneFuzzFiles() =>
         // Fuzz inputs are named by content hash with no file extension (they're arbitrary byte sequences,
         // not necessarily even well-formed enough to deserve a ".jpg" name) — enumerate everything, not

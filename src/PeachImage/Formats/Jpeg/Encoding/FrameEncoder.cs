@@ -68,7 +68,7 @@ internal static class FrameEncoder
             var luminanceQuant = QuantizationTableFactory.CreateLuminance(options.Quality);
             var chrominanceQuant = grayscale ? null : QuantizationTableFactory.CreateChrominance(options.Quality);
 
-            var components = BuildComponentPlans(grayscale, chromaHRatio, chromaVRatio, mcusAcross, mcusDown);
+            var components = BuildComponentPlans(grayscale, chromaHRatio, chromaVRatio, mcusAcross, mcusDown, width, height, hMax, vMax);
 
             var quantizedComponents = new short[components.Length][];
             for (int i = 0; i < components.Length; i++)
@@ -152,18 +152,32 @@ internal static class FrameEncoder
         _ => throw new ArgumentOutOfRangeException(nameof(subsampling)),
     };
 
-    private static ComponentPlan[] BuildComponentPlans(bool grayscale, int chromaHRatio, int chromaVRatio, int mcusAcross, int mcusDown)
+    private static int CeilDiv(int a, int b) => (a + b - 1) / b;
+
+    // Actual (pre-MCU-padding) block extents per component, needed only by progressive encode's
+    // non-interleaved AC scans, which must stop at a component's true block grid rather than walking
+    // into the MCU-padding blocks baseline/DC-interleaved scans implicitly cover via BlocksWide/BlocksHigh.
+    private static ComponentPlan[] BuildComponentPlans(bool grayscale, int chromaHRatio, int chromaVRatio, int mcusAcross, int mcusDown, int width, int height, int hMax, int vMax)
     {
         if (grayscale)
         {
-            return [new ComponentPlan(0, 1, 1, 1, 0, 0, mcusAcross, mcusDown)];
+            int blocksWide = CeilDiv(width, 8);
+            int blocksHigh = CeilDiv(height, 8);
+            return [new ComponentPlan(0, 1, 1, 1, 0, 0, mcusAcross, mcusDown, blocksWide, blocksHigh)];
         }
+
+        int yBlocksWide = CeilDiv(width, 8);
+        int yBlocksHigh = CeilDiv(height, 8);
+        int chromaWidth = CeilDiv(width, hMax);
+        int chromaHeight = CeilDiv(height, vMax);
+        int cBlocksWide = CeilDiv(chromaWidth, 8);
+        int cBlocksHigh = CeilDiv(chromaHeight, 8);
 
         return
         [
-            new ComponentPlan(0, 1, (byte)chromaHRatio, (byte)chromaVRatio, 0, 0, mcusAcross * chromaHRatio, mcusDown * chromaVRatio),
-            new ComponentPlan(1, 2, 1, 1, 1, 1, mcusAcross, mcusDown),
-            new ComponentPlan(2, 3, 1, 1, 1, 1, mcusAcross, mcusDown),
+            new ComponentPlan(0, 1, (byte)chromaHRatio, (byte)chromaVRatio, 0, 0, mcusAcross * chromaHRatio, mcusDown * chromaVRatio, yBlocksWide, yBlocksHigh),
+            new ComponentPlan(1, 2, 1, 1, 1, 1, mcusAcross, mcusDown, cBlocksWide, cBlocksHigh),
+            new ComponentPlan(2, 3, 1, 1, 1, 1, mcusAcross, mcusDown, cBlocksWide, cBlocksHigh),
         ];
     }
 
@@ -283,7 +297,7 @@ internal static class FrameEncoder
             sofPayload[offset + 2] = c.QuantId;
         }
 
-        JpegMarkerWriter.WriteSegment(stream, JpegMarker.Sof0, sofPayload);
+        JpegMarkerWriter.WriteSegment(stream, options.Progressive ? JpegMarker.Sof2 : JpegMarker.Sof0, sofPayload);
 
         var luminanceDc = HuffmanEncodingTable.Build(StandardHuffmanTables.LuminanceDc.Counts, StandardHuffmanTables.LuminanceDc.Values);
         var luminanceAc = HuffmanEncodingTable.Build(StandardHuffmanTables.LuminanceAc.Counts, StandardHuffmanTables.LuminanceAc.Values);
@@ -308,21 +322,6 @@ internal static class FrameEncoder
             JpegMarkerWriter.WriteSegment(stream, JpegMarker.Dri, dri);
         }
 
-        var sosPayload = new byte[1 + (components.Length * 2) + 3];
-        sosPayload[0] = (byte)components.Length;
-        for (int i = 0; i < components.Length; i++)
-        {
-            var c = components[i];
-            int offset = 1 + (i * 2);
-            sosPayload[offset] = c.Id;
-            sosPayload[offset + 1] = (byte)((c.HuffTableId << 4) | c.HuffTableId);
-        }
-
-        sosPayload[^3] = 0;
-        sosPayload[^2] = 63;
-        sosPayload[^1] = 0;
-        JpegMarkerWriter.WriteSegment(stream, JpegMarker.Sos, sosPayload);
-
         var dcTables = new HuffmanEncodingTable[components.Length];
         var acTables = new HuffmanEncodingTable[components.Length];
         dcTables[0] = luminanceDc;
@@ -334,8 +333,61 @@ internal static class FrameEncoder
         }
 
         var writer = new JpegEntropyWriter(stream);
+        if (options.Progressive)
+        {
+            WriteProgressiveScans(stream, writer, components, quantizedComponents, dcTables, options.RestartInterval, mcusAcross, mcusDown);
+        }
+        else
+        {
+            WriteBaselineScan(stream, writer, components, quantizedComponents, dcTables, acTables, options.RestartInterval, mcusAcross, mcusDown);
+        }
+
+        JpegMarkerWriter.WriteMarkerOnly(stream, JpegMarker.Eoi);
+    }
+
+    internal static void WriteScanHeader(Stream stream, ComponentPlan[] components, ReadOnlySpan<int> componentIndices, int ss, int se, int ah, int al, int? acTableIdOverride = null)
+    {
+        var sosPayload = new byte[1 + (componentIndices.Length * 2) + 3];
+        sosPayload[0] = (byte)componentIndices.Length;
+        for (int i = 0; i < componentIndices.Length; i++)
+        {
+            var c = components[componentIndices[i]];
+            int offset = 1 + (i * 2);
+            sosPayload[offset] = c.Id;
+
+            // Non-interleaved progressive AC scans build and write their own table under a fixed id
+            // (see ProgressiveScanEncoder) regardless of which component they're for, so the AC selector
+            // nibble can't be derived from the component's own (baseline-oriented) HuffTableId here.
+            int acTableId = acTableIdOverride ?? c.HuffTableId;
+            sosPayload[offset + 1] = (byte)((c.HuffTableId << 4) | acTableId);
+        }
+
+        sosPayload[^3] = (byte)ss;
+        sosPayload[^2] = (byte)se;
+        sosPayload[^1] = (byte)((ah << 4) | al);
+        JpegMarkerWriter.WriteSegment(stream, JpegMarker.Sos, sosPayload);
+    }
+
+    private static void WriteBaselineScan(
+        Stream stream,
+        JpegEntropyWriter writer,
+        ComponentPlan[] components,
+        short[][] quantizedComponents,
+        HuffmanEncodingTable[] dcTables,
+        HuffmanEncodingTable[] acTables,
+        int restartInterval,
+        int mcusAcross,
+        int mcusDown)
+    {
+        Span<int> allIndices = stackalloc int[components.Length];
+        for (int i = 0; i < components.Length; i++)
+        {
+            allIndices[i] = i;
+        }
+
+        WriteScanHeader(stream, components, allIndices, ss: 0, se: 63, ah: 0, al: 0);
+
         var dcPredictors = new int[components.Length];
-        int restartInterval = options.RestartInterval;
         int mcusUntilRestart = restartInterval;
         int restartIndex = 0;
 
@@ -377,7 +429,25 @@ internal static class FrameEncoder
         }
 
         writer.Flush();
-        JpegMarkerWriter.WriteMarkerOnly(stream, JpegMarker.Eoi);
+    }
+
+    private static void WriteProgressiveScans(
+        Stream stream,
+        JpegEntropyWriter writer,
+        ComponentPlan[] components,
+        short[][] quantizedComponents,
+        HuffmanEncodingTable[] dcTables,
+        int restartInterval,
+        int mcusAcross,
+        int mcusDown)
+    {
+        foreach (var scan in ProgressiveScanScript.BuildDefaultScript(components.Length))
+        {
+            // AC scans write their own (scan-specific, optimized) DHT before their SOS — see
+            // ProgressiveScanEncoder.EncodeScan — so the SOS write is not hoisted out here uniformly.
+            ProgressiveScanEncoder.EncodeScan(writer, stream, scan, components, quantizedComponents, dcTables, restartInterval, mcusAcross, mcusDown);
+            writer.Flush();
+        }
     }
 
     private static void WriteQuantTable(Stream stream, byte id, ushort[] naturalOrderTable)
@@ -392,7 +462,7 @@ internal static class FrameEncoder
         JpegMarkerWriter.WriteSegment(stream, JpegMarker.Dqt, payload);
     }
 
-    private static void WriteHuffmanTable(Stream stream, int tableClass, int id, HuffmanEncodingTable table)
+    internal static void WriteHuffmanTable(Stream stream, int tableClass, int id, HuffmanEncodingTable table)
     {
         var payload = new byte[1 + 16 + table.Values.Length];
         payload[0] = (byte)((tableClass << 4) | id);
@@ -448,14 +518,14 @@ internal static class FrameEncoder
         }
     }
 
-    private static int MagnitudeBits(int value)
+    internal static int MagnitudeBits(int value)
     {
         uint magnitude = (uint)Math.Abs(value);
         return magnitude == 0 ? 0 : 32 - System.Numerics.BitOperations.LeadingZeroCount(magnitude);
     }
 
-    private static int EncodeMagnitude(int value, int size) =>
+    internal static int EncodeMagnitude(int value, int size) =>
         size == 0 ? 0 : value >= 0 ? value : value + (1 << size) - 1;
 
-    private readonly record struct ComponentPlan(int Index, byte Id, byte HSampling, byte VSampling, byte QuantId, byte HuffTableId, int BlocksWide, int BlocksHigh);
+    internal readonly record struct ComponentPlan(int Index, byte Id, byte HSampling, byte VSampling, byte QuantId, byte HuffTableId, int BlocksWide, int BlocksHigh, int ActualBlocksWide, int ActualBlocksHigh);
 }

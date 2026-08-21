@@ -11,4 +11,7 @@ public sealed class JpegEncoderOptions : EncoderOptions
 
     /// <summary>The number of MCUs between restart markers, or 0 to disable restart markers.</summary>
     public int RestartInterval { get; init; }
+
+    /// <summary>Whether to encode as progressive JPEG (multiple, successively refined scans) instead of baseline sequential. Defaults to false.</summary>
+    public bool Progressive { get; init; }
 }
