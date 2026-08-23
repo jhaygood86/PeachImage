@@ -23,10 +23,11 @@ internal static class Av1RgbToYuvConverter
     private const double Kg = 1.0 - Kr - Kb;
 
     // Full-range 8-bit constants, matching Av1YuvToRgbConverter's own yLo/yRange/cLo/cRange for
-    // colorRangeFull == true, bitDepth == 8.
+    // colorRangeFull == true, bitDepth == 8 (see that class's cRange remark: full-range chroma spans the
+    // entire 0..255 sample range, the same as full-range luma, not half of it).
     private const double YRange = 255.0;
     private const double CLo = 128.0;
-    private const double CRange = 255.0 / 2.0;
+    private const double CRange = 255.0;
 
     /// <summary>Converts a monochrome (Gray8) source into a single Y plane -- exactly the source samples, since a true gray sample's Y projection is itself (Kr + Kg + Kb == 1).</summary>
     public static int[] ConvertMonoChrome(ReadOnlySpan<byte> gray, int width, int height)

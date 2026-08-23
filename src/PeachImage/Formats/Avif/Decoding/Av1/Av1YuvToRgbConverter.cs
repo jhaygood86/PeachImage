@@ -110,7 +110,17 @@ internal static class Av1YuvToRgbConverter
             yLo = colorRangeFull ? 0 : 16 << bitShift;
             yRange = colorRangeFull ? srcMax : 219 << bitShift;
             cLo = colorRangeFull ? 1 << (bitDepth - 1) : 128 << bitShift;
-            cRange = colorRangeFull ? srcMax / 2.0 : 224 << bitShift;
+
+            // Full-range chroma spans the *entire* sample range (0..srcMax, centered on cLo) the same way
+            // full-range luma spans the entire 0..srcMax via yRange above -- confirmed empirically against
+            // ffmpeg's libdav1d-backed AVIF decode (an independent AV1 decoder) after this line previously
+            // read `srcMax / 2.0`: that halved-swing value made every full-range, non-gray corpus file decode
+            // to visibly over-saturated/clipped colors (e.g. extended_pixi.avif's first pixel decoded to
+            // (0,255,0) here vs. ffmpeg's (0,131,0) for the same Y=1/U=4/V=4 source samples -- consistent with
+            // exactly a 2x-too-large chroma excursion, not a rounding-level discrepancy). `224 << bitShift`
+            // below (the limited-range case) was already correct by the same reasoning: limited-range chroma's
+            // valid excursion is the sub-range 16..240, a full swing of 224, not 112.
+            cRange = colorRangeFull ? srcMax : 224 << bitShift;
         }
 
         var twoKr = Vector128.Create(2 * (1 - kr));
