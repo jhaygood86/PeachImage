@@ -1,6 +1,7 @@
 using PeachImage.Formats.Webp.Encoding.Vp8;
 using PeachImage.Formats.Webp.Encoding.Vp8L;
 using PeachImage.Formats.Webp.Internal;
+using PeachImage.Formats.Webp.Kernels;
 
 namespace PeachImage.Formats.Webp.Encoding;
 
@@ -53,15 +54,7 @@ internal static class WebpFrameEncoder
     private static byte[] ExtractRgb(uint[] argb, int pixelCount)
     {
         var rgb = new byte[pixelCount * 3];
-        for (int i = 0; i < pixelCount; i++)
-        {
-            uint pixel = argb[i];
-            int o = i * 3;
-            rgb[o + 0] = (byte)(pixel >> 16);
-            rgb[o + 1] = (byte)(pixel >> 8);
-            rgb[o + 2] = (byte)pixel;
-        }
-
+        WebpPixelPackKernelSelector.Instance.ExtractRgb(argb.AsSpan(0, pixelCount), rgb);
         return rgb;
     }
 
@@ -111,25 +104,9 @@ internal static class WebpFrameEncoder
 
     private static bool GatherRgba32(Image image, uint[] destination, int width, int height)
     {
-        bool allOpaque = true;
-
-        for (int y = 0; y < height; y++)
-        {
-            var row = image.GetRowSpan(y);
-            int rowBase = y * width;
-            for (int x = 0; x < width; x++)
-            {
-                int o = x * 4;
-                byte r = row[o];
-                byte g = row[o + 1];
-                byte b = row[o + 2];
-                byte a = row[o + 3];
-                allOpaque &= a == 0xFF;
-                destination[rowBase + x] = ((uint)a << 24) | ((uint)r << 16) | ((uint)g << 8) | b;
-            }
-        }
-
-        return !allOpaque;
+        // Rgba32 rows are always tightly packed (no per-row padding -- see Image.GetPixelSpan), so the whole
+        // image is one contiguous R,G,B,A byte run rather than needing a per-row GetRowSpan loop.
+        return WebpPixelPackKernelSelector.Instance.GatherRgba32(image.GetPixelSpan(), destination.AsSpan(0, width * height));
     }
 }
 
