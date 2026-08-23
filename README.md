@@ -44,6 +44,14 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   block is a fixed 8x8 with a real intra-mode decision among DC/vertical/horizontal/smooth/Paeth
   candidates). Alpha-bearing sources and higher bit depths are rejected with a clear exception rather than
   silently dropped or downsampled.
+- **TIFF**: decode only (no encode). Covers both byte orders (`II`/`MM`), uncompressed/LZW/PackBits
+  compression, 1/2/4/8/16-bit depth, and grayscale (WhiteIsZero/BlackIsZero), RGB (with optional straight or
+  premultiplied alpha), palette, and CMYK color, including the Predictor=2 horizontal-differencing variant
+  LZW-compressed files commonly use. Tiled organization, planar (non-chunky) storage, any compression other
+  than none/LZW/PackBits, BigTIFF, floating-point/signed samples, and photometric interpretations outside
+  that set (YCbCr, LogLuv, Lab) are deliberately out of scope and throw a clear
+  `TiffUnsupportedFeatureException` rather than a silently wrong result — the goal is correctness on
+  real-world scanner/export-tool output, not every TIFF extension ever specified.
 - Other formats are not yet implemented. The public API (`Image`, `AnimatedImage` for multi-frame formats
   like GIF) is designed to support them without breaking changes when they're added. Codec selection is
   internal — there's no format-specific type or registration step in the public API.
@@ -191,13 +199,33 @@ dotnet build PeachImage.slnx
 dotnet test PeachImage.slnx
 ```
 
-The first `dotnet test` run automatically fetches JPEG, BMP, and PNG test corpora (the Imazen `codec-corpus`
-conformance sets, image-rs/jpeg-decoder's test assets, and — for BMP — the `bmp-conformance` subset of
-`codec-corpus`, itself generated from Jason Summers' [bmpsuite](https://github.com/jsummers/bmpsuite); for
+The first `dotnet test` run automatically fetches JPEG, BMP, PNG, and TIFF test corpora (the Imazen
+`codec-corpus` conformance sets, image-rs/jpeg-decoder's test assets, and — for BMP — the `bmp-conformance`
+subset of `codec-corpus`, itself generated from Jason Summers' [bmpsuite](https://github.com/jsummers/bmpsuite); for
 PNG — the `pngsuite` subset of `codec-corpus`, a mirror of Willem van Schaik's classic PngSuite conformance
-set) into the gitignored `tests/corpus/` directory — no separate script needed. Set
+set; for TIFF — the `tiff-conformance` subset of `codec-corpus`, sourced from libtiff's, image-tiff's, and
+image-rs's own test suites) into the gitignored `tests/corpus/` directory — no separate script needed. Set
 `PEACHIMAGE_SKIP_CORPUS_FETCH=1` to skip network access; corpus-driven tests report as skipped rather than
 failing.
+
+TIFF also has a decode-correctness check against `ffmpeg`'s independent TIFF decoder (SkiaSharp has no TIFF
+codec, so it can't serve as the differential oracle the other formats' corpus tests use). This baseline is
+checked in (`tests/PeachImage.Tests/Formats/Tiff/Corpus/TiffFfmpegReference.baseline.tsv`) and regenerating
+it requires `ffmpeg`/`ffprobe` on `PATH` — set `PEACHIMAGE_TIFF_FFMPEG_BASELINE=write` and run
+`dotnet test --filter TiffFfmpegReferenceTests`, then review the diff before committing. Normal test runs
+never invoke `ffmpeg`; they only compare against the checked-in baseline.
+
+AVIF and WebP decode are additionally checked against `ffmpeg`'s own, independent decoders (`libdav1d` for
+AVIF; libwebp itself for WebP) via a checked-in pixel baseline (`AvifFfmpegReference.baseline.tsv`/
+`WebpFfmpegReference.baseline.tsv`) — a real correctness oracle, not just a self-referential "did the decoder's
+output change" regression check. For AVIF this is the *only* independent oracle available at all (SkiaSharp,
+this repo's oracle for the other bitmap formats, has no AVIF codec); for WebP it's a supplementary cross-check
+alongside the existing SkiaSharp differential, scoped to single-frame VP8L (lossless) files, where the
+comparison can be exact rather than tolerance-based (see `AvifFfmpegReferenceBaseline`'s and
+`WebpFfmpegReferenceBaseline`'s own remarks for why AVIF needs a tolerance and WebP's lossy bitstream is out of
+scope for this specific check). Normal test runs only read the checked-in baseline and never invoke `ffmpeg`;
+regenerating it after a corpus or decoder change requires `ffmpeg`/`ffprobe` on PATH and
+`PEACHIMAGE_AVIF_FFMPEG_BASELINE=write`/`PEACHIMAGE_WEBP_FFMPEG_BASELINE=write` respectively.
 
 ## Benchmarking
 

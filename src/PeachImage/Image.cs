@@ -5,6 +5,7 @@ using PeachImage.Formats.Jpeg;
 using PeachImage.Formats.Png;
 using PeachImage.Formats.Shared.Compositing;
 using PeachImage.Formats.Shared.Resampling;
+using PeachImage.Formats.Tiff;
 using PeachImage.Formats.Webp;
 using PeachImage.Internal;
 
@@ -39,6 +40,7 @@ public sealed class Image : IDisposable
         GifCodec.Instance,
         WebpCodec.Instance,
         AvifCodec.Instance,
+        TiffCodec.Instance,
     ];
 
     private static readonly int MaxHeaderSize = Codecs.Max(codec => codec.HeaderSize);

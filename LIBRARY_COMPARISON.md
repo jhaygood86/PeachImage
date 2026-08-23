@@ -340,6 +340,30 @@ this document. `ffmpeg`'s number wasn't re-measured this session; only PeachImag
 
 PeachImage is roughly **2.12×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario.
 
+## TIFF
+
+Decode-only (uncompressed/LZW/PackBits, 1/2/4/8/16-bit, grayscale/RGB/palette/CMYK). **No SkiaSharp
+baseline**: confirmed via `SKEncodedImageFormat`/`SkCodec` — SkiaSharp has no TIFF codec at all, not just an
+unsupported feature within one. As with AVIF above, the table reports `ffmpeg`'s (`libavcodec/tiff.c`)
+process-spawn-inclusive time as context only, not a directly comparable BenchmarkDotNet row.
+
+### Decode
+
+| Scenario | PeachImage | `ffmpeg` (context only) | Allocated |
+|---|---:|---:|---:|
+| 1080p, Uncompressed | 5.46 ms | ~49 ms | 39.9 MB |
+| 1080p, LZW | 24.20 ms | ~69 ms | 41.7 MB |
+| 1080p, PackBits | 3.96 ms | ~48 ms | 40.0 MB |
+
+Unlike AVIF's comparison (where AV1's entropy/transform pipeline dominates and PeachImage trails
+`ffmpeg`'s decade-tuned native decoder), TIFF's baseline compression modes are each cheap enough that
+`ffmpeg`'s fixed per-invocation process-spawn overhead (visible in the PackBits row: the fastest and
+simplest of the three, yet not meaningfully faster in wall-clock terms than Uncompressed) dominates its own
+number — these ratios say more about process-spawn cost than about decoder throughput, and shouldn't be
+read as "PeachImage is 9-12× faster than a real TIFF decoder." LZW is the slowest of the three for both
+implementations, consistent with it being the only one doing real dictionary-based decompression work
+rather than a fixed per-byte reshape.
+
 ## Summary
 
 | Format | Decode | Encode |
@@ -350,6 +374,7 @@ PeachImage is roughly **2.12×** `ffmpeg`'s process-spawn-inclusive time on the 
 | PNG | 0.92×–1.36× | 0.66×–1.15× |
 | WebP | 0.27×–2.17× (animated: **0.27×**, static: 1.12×–2.17×) | 1.01×–1.44× lossless (0.16× small-image outlier), 0.88× lossy |
 | AVIF | ~2.12× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented (fixed 8x8 blocks, no partition-tree RDO yet); throughput not yet measured here |
+| TIFF | ~0.08×–0.35× vs. `ffmpeg` (no SkiaSharp baseline available; ratios dominated by `ffmpeg`'s process-spawn overhead, not decoder throughput) | not implemented (decode-only) |
 | Resize | — | Downscale: 1.28×–3.58× (NearestNeighbor closest, Bilinear/cubic slower); Upscale: 1.41× (NearestNeighbor) or **0.19×–0.59×** (Bilinear/cubic family, faster than SkiaSharp) |
 
 BMP is fully within target and often faster. PNG is within target on every scenario and beats
