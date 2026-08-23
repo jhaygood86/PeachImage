@@ -4,7 +4,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsPackable>true</IsPackable>
     <PackageId>PeachImage</PackageId>
-    <Version>0.4.0</Version>
+    <Version>0.4.1</Version>
     <RootNamespace>PeachImage</RootNamespace>
     <AssemblyName>PeachImage</AssemblyName>
     <Description>Pure .NET image format readers and writers for commonly used image formats on the web.</Description>
