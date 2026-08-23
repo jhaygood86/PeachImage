@@ -6,8 +6,7 @@ namespace PeachImage.Formats.Webp;
 /// dispatch through; decode and encode are separate internal implementation details
 /// (<see cref="WebpDecoder"/>/<see cref="WebpEncoder"/>) composed privately rather than exposed as their own
 /// abstractions. Encoding defaults to the lossless (VP8L) bitstream; set
-/// <see cref="WebpEncoderOptions.Lossless"/> to <see langword="false"/> for lossy VP8 encoding. Animated WebP
-/// encoding is not supported (<see cref="CanEncodeAnimation"/> is <see langword="false"/>) — only decoding.
+/// <see cref="WebpEncoderOptions.Lossless"/> to <see langword="false"/> for lossy VP8 encoding.
 /// </summary>
 internal sealed class WebpCodec : IAnimatedImageCodec
 {
@@ -58,12 +57,12 @@ internal sealed class WebpCodec : IAnimatedImageCodec
     public void Encode(Image image, Stream stream, EncoderOptions? options = null) => WebpEncoder.Encode(image, stream, options);
 
     /// <inheritdoc/>
-    public bool CanEncodeAnimation => false;
+    public bool CanEncodeAnimation => true;
 
     /// <inheritdoc/>
     public AnimatedImage DecodeAnimation(Stream stream, DecoderOptions? options = null) => WebpDecoder.DecodeAnimation(stream, options as WebpDecoderOptions);
 
     /// <inheritdoc/>
     public void EncodeAnimation(AnimatedImage image, Stream stream, EncoderOptions? options = null) =>
-        throw new NotSupportedException("Animated WebP encoding is not supported; only decoding.");
+        WebpEncoder.EncodeAnimation(image, stream, options);
 }
