@@ -38,6 +38,12 @@ internal sealed class JpegCodec : IImageCodec
     public bool CanEncode => true;
 
     /// <inheritdoc/>
+    public bool CanDecodeTransparency => false;
+
+    /// <inheritdoc/>
+    public bool CanEncodeTransparency => false;
+
+    /// <inheritdoc/>
     public ImageInfo Identify(Stream stream) => JpegDecoder.Identify(stream);
 
     /// <inheritdoc/>

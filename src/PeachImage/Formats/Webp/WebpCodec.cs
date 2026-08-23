@@ -43,6 +43,12 @@ internal sealed class WebpCodec : IAnimatedImageCodec
     public bool CanEncode => true;
 
     /// <inheritdoc/>
+    public bool CanDecodeTransparency => true;
+
+    /// <inheritdoc/>
+    public bool CanEncodeTransparency => true;
+
+    /// <inheritdoc/>
     public ImageInfo Identify(Stream stream) => WebpDecoder.Identify(stream);
 
     /// <inheritdoc/>
