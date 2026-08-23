@@ -38,6 +38,12 @@ internal sealed class AvifCodec : IImageCodec
     public bool CanEncode => true;
 
     /// <inheritdoc/>
+    public bool CanDecodeTransparency => true;
+
+    /// <inheritdoc/>
+    public bool CanEncodeTransparency => false;
+
+    /// <inheritdoc/>
     public ImageInfo Identify(Stream stream) => AvifDecoder.Identify(stream);
 
     /// <inheritdoc/>

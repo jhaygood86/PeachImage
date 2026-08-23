@@ -40,6 +40,12 @@ internal sealed class PngCodec : IImageCodec
     public bool CanEncode => true;
 
     /// <inheritdoc/>
+    public bool CanDecodeTransparency => true;
+
+    /// <inheritdoc/>
+    public bool CanEncodeTransparency => true;
+
+    /// <inheritdoc/>
     public ImageInfo Identify(Stream stream) => PngDecoder.Identify(stream);
 
     /// <inheritdoc/>

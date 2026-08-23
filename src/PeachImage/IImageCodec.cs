@@ -32,6 +32,12 @@ internal interface IImageCodec
     /// <summary>Whether this codec can encode this format.</summary>
     bool CanEncode { get; }
 
+    /// <summary>Whether decoding this format can produce alpha/transparency from an existing file.</summary>
+    bool CanDecodeTransparency { get; }
+
+    /// <summary>Whether encoding this format can preserve alpha/transparency from an alpha-bearing source.</summary>
+    bool CanEncodeTransparency { get; }
+
     /// <summary>Reads image dimensions and format information from <paramref name="stream"/> without fully decoding pixel data.</summary>
     ImageInfo Identify(Stream stream);
 

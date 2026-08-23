@@ -42,6 +42,11 @@ public sealed class Image : IDisposable
 
     private static readonly int MaxHeaderSize = Codecs.Max(codec => codec.HeaderSize);
 
+    private static readonly ImageFormatInfo[] FormatInfos =
+        [.. Codecs.Select(codec => new ImageFormatInfo(
+            codec.FormatName, codec.FileExtensions, codec.MimeTypes,
+            codec.CanDecode, codec.CanEncode, codec.CanDecodeTransparency, codec.CanEncodeTransparency))];
+
     private readonly byte[] _pixels;
     private readonly int _byteLength;
     private readonly bool _owned;
@@ -246,6 +251,26 @@ public sealed class Image : IDisposable
         }
 
         return codec.Identify(preparedStream);
+    }
+
+    /// <summary>Capability and identity metadata for every format PeachImage has a built-in codec for.</summary>
+    public static IReadOnlyList<ImageFormatInfo> SupportedFormats => FormatInfos;
+
+    /// <summary>Looks up capability and identity metadata for the format named <paramref name="formatName"/>.</summary>
+    /// <exception cref="UnknownImageFormatException">No built-in codec is named <paramref name="formatName"/>.</exception>
+    public static ImageFormatInfo GetFormatInfo(string formatName)
+    {
+        ArgumentNullException.ThrowIfNull(formatName);
+
+        foreach (var info in FormatInfos)
+        {
+            if (string.Equals(info.FormatName, formatName, StringComparison.OrdinalIgnoreCase))
+            {
+                return info;
+            }
+        }
+
+        throw new UnknownImageFormatException($"No built-in codec for format '{formatName}'.", formatName);
     }
 
     /// <summary>
