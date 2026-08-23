@@ -50,11 +50,11 @@ internal static class WebpContainerWriter
     public static long GetFramedChunkSize(int payloadLength) => 8L + payloadLength + (payloadLength & 1);
 
     /// <summary>
-    /// Builds the 10-byte <c>VP8X</c> payload: flags byte (alpha/animation/ICC/EXIF/XMP presence), 3
-    /// reserved zero bytes, then 24-bit little-endian <c>width-1</c>/<c>height-1</c> — the exact inverse of
-    /// <see cref="Webp.Decoding.WebpContainerReader"/>'s <c>ParseVp8X</c>.
+    /// Builds the 10-byte <c>VP8X</c> payload: flags byte (alpha/ICC/EXIF/XMP presence, animation always
+    /// unset), 3 reserved zero bytes, then 24-bit little-endian <c>width-1</c>/<c>height-1</c> — the exact
+    /// inverse of <see cref="Webp.Decoding.WebpContainerReader"/>'s <c>ParseVp8X</c>.
     /// </summary>
-    public static byte[] BuildVp8XPayload(int width, int height, bool hasAlpha, bool hasAnimation, bool hasIcc, bool hasExif, bool hasXmp)
+    public static byte[] BuildVp8XPayload(int width, int height, bool hasAlpha, bool hasIcc, bool hasExif, bool hasXmp)
     {
         byte[] payload = new byte[Vp8XPayloadSize];
 
@@ -79,11 +79,6 @@ internal static class WebpContainerWriter
             flags |= Vp8XFlags.XmpBit;
         }
 
-        if (hasAnimation)
-        {
-            flags |= Vp8XFlags.AnimationBit;
-        }
-
         payload[0] = flags;
 
         int widthMinusOne = width - 1;
@@ -97,62 +92,5 @@ internal static class WebpContainerWriter
         payload[9] = (byte)(heightMinusOne >> 16);
 
         return payload;
-    }
-
-    /// <summary>
-    /// Builds the 6-byte <c>ANIM</c> payload: 4-byte BGRA background color (written as fully transparent —
-    /// decoders ignore this field and always start compositing from a transparent canvas; see
-    /// <see cref="Webp.Decoding.WebpAnimationReader"/>'s remarks) then little-endian <c>uint16</c> loop count
-    /// (<c>0</c> means loop forever), clamped to that field's range.
-    /// </summary>
-    public static byte[] BuildAnimPayload(int loopCount)
-    {
-        byte[] payload = new byte[6];
-
-        ushort clampedLoopCount = (ushort)Math.Clamp(loopCount, 0, ushort.MaxValue);
-        payload[4] = (byte)clampedLoopCount;
-        payload[5] = (byte)(clampedLoopCount >> 8);
-
-        return payload;
-    }
-
-    /// <summary>
-    /// Builds the 16-byte <c>ANMF</c> frame header preceding each frame's nested <c>VP8 </c>/<c>VP8L</c>
-    /// chunk — the exact inverse of <see cref="Webp.Decoding.WebpAnimationReader"/>'s <c>ParseFrameHeader</c>.
-    /// <paramref name="width"/>/<paramref name="height"/> are always the full animation canvas at <c>x=0,
-    /// y=0</c>: <see cref="AnimatedImageFrame"/> only ever carries a fully composited, full-canvas frame (no
-    /// sub-rectangle or partial-blend concept), so every frame is written with the "do not blend" flag set —
-    /// it overwrites the canvas outright rather than alpha-blending onto it, which is exactly right since
-    /// <paramref name="width"/>/<paramref name="height"/>'s pixels already are the final visual result.
-    /// </summary>
-    public static byte[] BuildAnmfFrameHeader(int width, int height, int durationMs, bool disposeToBackground)
-    {
-        byte[] header = new byte[16];
-
-        // x = 0, y = 0 (bytes 0-5 stay zero).
-        int widthMinusOne = width - 1;
-        header[6] = (byte)widthMinusOne;
-        header[7] = (byte)(widthMinusOne >> 8);
-        header[8] = (byte)(widthMinusOne >> 16);
-
-        int heightMinusOne = height - 1;
-        header[9] = (byte)heightMinusOne;
-        header[10] = (byte)(heightMinusOne >> 8);
-        header[11] = (byte)(heightMinusOne >> 16);
-
-        int clampedDuration = Math.Clamp(durationMs, 0, 0xFF_FFFF);
-        header[12] = (byte)clampedDuration;
-        header[13] = (byte)(clampedDuration >> 8);
-        header[14] = (byte)(clampedDuration >> 16);
-
-        byte flags = Vp8XFlags.AnmfDoNotBlendBit;
-        if (disposeToBackground)
-        {
-            flags |= Vp8XFlags.AnmfDisposeToBackgroundBit;
-        }
-
-        header[15] = flags;
-
-        return header;
     }
 }

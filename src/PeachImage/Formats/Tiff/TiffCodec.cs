@@ -40,12 +40,6 @@ internal sealed class TiffCodec : IImageCodec
     public bool CanEncode => false;
 
     /// <inheritdoc/>
-    public bool CanDecodeTransparency => true;
-
-    /// <inheritdoc/>
-    public bool CanEncodeTransparency => false;
-
-    /// <inheritdoc/>
     public ImageInfo Identify(Stream stream) => TiffDecoder.Identify(stream);
 
     /// <inheritdoc/>

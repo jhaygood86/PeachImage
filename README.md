@@ -32,10 +32,8 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   bitstreams: lossless (VP8L, the default) with predictor-transform selection, palette/color-indexing
   detection, subtract-green, and a color cache; and lossy (VP8, opt in via `WebpEncoderOptions { Lossless
   = false }`) with quality-driven quantization. Alpha-bearing sources always encode as VP8L regardless of
-  `Lossless`, since lossy WebP's alpha channel isn't implemented yet. Animated WebP encode (`VP8X` + `ANIM`/
-  `ANMF`, via `AnimatedImage.Save`) is also implemented, reusing the same per-frame VP8/VP8L encoder as
-  still images; every frame is written full-canvas/non-blending, since `AnimatedImageFrame` only ever
-  carries a fully composited frame.
+  `Lossless`, since lossy WebP's alpha channel isn't implemented yet. Animated WebP encode is not yet
+  implemented (decode-only for animation).
 - **AVIF**: decode is implemented for baseline still images — intra-frame AV1, the full in-loop filter
   chain (deblocking, CDEF, loop restoration), HEIF `grid` composite images, alpha via the auxiliary-item
   mechanism, and both 8-bit and 10-bit depth. Animated AVIF, film grain synthesis, gain maps, 12-bit
@@ -138,7 +136,8 @@ anyway is a safe no-op), and only `AnimatedImageFrame.Clone()`/`Image.Clone()` r
 
 ### Animated images
 
-Multi-frame formats (GIF and WebP) use `AnimatedImage` instead, with the same load/save shape:
+Multi-frame formats (GIF, and WebP for decode — animated WebP encode isn't implemented yet) use
+`AnimatedImage` instead, with the same load/save shape:
 
 ```csharp
 using PeachImage;
@@ -154,10 +153,6 @@ foreach (AnimatedImageFrame frame in animation.Frames)
 using var output = File.Create("resaved.gif");
 animation.Save(output, "gif", new GifEncoderOptions { MaxColors = 128, Dither = true });
 ```
-
-Animated WebP works the same way (`AnimatedImage.Save(stream, "webp", new WebpEncoderOptions())`); WebP's
-single dispose-to-background bit means `FrameDisposalMethod.RestoreToPrevious` collapses to
-`DoNotDispose` on round-trip through WebP, unlike GIF which represents all three disposal methods natively.
 
 ### Resizing
 
