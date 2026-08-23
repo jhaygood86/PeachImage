@@ -35,4 +35,7 @@ public static class PixelFormatExtensions
         PixelFormat.Gray16 or PixelFormat.Rgb48 or PixelFormat.Rgba64 => 2,
         _ => 1,
     };
+
+    /// <summary>Gets whether the given <paramref name="format"/> has an alpha channel. Note <see cref="PixelFormat.Cmyk32"/> has 4 channels but is not alpha.</summary>
+    public static bool HasAlpha(this PixelFormat format) => format is PixelFormat.Rgba32 or PixelFormat.Rgba64;
 }

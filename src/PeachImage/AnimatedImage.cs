@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Compositing;
 using PeachImage.Formats.Shared.Resampling;
 using PeachImage.Internal;
 
@@ -124,6 +125,10 @@ public sealed class AnimatedImage
                 return this;
             }
         }
+        else if (options.Mode is ResizeMode.Crop or ResizeMode.Pad && width == Width && height == Height)
+        {
+            return this;
+        }
 
         return new AnimatedImage(ResizeFrames(Frames, Width, Height, width, height, options), width, height, LoopCount);
     }
@@ -160,7 +165,10 @@ public sealed class AnimatedImage
     /// built once from <paramref name="sourceWidth"/>/<paramref name="sourceHeight"/> — every frame of an
     /// <see cref="AnimatedImage"/> shares that same canvas size by construction — and reused across every
     /// frame via <see cref="ImageResizer.ResizeWithWeights"/>, rather than rebuilding them from scratch once
-    /// per frame the way calling <see cref="Image.Resize"/> per frame would.
+    /// per frame the way calling <see cref="Image.Resize"/> per frame would. For <see cref="ResizeMode.Crop"/>/
+    /// <see cref="ResizeMode.Pad"/>, the shared <see cref="ResizeFramingPlanner.Plan"/> is likewise computed
+    /// once (every frame scales to the same intermediate size and frames at the same offset), then applied
+    /// per frame after the weighted resize.
     /// </summary>
     private static IEnumerable<AnimatedImageFrame> ResizeFrames(
         IEnumerable<AnimatedImageFrame> frames, int sourceWidth, int sourceHeight, int width, int height, ResizeOptions options)
@@ -175,14 +183,33 @@ public sealed class AnimatedImage
             yield break;
         }
 
+        bool framing = options.Mode is ResizeMode.Crop or ResizeMode.Pad;
+        var plan = framing
+            ? ResizeFramingPlanner.Plan(sourceWidth, sourceHeight, width, height, options.Mode, options.Anchor)
+            : default;
+        int intermediateWidth = framing ? plan.IntermediateWidth : width;
+        int intermediateHeight = framing ? plan.IntermediateHeight : height;
+        bool needsFraming = framing && (plan.OffsetX != 0 || plan.OffsetY != 0
+            || intermediateWidth != width || intermediateHeight != height);
+
         var kernel = ResamplingKernelFactory.Create(options.Filter);
-        var horizontalWeights = new ResamplingWeightMap(sourceWidth, width, kernel);
-        var verticalWeights = new ResamplingWeightMap(sourceHeight, height, kernel);
+        var horizontalWeights = new ResamplingWeightMap(sourceWidth, intermediateWidth, kernel);
+        var verticalWeights = new ResamplingWeightMap(sourceHeight, intermediateHeight, kernel);
 
         foreach (var frame in frames)
         {
-            var resizedImage = ImageResizer.ResizeWithWeights(frame.Image, width, height, horizontalWeights, verticalWeights);
-            yield return new AnimatedImageFrame(resizedImage, frame.Duration, frame.Disposal);
+            var resizedImage = ImageResizer.ResizeWithWeights(frame.Image, intermediateWidth, intermediateHeight, horizontalWeights, verticalWeights);
+            if (!needsFraming)
+            {
+                yield return new AnimatedImageFrame(resizedImage, frame.Duration, frame.Disposal);
+                continue;
+            }
+
+            var framedImage = options.Mode == ResizeMode.Crop
+                ? ImageFramer.Crop(resizedImage, width, height, plan.OffsetX, plan.OffsetY)
+                : ImageFramer.Pad(resizedImage, width, height, plan.OffsetX, plan.OffsetY, options.BackgroundColor);
+            resizedImage.Dispose();
+            yield return new AnimatedImageFrame(framedImage, frame.Duration, frame.Disposal);
         }
     }
 

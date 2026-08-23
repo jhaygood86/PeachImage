@@ -3,6 +3,7 @@ using PeachImage.Formats.Bmp;
 using PeachImage.Formats.Gif;
 using PeachImage.Formats.Jpeg;
 using PeachImage.Formats.Png;
+using PeachImage.Formats.Shared.Compositing;
 using PeachImage.Formats.Shared.Resampling;
 using PeachImage.Formats.Webp;
 using PeachImage.Internal;
@@ -252,13 +253,15 @@ public sealed class Image : IDisposable
     /// Creates a resized copy of this image using the given target dimensions and resampling filter. Does
     /// not modify this instance (same non-mutating contract as <see cref="Clone"/>) — except when
     /// <paramref name="options"/>'s <see cref="ResizeOptions.Mode"/> is <see cref="ResizeMode.Max"/> and this
-    /// image already fits within <paramref name="width"/> x <paramref name="height"/>, in which case this
-    /// same instance is returned unchanged rather than allocating a needless copy. Because of that fast
-    /// path, the returned <see cref="Image"/> may be <em>this same instance</em> rather than an independent
-    /// one — disposing one of the two references then makes the other throw <see cref="ObjectDisposedException"/>
-    /// on its next access, same as disposing any other shared reference twice would. If you need the source
-    /// and the resized result to have independent lifetimes regardless of which path is taken, dispose only
-    /// after you're done with both, or check <see cref="object.ReferenceEquals(object?, object?)"/> first.
+    /// image already fits within <paramref name="width"/> x <paramref name="height"/>, or when it's
+    /// <see cref="ResizeMode.Crop"/>/<see cref="ResizeMode.Pad"/> and this image is already exactly
+    /// <paramref name="width"/> x <paramref name="height"/>, in which case this same instance is returned
+    /// unchanged rather than allocating a needless copy. Because of that fast path, the returned
+    /// <see cref="Image"/> may be <em>this same instance</em> rather than an independent one — disposing one
+    /// of the two references then makes the other throw <see cref="ObjectDisposedException"/> on its next
+    /// access, same as disposing any other shared reference twice would. If you need the source and the
+    /// resized result to have independent lifetimes regardless of which path is taken, dispose only after
+    /// you're done with both, or check <see cref="object.ReferenceEquals(object?, object?)"/> first.
     /// </summary>
     public Image Resize(int width, int height, ResizeOptions? options = null)
     {
@@ -272,6 +275,34 @@ public sealed class Image : IDisposable
             if (width == Width && height == Height)
             {
                 return this;
+            }
+        }
+        else if (options.Mode is ResizeMode.Crop or ResizeMode.Pad)
+        {
+            if (width == Width && height == Height)
+            {
+                return this;
+            }
+
+            var plan = ResizeFramingPlanner.Plan(Width, Height, width, height, options.Mode, options.Anchor);
+            var intermediate = ImageResizer.Resize(this, plan.IntermediateWidth, plan.IntermediateHeight, options.Filter);
+
+            bool needsFraming = plan.OffsetX != 0 || plan.OffsetY != 0
+                || plan.IntermediateWidth != width || plan.IntermediateHeight != height;
+            if (!needsFraming)
+            {
+                return intermediate;
+            }
+
+            try
+            {
+                return options.Mode == ResizeMode.Crop
+                    ? ImageFramer.Crop(intermediate, width, height, plan.OffsetX, plan.OffsetY)
+                    : ImageFramer.Pad(intermediate, width, height, plan.OffsetX, plan.OffsetY, options.BackgroundColor);
+            }
+            finally
+            {
+                intermediate.Dispose();
             }
         }
 

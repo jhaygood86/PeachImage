@@ -15,4 +15,19 @@ public enum ResizeMode
     /// rather than upscaled.
     /// </summary>
     Max,
+
+    /// <summary>
+    /// Scale to fill (cover) the given width/height while preserving aspect ratio, then crop the overflow
+    /// so the result is exactly the requested size. Unlike <see cref="Max"/>, this can upscale. Which part
+    /// of the source survives cropping is controlled by <see cref="ResizeOptions.Anchor"/>.
+    /// </summary>
+    Crop,
+
+    /// <summary>
+    /// Scale to fit within the given width/height while preserving aspect ratio (like <see cref="Max"/>, but
+    /// without the shrink-only restriction — this can upscale), then pad the remainder so the result is
+    /// exactly the requested size. Where the source sits within the padded canvas is controlled by
+    /// <see cref="ResizeOptions.Anchor"/>; the fill color by <see cref="ResizeOptions.BackgroundColor"/>.
+    /// </summary>
+    Pad,
 }
