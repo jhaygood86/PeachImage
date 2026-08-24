@@ -32,7 +32,7 @@ internal static class GifDecoder
         }
 
         var pixelFormat = hasTransparency ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
-        return new ImageInfo(header.Width, header.Height, pixelFormat, FormatName, isAnimated);
+        return new ImageInfo(header.Width, header.Height, pixelFormat, FormatName, isAnimated, HasAlpha: pixelFormat.HasAlpha());
     }
 
     /// <summary>Decodes just the first frame (equivalent to how most viewers render a GIF as a static image).</summary>
@@ -41,6 +41,7 @@ internal static class GifDecoder
         ArgumentNullException.ThrowIfNull(stream);
 
         var image = GifSingleFrameDecoder.Decode(stream);
+        bool hasAlpha = image.PixelFormat.HasAlpha();
 
         bool isAnimated;
         try
@@ -61,6 +62,7 @@ internal static class GifDecoder
         }
 
         result.IsAnimated = isAnimated;
+        result.HasAlpha = hasAlpha;
         return result;
     }
 

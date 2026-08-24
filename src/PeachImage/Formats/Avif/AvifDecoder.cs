@@ -51,7 +51,7 @@ internal static class AvifDecoder
         var metadata = new ImageMetadata();
         var container = AvifContainerReader.Read(stream, metadata);
         var pixelFormat = AvifPixelFormatSelector.Choose(container.BitDepth, container.Monochrome, container.HasAlpha);
-        return new ImageInfo(container.Width, container.Height, pixelFormat, FormatName);
+        return new ImageInfo(container.Width, container.Height, pixelFormat, FormatName, HasAlpha: pixelFormat.HasAlpha());
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>
@@ -110,12 +110,14 @@ internal static class AvifDecoder
             image.Metadata.Profiles.Add(profile);
         }
 
+        bool hasAlpha = pixelFormat.HasAlpha();
         var result = Decoding.PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
         if (!ReferenceEquals(result, image))
         {
             image.Dispose();
         }
 
+        result.HasAlpha = hasAlpha;
         return result;
     }
 

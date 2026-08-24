@@ -10,4 +10,5 @@ namespace PeachImage;
 /// would decode only its first frame (see <see cref="Image.IsAnimated"/>) — use <see cref="AnimatedImage"/> to
 /// decode every frame.
 /// </param>
-public readonly record struct ImageInfo(int Width, int Height, PixelFormat PixelFormat, string FormatName, bool IsAnimated = false);
+/// <param name="HasAlpha">Whether the source actually carries an alpha channel — see <see cref="Image.HasAlpha"/>.</param>
+public readonly record struct ImageInfo(int Width, int Height, PixelFormat PixelFormat, string FormatName, bool IsAnimated = false, bool HasAlpha = false);

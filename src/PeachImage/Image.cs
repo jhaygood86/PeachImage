@@ -87,6 +87,17 @@ public sealed class Image : IDisposable
     public bool IsAnimated { get; internal set; }
 
     /// <summary>
+    /// Whether this image's source actually carries an alpha channel — not whether its format could ever
+    /// have one (see <see cref="ImageFormatInfo.CanDecodeTransparency"/> for that), and computed from the
+    /// source's own header/chunk metadata rather than by scanning pixel data. Reflects the source, not the
+    /// final <see cref="PixelFormat"/>: converting an opaque source to a target format with an alpha
+    /// channel (or an alpha-bearing source down to one without) via <see cref="DecoderOptions.TargetPixelFormat"/>
+    /// doesn't change this value. Always <see langword="false"/> for images not produced by a codec's
+    /// <c>Decode</c> path (e.g. <see cref="Create"/>).
+    /// </summary>
+    public bool HasAlpha { get; internal set; }
+
+    /// <summary>
     /// Gets a zero-copy view of the entire tightly-packed pixel buffer.
     /// </summary>
     /// <exception cref="ObjectDisposedException">This image has been disposed.</exception>

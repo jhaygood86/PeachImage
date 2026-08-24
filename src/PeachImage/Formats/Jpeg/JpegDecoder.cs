@@ -21,7 +21,7 @@ internal static class JpegDecoder
             _ => throw new JpegDecodingException($"Unsupported JPEG component count: {frameHeader.Components.Length}."),
         };
 
-        return new ImageInfo(frameHeader.Width, frameHeader.Height, pixelFormat, FormatName);
+        return new ImageInfo(frameHeader.Width, frameHeader.Height, pixelFormat, FormatName, HasAlpha: pixelFormat.HasAlpha());
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>
@@ -51,12 +51,14 @@ internal static class JpegDecoder
             image.Metadata.Profiles.Add(profile);
         }
 
+        bool hasAlpha = image.PixelFormat.HasAlpha();
         var result = PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
         if (!ReferenceEquals(result, image))
         {
             image.Dispose();
         }
 
+        result.HasAlpha = hasAlpha;
         return result;
     }
 }
