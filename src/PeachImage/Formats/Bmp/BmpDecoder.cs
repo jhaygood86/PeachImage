@@ -16,7 +16,7 @@ internal static class BmpDecoder
         bool hasAlpha = header.HasAlphaMask && header.BitCount is 16 or 32;
         var pixelFormat = hasAlpha ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
 
-        return new ImageInfo(header.Width, header.Height, pixelFormat, FormatName);
+        return new ImageInfo(header.Width, header.Height, pixelFormat, FormatName, HasAlpha: pixelFormat.HasAlpha());
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>
@@ -25,12 +25,14 @@ internal static class BmpDecoder
         ArgumentNullException.ThrowIfNull(stream);
 
         var image = BmpImageDecoder.Decode(stream);
+        bool hasAlpha = image.PixelFormat.HasAlpha();
         var result = PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
         if (!ReferenceEquals(result, image))
         {
             image.Dispose();
         }
 
+        result.HasAlpha = hasAlpha;
         return result;
     }
 }

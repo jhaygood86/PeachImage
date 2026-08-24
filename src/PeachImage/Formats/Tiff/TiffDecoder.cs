@@ -18,7 +18,7 @@ internal static class TiffDecoder
         var ifd = TiffIfdReader.Read(reader, header.FirstIfdOffset);
         var descriptor = TiffValidation.Validate(ifd);
 
-        return new ImageInfo(descriptor.Width, descriptor.Height, descriptor.PixelFormat, FormatName);
+        return new ImageInfo(descriptor.Width, descriptor.Height, descriptor.PixelFormat, FormatName, HasAlpha: descriptor.PixelFormat.HasAlpha());
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>
@@ -27,12 +27,14 @@ internal static class TiffDecoder
         ArgumentNullException.ThrowIfNull(stream);
 
         var image = TiffImageDecoder.Decode(stream);
+        bool hasAlpha = image.PixelFormat.HasAlpha();
         var result = PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
         if (!ReferenceEquals(result, image))
         {
             image.Dispose();
         }
 
+        result.HasAlpha = hasAlpha;
         return result;
     }
 }

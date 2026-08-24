@@ -28,7 +28,7 @@ internal static class WebpDecoder
             // "header-level info only" leniency (an animated file with a malformed/missing ANIM chunk would
             // still successfully Identify, even though DecodeAnimation would throw on it).
             var pixelFormat = prelude.HasAlpha ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
-            return new ImageInfo(prelude.CanvasWidth!.Value, prelude.CanvasHeight!.Value, pixelFormat, FormatName, IsAnimated: true);
+            return new ImageInfo(prelude.CanvasWidth!.Value, prelude.CanvasHeight!.Value, pixelFormat, FormatName, IsAnimated: true, HasAlpha: pixelFormat.HasAlpha());
         }
 
         var metadata = new ImageMetadata();
@@ -55,7 +55,7 @@ internal static class WebpDecoder
         }
 
         var format = hasAlpha ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
-        return new ImageInfo(width, height, format, FormatName);
+        return new ImageInfo(width, height, format, FormatName, HasAlpha: format.HasAlpha());
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>. Decodes just the first, fully composited frame if the file is animated.</summary>
@@ -95,6 +95,8 @@ internal static class WebpDecoder
             }
         }
 
+        bool hasAlpha = image.PixelFormat.HasAlpha();
+
         foreach (var profile in metadata.Profiles)
         {
             image.Metadata.Profiles.Add(profile);
@@ -107,6 +109,7 @@ internal static class WebpDecoder
         }
 
         result.IsAnimated = isAnimated;
+        result.HasAlpha = hasAlpha;
         return result;
     }
 
