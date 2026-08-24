@@ -12,7 +12,11 @@ namespace PeachImage.Tests.Formats.Jpeg.Corpus;
 /// </summary>
 internal static class CorpusAssertions
 {
-    private static readonly TimeSpan PerFileTimeout = TimeSpan.FromSeconds(45);
+    // 45s was too tight for this corpus's two largest stress files (8500x8146, ~69MP each) -- they decode
+    // in well under a second locally, but have intermittently exceeded 45s under macOS CI runner
+    // contention (noisy-neighbor scheduling, not an actual algorithmic hang) across many unrelated commits.
+    // 120s gives real headroom against that CI noise while still failing fast on a genuine infinite loop.
+    private static readonly TimeSpan PerFileTimeout = TimeSpan.FromSeconds(120);
 
     /// <summary>Asserts that decoding <paramref name="path"/> either succeeds or throws <see cref="JpegFormatException"/> — never anything else, and never hangs.</summary>
     public static void AssertDecodesGracefully(string path)
