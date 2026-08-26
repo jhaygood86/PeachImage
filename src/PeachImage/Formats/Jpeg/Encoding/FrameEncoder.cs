@@ -299,19 +299,42 @@ internal static class FrameEncoder
 
         JpegMarkerWriter.WriteSegment(stream, options.Progressive ? JpegMarker.Sof2 : JpegMarker.Sof0, sofPayload);
 
-        var luminanceDc = HuffmanEncodingTable.Build(StandardHuffmanTables.LuminanceDc.Counts, StandardHuffmanTables.LuminanceDc.Values);
-        var luminanceAc = HuffmanEncodingTable.Build(StandardHuffmanTables.LuminanceAc.Counts, StandardHuffmanTables.LuminanceAc.Values);
-        WriteHuffmanTable(stream, tableClass: 0, id: 0, luminanceDc);
-        WriteHuffmanTable(stream, tableClass: 1, id: 0, luminanceAc);
-
+        HuffmanEncodingTable luminanceDc, luminanceAc;
         HuffmanEncodingTable? chrominanceDc = null;
         HuffmanEncodingTable? chrominanceAc = null;
-        if (!grayscale)
+
+        if (options.OptimizeHuffmanTables && !options.Progressive)
         {
-            chrominanceDc = HuffmanEncodingTable.Build(StandardHuffmanTables.ChrominanceDc.Counts, StandardHuffmanTables.ChrominanceDc.Values);
-            chrominanceAc = HuffmanEncodingTable.Build(StandardHuffmanTables.ChrominanceAc.Counts, StandardHuffmanTables.ChrominanceAc.Values);
-            WriteHuffmanTable(stream, tableClass: 0, id: 1, chrominanceDc);
-            WriteHuffmanTable(stream, tableClass: 1, id: 1, chrominanceAc);
+            var (lumaDcFreq, lumaAcFreq, chromaDcFreq, chromaAcFreq) =
+                CountBaselineFrequencies(components, quantizedComponents, grayscale, options.RestartInterval, mcusAcross, mcusDown);
+
+            luminanceDc = BuildOptimizedTable(lumaDcFreq);
+            luminanceAc = BuildOptimizedTable(lumaAcFreq);
+            WriteHuffmanTable(stream, tableClass: 0, id: 0, luminanceDc);
+            WriteHuffmanTable(stream, tableClass: 1, id: 0, luminanceAc);
+
+            if (!grayscale)
+            {
+                chrominanceDc = BuildOptimizedTable(chromaDcFreq!);
+                chrominanceAc = BuildOptimizedTable(chromaAcFreq!);
+                WriteHuffmanTable(stream, tableClass: 0, id: 1, chrominanceDc);
+                WriteHuffmanTable(stream, tableClass: 1, id: 1, chrominanceAc);
+            }
+        }
+        else
+        {
+            luminanceDc = HuffmanEncodingTable.Build(StandardHuffmanTables.LuminanceDc.Counts, StandardHuffmanTables.LuminanceDc.Values);
+            luminanceAc = HuffmanEncodingTable.Build(StandardHuffmanTables.LuminanceAc.Counts, StandardHuffmanTables.LuminanceAc.Values);
+            WriteHuffmanTable(stream, tableClass: 0, id: 0, luminanceDc);
+            WriteHuffmanTable(stream, tableClass: 1, id: 0, luminanceAc);
+
+            if (!grayscale)
+            {
+                chrominanceDc = HuffmanEncodingTable.Build(StandardHuffmanTables.ChrominanceDc.Counts, StandardHuffmanTables.ChrominanceDc.Values);
+                chrominanceAc = HuffmanEncodingTable.Build(StandardHuffmanTables.ChrominanceAc.Counts, StandardHuffmanTables.ChrominanceAc.Values);
+                WriteHuffmanTable(stream, tableClass: 0, id: 1, chrominanceDc);
+                WriteHuffmanTable(stream, tableClass: 1, id: 1, chrominanceAc);
+            }
         }
 
         if (options.RestartInterval > 0)
@@ -387,6 +410,34 @@ internal static class FrameEncoder
 
         WriteScanHeader(stream, components, allIndices, ss: 0, se: 63, ah: 0, al: 0);
 
+        var dcEmitters = new Action<byte>[components.Length];
+        var acEmitters = new Action<byte>[components.Length];
+        for (int ci = 0; ci < components.Length; ci++)
+        {
+            var dcTable = dcTables[ci];
+            var acTable = acTables[ci];
+            dcEmitters[ci] = sym => dcTable.Encode(writer, sym);
+            acEmitters[ci] = sym => acTable.Encode(writer, sym);
+        }
+
+        RunBaselineMcuLoop(stream, writer, components, quantizedComponents, dcEmitters, acEmitters, restartInterval, mcusAcross, mcusDown);
+    }
+
+    // Runs the exact MCU/block traversal (including restart-marker placement and dcPredictor resets) that
+    // both the real write pass and CountBaselineFrequencies' throwaway counting pass need to share bit-for-bit
+    // — factored out so the counting pass can never drift from the real pass's predictor-reset timing, which
+    // would otherwise silently skew the DC diff symbols counted versus the ones actually encoded.
+    private static void RunBaselineMcuLoop(
+        Stream stream,
+        JpegEntropyWriter writer,
+        ComponentPlan[] components,
+        short[][] quantizedComponents,
+        Action<byte>[] dcEmitters,
+        Action<byte>[] acEmitters,
+        int restartInterval,
+        int mcusAcross,
+        int mcusDown)
+    {
         var dcPredictors = new int[components.Length];
         int mcusUntilRestart = restartInterval;
         int restartIndex = 0;
@@ -416,7 +467,7 @@ internal static class FrameEncoder
                             int blockY = (mcuY * plan.VSampling) + by;
                             int blockOffset = ((blockY * plan.BlocksWide) + blockX) * 64;
                             var block = quantizedComponents[ci].AsSpan(blockOffset, 64);
-                            EncodeBlock(writer, dcTables[ci], acTables[ci], block, ref dcPredictors[ci]);
+                            EncodeBlock(writer, dcEmitters[ci], acEmitters[ci], block, ref dcPredictors[ci]);
                         }
                     }
                 }
@@ -429,6 +480,45 @@ internal static class FrameEncoder
         }
 
         writer.Flush();
+    }
+
+    // First pass of the optimized-tables 2-pass approach: walks the same MCU loop the real write pass uses
+    // (via RunBaselineMcuLoop, against a throwaway Stream.Null writer) counting DC/AC symbol frequencies
+    // instead of emitting bits, so HuffmanTableOptimizer.Build can construct tables tuned to this image's
+    // actual symbol distribution. Chrominance components 1 and 2 accumulate into one shared bucket each,
+    // mirroring how the real pass's dcTables[1]==dcTables[2]/acTables[1]==acTables[2] serve both from one table.
+    private static (int[] LumaDc, int[] LumaAc, int[]? ChromaDc, int[]? ChromaAc) CountBaselineFrequencies(
+        ComponentPlan[] components,
+        short[][] quantizedComponents,
+        bool grayscale,
+        int restartInterval,
+        int mcusAcross,
+        int mcusDown)
+    {
+        var lumaDc = new int[256];
+        var lumaAc = new int[256];
+        int[]? chromaDc = grayscale ? null : new int[256];
+        int[]? chromaAc = grayscale ? null : new int[256];
+
+        var dcEmitters = new Action<byte>[components.Length];
+        var acEmitters = new Action<byte>[components.Length];
+        dcEmitters[0] = sym => lumaDc[sym]++;
+        acEmitters[0] = sym => lumaAc[sym]++;
+        if (!grayscale)
+        {
+            dcEmitters[1] = dcEmitters[2] = sym => chromaDc![sym]++;
+            acEmitters[1] = acEmitters[2] = sym => chromaAc![sym]++;
+        }
+
+        RunBaselineMcuLoop(Stream.Null, new JpegEntropyWriter(Stream.Null), components, quantizedComponents, dcEmitters, acEmitters, restartInterval, mcusAcross, mcusDown);
+
+        return (lumaDc, lumaAc, chromaDc, chromaAc);
+    }
+
+    private static HuffmanEncodingTable BuildOptimizedTable(int[] frequencies)
+    {
+        var (counts, values) = HuffmanTableOptimizer.Build(frequencies);
+        return HuffmanEncodingTable.Build(counts, values);
     }
 
     private static void WriteProgressiveScans(
@@ -471,7 +561,7 @@ internal static class FrameEncoder
         JpegMarkerWriter.WriteSegment(stream, JpegMarker.Dht, payload);
     }
 
-    private static void EncodeBlock(JpegEntropyWriter writer, HuffmanEncodingTable dcTable, HuffmanEncodingTable acTable, ReadOnlySpan<short> naturalOrderCoefficients, ref int dcPredictor)
+    private static void EncodeBlock(JpegEntropyWriter writer, Action<byte> emitDc, Action<byte> emitAc, ReadOnlySpan<short> naturalOrderCoefficients, ref int dcPredictor)
     {
         Span<short> zigzag = stackalloc short[64];
         for (int i = 0; i < 64; i++)
@@ -484,7 +574,7 @@ internal static class FrameEncoder
         dcPredictor = dc;
 
         int dcSize = MagnitudeBits(diff);
-        dcTable.Encode(writer, (byte)dcSize);
+        emitDc((byte)dcSize);
         if (dcSize > 0)
         {
             writer.WriteBits(EncodeMagnitude(diff, dcSize), dcSize);
@@ -502,19 +592,19 @@ internal static class FrameEncoder
 
             while (run > 15)
             {
-                acTable.Encode(writer, 0xF0); // ZRL: 16 zero coefficients
+                emitAc(0xF0); // ZRL: 16 zero coefficients
                 run -= 16;
             }
 
             int acSize = MagnitudeBits(coefficient);
-            acTable.Encode(writer, (byte)((run << 4) | acSize));
+            emitAc((byte)((run << 4) | acSize));
             writer.WriteBits(EncodeMagnitude(coefficient, acSize), acSize);
             run = 0;
         }
 
         if (run > 0)
         {
-            acTable.Encode(writer, 0x00); // EOB
+            emitAc(0x00); // EOB
         }
     }
 

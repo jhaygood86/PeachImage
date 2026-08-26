@@ -14,4 +14,13 @@ public sealed class JpegEncoderOptions : EncoderOptions
 
     /// <summary>Whether to encode as progressive JPEG (multiple, successively refined scans) instead of baseline sequential. Defaults to false.</summary>
     public bool Progressive { get; init; }
+
+    /// <summary>
+    /// Whether to compute image-specific optimal Huffman tables via a first frequency-counting pass
+    /// (ITU-T.81 Annex K.2, libjpeg's <c>optimize_coding</c>) instead of the fixed Annex K.3 standard tables.
+    /// Typically saves ~2-6% file size at a given quality, at roughly 2x entropy-coding cost. Defaults to
+    /// false. Currently only affects baseline (non-progressive) output — progressive AC scans are already
+    /// always optimized this way regardless of this flag (see <see cref="Encoding.ProgressiveScanEncoder"/>).
+    /// </summary>
+    public bool OptimizeHuffmanTables { get; init; }
 }
