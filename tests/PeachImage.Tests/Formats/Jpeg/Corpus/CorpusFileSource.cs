@@ -35,6 +35,12 @@ internal static class CorpusFileSource
     /// rather than just decode it — capped to keep that cost modest, not for coverage breadth.</summary>
     public static IEnumerable<TheoryDataRow<string>> MozjpegFilesSample() => MozjpegFiles().Take(10);
 
+    /// <summary>The same sample as <see cref="MozjpegFilesSample"/>, as plain paths rather than
+    /// <see cref="TheoryDataRow{T}"/> — for a single aggregate <c>[Fact]</c> that loops the sample itself
+    /// rather than driving one <c>[Theory]</c> case per file.</summary>
+    public static IEnumerable<string> MozjpegFilePaths() =>
+        EnumerateJpegFiles(Path.Combine(CorpusPaths.ImazenRoot, "mozjpeg")).Take(10);
+
     public static IEnumerable<TheoryDataRow<string>> ZuneFuzzFiles() =>
         // Fuzz inputs are named by content hash with no file extension (they're arbitrary byte sequences,
         // not necessarily even well-formed enough to deserve a ".jpg" name) — enumerate everything, not

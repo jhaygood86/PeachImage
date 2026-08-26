@@ -82,6 +82,47 @@ public class EncodeDecodeRoundTripTests
         Assert.True(highQualityPsnr > lowQualityPsnr, $"Expected higher PSNR at quality 95 ({highQualityPsnr:F2} dB) than quality 20 ({lowQualityPsnr:F2} dB)");
     }
 
+    [Theory]
+    [InlineData(JpegChromaSubsampling.Yuv444)]
+    [InlineData(JpegChromaSubsampling.Yuv420)]
+    public void OptimizedHuffmanTables_ProduceBitIdenticalPixelsToStandardTables(JpegChromaSubsampling subsampling)
+    {
+        // Huffman table choice is a lossless entropy-coding detail layered on top of already-quantized
+        // coefficients -- it can only ever change the encoded byte count, never the reconstructed pixels.
+        var source = CreateGradientImage(64, 48);
+
+        using var standardMs = new MemoryStream();
+        JpegEncoder.Encode(source, standardMs, new JpegEncoderOptions { Quality = 85, Subsampling = subsampling, OptimizeHuffmanTables = false });
+
+        using var optimizedMs = new MemoryStream();
+        JpegEncoder.Encode(source, optimizedMs, new JpegEncoderOptions { Quality = 85, Subsampling = subsampling, OptimizeHuffmanTables = true });
+
+        standardMs.Position = 0;
+        optimizedMs.Position = 0;
+        var decodedStandard = JpegDecoder.Decode(standardMs);
+        var decodedOptimized = JpegDecoder.Decode(optimizedMs);
+
+        Assert.True(decodedStandard.GetPixelSpan().SequenceEqual(decodedOptimized.GetPixelSpan()));
+    }
+
+    [Fact]
+    public void OptimizedHuffmanTables_ProduceSmallerFileSize()
+    {
+        // A noisy/high-frequency source gives the optimizer real room to win: its symbol distribution
+        // diverges further from the standard tables' fixed, typical-image tuning than a smooth gradient's does.
+        var source = CreateNoisyImage(96, 96);
+
+        using var standardMs = new MemoryStream();
+        JpegEncoder.Encode(source, standardMs, new JpegEncoderOptions { Quality = 85, OptimizeHuffmanTables = false });
+
+        using var optimizedMs = new MemoryStream();
+        JpegEncoder.Encode(source, optimizedMs, new JpegEncoderOptions { Quality = 85, OptimizeHuffmanTables = true });
+
+        Assert.True(
+            optimizedMs.Length <= standardMs.Length,
+            $"Expected optimized-table output ({optimizedMs.Length} bytes) to be no larger than standard-table output ({standardMs.Length} bytes).");
+    }
+
     [Fact]
     public void RestartIntervals_DecodeIdenticallyToWithoutRestarts()
     {
@@ -124,6 +165,19 @@ public class EncodeDecodeRoundTripTests
                 pixels[offset + 1] = (byte)(y * 255 / Math.Max(height - 1, 1));
                 pixels[offset + 2] = (byte)(((x + y) * 255 / Math.Max(width + height - 2, 1)));
             }
+        }
+
+        return image;
+    }
+
+    private static Image CreateNoisyImage(int width, int height)
+    {
+        var image = Image.Create(width, height, PixelFormat.Rgb24);
+        var pixels = image.GetPixelSpan();
+        var random = new Random(12345);
+        for (int i = 0; i < pixels.Length; i++)
+        {
+            pixels[i] = (byte)random.Next(256);
         }
 
         return image;

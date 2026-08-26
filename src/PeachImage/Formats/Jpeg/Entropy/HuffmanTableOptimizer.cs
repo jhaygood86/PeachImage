@@ -108,8 +108,19 @@ internal static class HuffmanTableOptimizer
             counts[length - 1] = (byte)bits[length];
         }
 
+        // Symbols are listed in order of their *raw* (pre-length-limiting) codeSize, not the redistributed
+        // per-length counts in `bits`/`counts` above -- codeSize is never itself adjusted by the redistribution
+        // loop, only the aggregate histogram is. A symbol can legitimately have codeSize > 16 here for a
+        // sufficiently skewed distribution (the whole reason the redistribution loop exists), so this must
+        // scan the full raw range, not stop at 16: capping at 16 would silently drop such symbols from
+        // `values` while `counts` (built from the redistributed, sum-preserving `bits`) still allocates a
+        // code for them, desynchronizing the two and leaving HuffmanEncodingTable to walk off the end of
+        // `values`. Per ITU-T.81 Annex K.3 / libjpeg's jpeg_gen_optimal_table (whose own comment calls this
+        // "not real clear... but the JPEG spec seems to think this works"), sorting purely by raw codeSize is
+        // sufficient: each symbol's *actual* transmitted code length is implicitly determined by its position
+        // in this list once `counts` is consumed length-by-length, not by its raw codeSize value directly.
         var values = new List<byte>();
-        for (int length = 1; length <= 16; length++)
+        for (int length = 1; length <= MaxRawCodeLength; length++)
         {
             for (int symbol = 0; symbol < 256; symbol++)
             {
