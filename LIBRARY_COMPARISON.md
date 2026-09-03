@@ -340,6 +340,17 @@ this document. `ffmpeg`'s number wasn't re-measured this session; only PeachImag
 
 PeachImage is roughly **2.12×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario.
 
+### Encode (lossless size)
+
+`AvifEncoderOptions.Lossless = true` compared against this repo's own PNG encoder on the same pixels, plus
+`ffmpeg`'s lossless AV1 encode (`-c:v libaom-av1 -crf 0 -still-picture 1`) as external context. Reproduce
+with the deterministic 128×128 multi-octave fractal-noise fixture in `LosslessSizeRegressionTests`
+(`dotnet test --filter FractalNoiseImage_LosslessAvif_IsSmallerThanSourcePng`):
+
+| Scenario | PeachImage PNG | PeachImage lossless AVIF | `ffmpeg` lossless AVIF (context only) |
+|---|---:|---:|---:|
+| 128×128 photo-like (fractal noise) | 28,128 bytes | 27,386 bytes | 26,154 bytes |
+
 ## TIFF
 
 Decode-only (uncompressed/LZW/PackBits, 1/2/4/8/16-bit, grayscale/RGB/palette/CMYK). **No SkiaSharp
@@ -373,7 +384,7 @@ rather than a fixed per-byte reshape.
 | GIF | **2.08×–6.77× (animated: 6.77×, static: 2.08×–3.29×)** | no SkiaSharp baseline (PeachImage-only) |
 | PNG | 0.92×–1.36× | 0.66×–1.15× |
 | WebP | 0.27×–2.17× (animated: **0.27×**, static: 1.12×–2.17×) | 1.01×–1.44× lossless (0.16× small-image outlier), 0.88× lossy |
-| AVIF | ~2.12× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented (fixed 8x8 blocks, no partition-tree RDO yet); throughput not yet measured here |
+| AVIF | ~2.12× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented; lossy fixed 8x8 blocks, lossless has a real partition-tree RDO search up to 64x64 (see Encode (lossless size) above); throughput not yet measured here |
 | TIFF | ~0.08×–0.35× vs. `ffmpeg` (no SkiaSharp baseline available; ratios dominated by `ffmpeg`'s process-spawn overhead, not decoder throughput) | not implemented (decode-only) |
 | Resize | — | Downscale: 1.28×–3.58× (NearestNeighbor closest, Bilinear/cubic slower); Upscale: 1.41× (NearestNeighbor) or **0.19×–0.59×** (Bilinear/cubic family, faster than SkiaSharp) |
 
