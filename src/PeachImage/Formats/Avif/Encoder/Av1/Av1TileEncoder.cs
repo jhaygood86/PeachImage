@@ -325,18 +325,15 @@ internal static class Av1TileEncoder
         // a leaf size below), which is out of scope for this pass -- see the project plan.
         //
         // DecidePartition/EstimateLumaCost (a real WHT-cost-based RD partition search, Phase D technique 6)
-        // is live for lossless. Building it originally surfaced a real bitstream-desync bug, root-caused to
-        // IntraBC's *approximate*-match residual path (EncodeIntrabcResidual) specifically for a merged
-        // (>8x8) coding block: that path predicts the whole coding block in one Av1InterPrediction.
-        // PredictIntrabc call and then slices it per 4x4 sub-block, whereas a real AV1 decoder's
-        // transform_block() calls PredictIntrabc fresh per sub-block (spec §5.11.35) -- for a multi-sub-block
-        // IntraBC block those two are not always equivalent, unlike the always-single-sub-block case this
-        // encoder used exclusively before Phase D (the original 8x8-only floor gives IntraBC exactly one 4x4
-        // sub-block whenever a block is small, so the two approaches happened to coincide there and the bug
-        // is not size-independent history -- it needed a real multi-sub-block IntraBC block to ever surface).
-        // IntraBC's *exact*-match path (skip = 1, no residual, verified byte-identical to source before use)
-        // has no such per-sub-block prediction step and is unaffected -- see FindApproximateIntrabcMatch's
-        // own sizeMi <= 2 gate for where this is actually enforced.
+        // is live for lossless, including for leaves that end up using IntraBC's approximate-match residual
+        // path (EncodeIntrabcResidual), which predicts every plane fresh per 4x4 sub-block from
+        // progressively-reconstructed state, matching Av1TileDecoder.TransformBlock's own per-sub-block
+        // PredictIntrabc call (spec §5.11.35) for any leaf size -- see EncodeIntrabcResidual's remarks. That
+        // path used to be gated to single-sub-block (sizeMi <= 2) leaves specifically because it predicted a
+        // merged coding block in one whole-block PredictIntrabc call instead, which could desync from a real
+        // decoder's per-sub-block prediction for a genuinely multi-sub-block IntraBC block; IntraBC's
+        // *exact*-match path (skip = 1, no residual, verified byte-identical to source before use) never had
+        // this problem, since it carries no per-sub-block prediction step at all.
         if (s.Lossless && DecidePartition(s, r, c, sizeMi).KeepAsLeaf)
         {
             s.Symbols.WriteSymbol(partitionCdf, Av1PartitionType.None);
@@ -903,20 +900,16 @@ internal static class Av1TileEncoder
         // FindApproximateIntrabcMatch's remarks). Only tried when it wasn't already an exact match and the
         // real intra search above found something to beat.
         //
-        // sizeMi <= 2: root-caused bitstream-desync bug -- EncodeIntrabcResidual predicts this leaf's whole
-        // region in one Av1InterPrediction.PredictIntrabc call and then slices the result per 4x4 sub-block,
-        // but a real AV1 decoder's transform_block() (spec §5.11.35) calls PredictIntrabc fresh for every
-        // sub-block. The two are equivalent for a single-sub-block (8x8-floor, sizeMi <= 2) leaf, which is
-        // the only shape this encoder ever produced before the partition-tree RDO search (DecidePartition)
-        // could merge leaves bigger than 8x8 -- confirmed by isolating this exact leaf (found via a per-leaf
-        // encode/decode symbol-count comparison) and bisecting which of its writes was responsible: disabling
-        // this path alone (leaving intrabcExact -- which has no per-sub-block prediction step -- enabled)
-        // resolved the SmoothedNoise_Lossless_RoundTripsExactly regression. Re-enabling this for sizeMi > 2
-        // needs EncodeIntrabcResidual to predict per-sub-block from progressively updated ReconY/U/V, the
-        // same way EncodeLosslessLumaResidual/EncodeChromaRegion already do for the real-intra case.
+        // This used to be gated to sizeMi <= 2 (single-sub-block leaves only): EncodeIntrabcResidual
+        // predicted a merged coding block's whole region in one Av1InterPrediction.PredictIntrabc call and
+        // then sliced the result per 4x4 sub-block, which could desync from a real decoder's transform_block()
+        // (spec §5.11.35, which calls PredictIntrabc fresh per sub-block from progressively-reconstructed
+        // state) for a genuinely multi-sub-block IntraBC block. EncodeIntrabcResidual now predicts per
+        // sub-block the same way -- see its remarks for detail. IntraBC's *exact*-match path (intrabcExact
+        // above) never had this problem, since it has no per-sub-block prediction step at all.
         int approxMvRow = 0;
         int approxMvCol = 0;
-        bool intrabcApprox = !intrabcExact && intrabcStructurallyPresent && sizeMi <= 2
+        bool intrabcApprox = !intrabcExact && intrabcStructurallyPresent
             && FindApproximateIntrabcMatch(s, r, c, sizeMi, bestCost, out approxMvRow, out approxMvCol);
         if (intrabcApprox)
         {
@@ -1286,7 +1279,15 @@ internal static class Av1TileEncoder
                 s.YModes[idx] = leafYMode;
                 s.UvModes[idx] = leafUvMode;
                 s.MiSizes[idx] = bSize;
-                s.Skips[idx] = usedPalette || usedIntrabc;
+                // Must mirror the actual written skip bit (usedPalette || intrabcExact, see above -- not
+                // usedIntrabc), which is 0 for an approximate-match IntraBC leaf (it carries a real residual).
+                // Av1TileDecoder stores its own Skips-equivalent grid from the literally decoded skip bit
+                // (_skips[idx] = _skip), so using usedIntrabc here diverges from the decoder's neighbor-skip
+                // context for any later leaf bordering this one whenever intrabcApprox (not intrabcExact) is
+                // what made usedIntrabc true -- silently latent while approximate-match IntraBC leaves were
+                // rare (this encoder's original 8x8-floor rarely picked one), but common enough once
+                // partition-tree RDO's larger leaves increase how often it's chosen to desync real content.
+                s.Skips[idx] = usedPalette || intrabcExact;
                 s.PaletteSizesY[idx] = usedPalette ? paletteSizeY : 0;
                 s.PaletteSizesUV[idx] = usedPalette ? paletteSizeUV : 0;
                 int colorBase = idx * 8;
@@ -1543,14 +1544,18 @@ internal static class Av1TileEncoder
     /// <c>qindex &lt;= 0</c> short-circuit in <c>TransformType</c> means no <c>tx_type</c> symbol is ever
     /// read either way (matching <c>writeLumaTxType: null</c> below) -- this leaf looks, to the decoder, like
     /// any other lossless coding block with a nonzero residual, just with a different prediction source.
-    /// Unlike intra prediction, IntraBC's predictor doesn't depend on progressively-reconstructed neighbor
-    /// pixels within this leaf (it reads from an entirely different, already-fully-encoded region), so the
-    /// whole leaf's prediction is produced in one call per plane rather than rebuilt per 4x4 sub-block.
+    /// Unlike whole-leaf intra prediction's own *search/estimate* step (which legitimately approximates by
+    /// reading <see cref="TileState.SourceY"/> up front -- see <see cref="DecidePartition"/>'s remarks),
+    /// this real residual encode predicts every plane fresh per 4x4 sub-block from the progressively-updated
+    /// <see cref="TileState.ReconY"/>/<see cref="TileState.ReconU"/>/<see cref="TileState.ReconV"/>, exactly
+    /// mirroring <c>Av1TileDecoder.TransformBlock</c>'s own per-sub-block <c>PredictIntrabc</c> call (spec
+    /// §5.11.35) -- this is what makes the path correct for a merged (&gt;8x8) leaf, not just a
+    /// single-sub-block one (see the now-removed <c>sizeMi &lt;= 2</c> gate's history at the call site below
+    /// for why this mattered).
     /// </summary>
     private static void EncodeIntrabcResidual(TileState s, int r, int c, int x, int y, int mvRow, int mvCol, bool hasChroma, int sizePixels)
     {
         var pred = s.Pred;
-        Av1InterPrediction.PredictIntrabc(pred, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, mvRow, mvCol, subX: 0, subY: 0, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
 
         int n = sizePixels / 4;
         for (int dr = 0; dr < n; dr++)
@@ -1562,11 +1567,21 @@ internal static class Av1TileEncoder
                 int subR = r + dr;
                 int subC = c + dc;
 
+                // Predicted fresh per 4x4 sub-block from s.ReconY, which by now already carries this same
+                // leaf's own earlier (raster-order) sub-blocks' reconstructed pixels -- matching
+                // Av1TileDecoder.TransformBlock's per-sub-block PredictIntrabc call exactly (spec §5.11.35),
+                // not a stale whole-leaf snapshot taken before any of this leaf's own pixels existed.
+                // mvRow/mvCol are unchanged per call (the coding block's one DV); only startX/startY move.
+                // The trailing 0, 0 are PredictIntrabc's own chroma-subsampling-shift parameters (always 0
+                // for luma) -- passed positionally here, not as subX:/subY:, since this loop already has
+                // locals named subX/subY for the sub-block's pixel position.
+                Av1InterPrediction.PredictIntrabc(pred, s.ReconY, s.YWidth, subX, subY, 4, 4, mvRow, mvCol, 0, 0, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
+
                 var residual = s.Residual;
                 for (int i = 0; i < 4; i++)
                 {
                     int rowBase = ((subY + i) * s.YWidth) + subX;
-                    int predRowBase = ((dr * 4) + i) * sizePixels + (dc * 4);
+                    int predRowBase = i * 4;
                     for (int j = 0; j < 4; j++)
                     {
                         residual[(i * 4) + j] = s.SourceY[rowBase + j] - pred[predRowBase + j];
@@ -1580,7 +1595,7 @@ internal static class Av1TileEncoder
 
                 for (int i = 0; i < 4; i++)
                 {
-                    Array.Copy(pred, (((dr * 4) + i) * sizePixels) + (dc * 4), s.ReconY, ((subY + i) * s.YWidth) + subX, 4);
+                    Array.Copy(pred, i * 4, s.ReconY, ((subY + i) * s.YWidth) + subX, 4);
                 }
 
                 Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: sizePixels);
@@ -1608,7 +1623,6 @@ internal static class Av1TileEncoder
         })
         {
             var cpred = s.BestPred;
-            Av1InterPrediction.PredictIntrabc(cpred, recon, s.ChromaWidth, cx, cy, chromaSize, chromaSize, mvRow, mvCol, subXc, subXc, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
 
             for (int dr = 0; dr < chromaN; dr++)
             {
@@ -1619,11 +1633,16 @@ internal static class Av1TileEncoder
                     int chromaR4 = (s.Chroma444 ? r : r / 2) + dr;
                     int chromaC4 = (s.Chroma444 ? c : c / 2) + dc;
 
+                    // Same fix as the luma loop above: predicted fresh per 4x4 sub-block from recon
+                    // (progressively updated by this same leaf's own earlier sub-blocks), not once for the
+                    // whole chroma region.
+                    Av1InterPrediction.PredictIntrabc(cpred, recon, s.ChromaWidth, subCx, subCy, 4, 4, mvRow, mvCol, subXc, subXc, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
+
                     var residual = s.Residual;
                     for (int i = 0; i < 4; i++)
                     {
                         int rowBase = ((subCy + i) * s.ChromaWidth) + subCx;
-                        int predRowBase = (((dr * 4) + i) * chromaSize) + (dc * 4);
+                        int predRowBase = i * 4;
                         for (int j = 0; j < 4; j++)
                         {
                             residual[(i * 4) + j] = source[rowBase + j] - cpred[predRowBase + j];
@@ -1637,7 +1656,7 @@ internal static class Av1TileEncoder
 
                     for (int i = 0; i < 4; i++)
                     {
-                        Array.Copy(cpred, (((dr * 4) + i) * chromaSize) + (dc * 4), recon, ((subCy + i) * s.ChromaWidth) + subCx, 4);
+                        Array.Copy(cpred, i * 4, recon, ((subCy + i) * s.ChromaWidth) + subCx, 4);
                     }
 
                     int chromaBlockSizeArg = chromaN > 1 ? chromaSize : 0;
