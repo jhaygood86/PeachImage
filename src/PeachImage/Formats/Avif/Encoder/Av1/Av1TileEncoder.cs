@@ -19,12 +19,13 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// in signaling -- see <see cref="DecidePartition"/>'s remarks for the full reasoning and the project plan's
 /// Phase A/D results for the measurements motivating this. Every leaf gets a real, WHT-magnitude-cost-based
 /// intra mode search (13 candidate modes x 7 angle_delta values for the 8 directional ones, plus 5
-/// FILTER_INTRA candidates when DC_PRED wins -- see <see cref="EncodeLeaf"/>). Lossless chroma gets the same
-/// real directional/angle search (<see cref="SearchUvMode"/>); non-lossless chroma still always uses DC_PRED,
-/// since non-lossless chroma's transform type is mode-dependent (<c>Av1TxTypeTables.ModeToTxfm</c>) and this
-/// encoder's non-lossless chroma residual path only ever forward-transforms with DCT -- see
-/// <see cref="EncodeLeaf"/>'s <c>SearchUvMode</c> call site remarks. CFL is never used for either (spec-illegal
-/// for this encoder's lossless-always-4:4:4 RGB output, and simply unimplemented for non-lossless).
+/// FILTER_INTRA candidates when DC_PRED wins -- see <see cref="EncodeLeaf"/>). Chroma gets the same real
+/// directional/angle search too (<see cref="SearchUvMode"/>), for both lossless and non-lossless: non-lossless
+/// chroma's transform type is mode-dependent (<c>Av1TxTypeTables.ModeToTxfm</c>), so <see cref="EncodeChromaRegion"/>
+/// forward-transforms with the matching DCT/ADST-mixed <c>Av1ForwardTransform</c> operator for whatever
+/// <c>uv_mode</c> the search picks, rather than always DCT -- see that method's remarks. CFL is never used
+/// (spec-illegal for this encoder's lossless-always-4:4:4 RGB output, and simply unimplemented for
+/// non-lossless).
 ///
 /// <para>Requires the luma plane's width/height to already be padded to a multiple
 /// of 64 (the caller's job -- see <c>Av1FrameEncoder</c>) so every superblock is a full, in-bounds 64x64
@@ -926,20 +927,19 @@ internal static class Av1TileEncoder
         bool usedIntrabc = intrabcExact || intrabcApprox;
 
         // Real cost-based uv_mode/uv_angle_delta search (see SearchUvMode's remarks) -- replaces the old
-        // hardcoded DC_PRED now that lossless chroma is full-resolution 4:4:4, carrying as much real
-        // edge/texture content as luma. Restricted to lossless: non-lossless chroma's transform type is
-        // mode-dependent (spec's Mode_To_Txfm, Av1TxTypeTables.ModeToTxfm -- Av1TileDecoder.ComputeTxType
-        // derives ADST/mixed transforms for every uv_mode except DC_PRED, which is the only one this
-        // encoder's non-lossless chroma forward path -- always a plain DCT, EncodeChromaRegion's non-lossless
-        // branch -- actually implements), so signaling any other uv_mode there would desync the decoder's
-        // inverse transform choice from what was really forward-transformed; DC_PRED's ModeToTxfm entry is
-        // DctDct, which is exactly why hardcoding it was safe before. Lossless never hits this: AV1 forces
-        // TX_4X4/WHT unconditionally at coded-lossless regardless of prediction mode (ComputeTxType's own
-        // lossless short-circuit), so uv_mode has no bearing on transform choice there. Implementing real
-        // per-mode chroma transforms for non-lossless is a larger, separate change (see the project's AVIF
-        // encode intra-mode-search issue) -- out of scope here, which targets lossless size specifically.
+        // hardcoded DC_PRED, for both lossless and non-lossless chroma. Non-lossless chroma's transform type
+        // is mode-dependent (spec's Mode_To_Txfm, Av1TxTypeTables.ModeToTxfm -- Av1TileDecoder.ComputeTxType
+        // derives ADST/mixed transforms for every uv_mode except DC_PRED), which used to make a real search
+        // unsafe here: EncodeChromaRegion's non-lossless forward path only ever forward-transformed with
+        // plain DCT, so signaling any other uv_mode would have desynced the decoder's inverse transform
+        // choice from what was really forward-transformed. EncodeChromaRegion now forward-transforms with
+        // Av1ForwardTransform's mode-dependent AdstDct/DctAdst/AdstAdst operators (matching ModeToTxfm) for
+        // any non-DC_PRED uvMode, so that's no longer a correctness constraint -- see EncodeChromaRegion's
+        // own remarks. Lossless never had this constraint: AV1 forces TX_4X4/WHT unconditionally at
+        // coded-lossless regardless of prediction mode (ComputeTxType's own lossless short-circuit), so
+        // uv_mode has no bearing on transform choice there.
         //
-        // Also skipped when neither neighbor is available (the frame's very first leaf) or !hasChroma/
+        // Still skipped when neither neighbor is available (the frame's very first leaf) or !hasChroma/
         // usedIntrabc (spec's use_intrabc branch replaces yMode/uv_mode signaling entirely -- see the
         // intrabc branch below, which leaves uv_mode at its DC_PRED default instead). With no real edge
         // data on either side, every candidate predicts from the same synthetic default fill, so a
@@ -949,7 +949,7 @@ internal static class Av1TileEncoder
         // to base a directional choice on.
         int bestUvMode = Av1IntraMode.DcPred;
         int bestUvAngleDelta = 0;
-        if (s.Lossless && hasChroma && !usedIntrabc && (availU || availL))
+        if (hasChroma && !usedIntrabc && (availU || availL))
         {
             (bestUvMode, bestUvAngleDelta) = SearchUvMode(s, r, c, x, y, sizeMi, availU, availL);
         }
@@ -2462,8 +2462,20 @@ internal static class Av1TileEncoder
     /// a <c>sizeMi</c>-square grid at luma-identical (unhalved) coordinates. Uses <paramref name="uvMode"/>/
     /// <paramref name="uvAngleDelta"/> (real cost-searched, see <see cref="SearchUvMode"/> -- CFL isn't
     /// implemented, so <paramref name="uvMode"/> is never <see cref="Av1IntraMode.UvCflPred"/>), and follows
-    /// <see cref="TileState.Lossless"/> per sub-block for WHT vs. DCT_DCT exactly like the single-sub-block
+    /// <see cref="TileState.Lossless"/> per sub-block for WHT vs. DCT/ADST exactly like the single-sub-block
     /// case this generalizes did.
+    ///
+    /// <para>Non-lossless forward-transforms with <c>Av1TxTypeTables.ModeToTxfm[uvMode]</c> -- DCT_DCT for
+    /// DC_PRED, one of Av1ForwardTransform's AdstDct/DctAdst/AdstAdst operators for every other mode -- the
+    /// exact same table <c>Av1TileDecoder.ComputeTxType</c> uses to pick its inverse transform for a chroma
+    /// block from <c>_uvMode</c> alone (chroma's <c>tx_type</c> is never itself bitstream-signalled, unlike
+    /// luma's; see <c>writeLumaTxType: null</c> below). Getting this wrong -- forward-transforming with a
+    /// different type than <c>ModeToTxfm[uvMode]</c> implies -- wouldn't just compress worse, it would
+    /// silently desync the decoder's reconstruction from this leaf onward, since the decoder derives its
+    /// inverse transform from the signalled <c>uv_mode</c> with no way to learn otherwise. Lossless instead
+    /// always uses WHT (<see cref="Av1ForwardWht"/>), matching <c>ComputeTxType</c>'s own <c>_lossless</c>
+    /// short-circuit to DCT_DCT/WHT regardless of <c>uv_mode</c> -- see <see cref="TileState.Lossless"/>'s
+    /// remarks.</para>
     ///
     /// <para>Plane must be the outer loop and sub-block position the inner loop -- not the reverse -- to
     /// match spec §5.11.34 <c>residual()</c>'s own <c>for (plane ...) { for (y...) for (x...)
@@ -2474,6 +2486,7 @@ internal static class Av1TileEncoder
     /// </summary>
     private static void EncodeChromaRegion(TileState s, int r, int c, int x, int y, int sizeMi, int uvMode, int uvAngleDelta)
     {
+        int uvTxType = Av1TxTypeTables.ModeToTxfm[uvMode];
         int chromaN = s.Chroma444 ? sizeMi : sizeMi / 2;
         int chromaR4Base = s.Chroma444 ? r : r / 2;
         int chromaC4Base = s.Chroma444 ? c : c / 2;
@@ -2546,7 +2559,7 @@ internal static class Av1TileEncoder
                     }
                     else
                     {
-                        Av1ForwardTransform.Forward2D(residual.AsSpan(0, 16), coeff.AsSpan(0, 16), 4);
+                        Av1ForwardTransform.Forward2D(residual.AsSpan(0, 16), coeff.AsSpan(0, 16), 4, uvTxType);
                     }
 
                     var levels = s.Levels;
@@ -2561,7 +2574,7 @@ internal static class Av1TileEncoder
                     // site for why the argument order matters here (x4 = column, y4 = row) even though it's
                     // unobservable on any square/single-superblock chroma grid.
                     Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null, blockSize: blockSizeArg);
-                    Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, s.Lossless);
+                    Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, s.Lossless, uvTxType);
                     SetBlockDecoded(s, planeIndex, subBlockChromaRow, subBlockChromaCol, true);
                 }
             }

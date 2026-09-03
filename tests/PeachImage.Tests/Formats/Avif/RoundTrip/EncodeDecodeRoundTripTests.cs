@@ -44,6 +44,32 @@ public class EncodeDecodeRoundTripTests
     }
 
     /// <summary>
+    /// Round-trip coverage for issue #60: non-lossless chroma's real directional <c>uv_mode</c> search
+    /// (<c>Av1TileEncoder.SearchUvMode</c>) forward-transforms with a mode-dependent
+    /// <c>Av1ForwardTransform</c> operator (AdstDct/DctAdst/AdstAdst, matching <c>Av1TxTypeTables.ModeToTxfm</c>)
+    /// instead of always DCT_DCT -- getting that wrong desyncs <c>Av1TileDecoder.ComputeTxType</c>'s inverse
+    /// transform choice from what was actually forward-transformed, corrupting every pixel decoded after the
+    /// first affected leaf. <see cref="CreateDiagonalChromaEdgeImage"/> gives U/V real per-plane directional
+    /// detail (diagonal ramps that wrap into hard edges, offset between R and G so chroma isn't just a scaled
+    /// copy of luma's own structure) -- unlike a solid color or an axis-aligned gradient, this is exactly the
+    /// content a directional (non-DC_PRED) <c>uv_mode</c> should win on, so it reliably exercises the new
+    /// forward-transform path rather than leaving every leaf on DC_PRED by chance. A desync would show up
+    /// here as severe, cascading corruption (not just quantization loss), so the PSNR floor is set well above
+    /// what quantization noise alone would ever produce at these quality levels.
+    /// </summary>
+    [Theory]
+    [InlineData(64, 64, 90)]
+    [InlineData(96, 80, 60)] // non-multiple-of-64 + lower quality (coarser quantization stresses the search harder)
+    public void DiagonalChromaEdges_RoundTrips_ViaPublicApi(int width, int height, int quality)
+    {
+        var source = CreateDiagonalChromaEdgeImage(width, height);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = quality });
+
+        AssertPsnrAtLeast(source, decoded, minPsnrDb: 18.0);
+    }
+
+    /// <summary>
     /// Regression test for a coefficient-context bug where <c>Av1CoefficientWriter.WriteCoeffs</c>'s
     /// (x4, y4) arguments were passed as (row, column) instead of (column, row) at the luma and chroma call
     /// sites in <c>Av1TileEncoder</c>. This is silently unobservable whenever the padded coding-block grid
@@ -533,6 +559,33 @@ public class EncodeDecodeRoundTripTests
                 pixels[idx + 0] = (byte)(width <= 1 ? 0 : col * 255 / (width - 1));
                 pixels[idx + 1] = (byte)(height <= 1 ? 0 : row * 255 / (height - 1));
                 pixels[idx + 2] = 128;
+            }
+        }
+
+        return image;
+    }
+
+    /// <summary>
+    /// Diagonal ramps per channel, deliberately wrapped with <c>% 256</c> rather than scaled to the image's
+    /// extent (unlike <see cref="CreateGradientImage"/>'s smooth col-/row-scaled ramps): this produces hard
+    /// repeating diagonal edges every ~32-64 pixels, real directional structure at the scale a single leaf
+    /// actually sees, rather than one smooth ramp too gradual for any one 8x8 block to read as "directional."
+    /// R ramps along the main diagonal and G along the anti-diagonal (opposite slopes, different periods) so
+    /// the derived chroma planes carry real directional detail of their own rather than a scaled copy of
+    /// luma's -- see <see cref="DiagonalChromaEdges_RoundTrips_ViaPublicApi"/>.
+    /// </summary>
+    private static Image CreateDiagonalChromaEdgeImage(int width, int height)
+    {
+        var image = Image.Create(width, height, PixelFormat.Rgb24);
+        var pixels = image.GetPixelSpan();
+        for (int row = 0; row < height; row++)
+        {
+            for (int col = 0; col < width; col++)
+            {
+                int idx = ((row * width) + col) * 3;
+                pixels[idx + 0] = (byte)(((col * 5) + (row * 3)) % 256);
+                pixels[idx + 1] = (byte)(((col * 3) - (row * 5)) % 256);
+                pixels[idx + 2] = (byte)((col + row) % 128);
             }
         }
 
