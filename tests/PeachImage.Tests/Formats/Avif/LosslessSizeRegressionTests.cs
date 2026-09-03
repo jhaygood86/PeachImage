@@ -93,6 +93,132 @@ public class LosslessSizeRegressionTests
         return image;
     }
 
+    /// <summary>
+    /// Regression guard for a large, separate gap from <see cref="FractalNoiseImage_LosslessAvif_IsSmallerThanSourcePng"/>:
+    /// a "flyer-like" graphic/screen-content-style image (a smooth gradient background, several solid-colored
+    /// rectangular blocks, and thin dark line strokes simulating text -- not photographic) drove PeachImage's
+    /// lossless AVIF encoder to output 6-10x larger than the source PNG, a far bigger gap than the ~1.2x-1.3x
+    /// even a mature reference AV1 encoder (ffmpeg/aom's own lossless mode) sees on the same content type. See
+    /// this project's AVIF lossless screen-content-size issue for the root-cause investigation (a linear
+    /// WHT-coefficient-magnitude rate proxy that over-costs the few large-magnitude coefficients a hard edge
+    /// produces relative to their real, sub-linear AV1 entropy cost, plus a partition floor one level coarser
+    /// than spec's true 4x4 minimum, both addressed by <c>Av1TileEncoder</c>'s <c>CoefficientCost</c> and its
+    /// 4x4-floor partition search).
+    ///
+    /// <para>Unlike <see cref="FractalNoiseImage_LosslessAvif_IsSmallerThanSourcePng"/>, this doesn't assert
+    /// AVIF beats PNG -- even ffmpeg's own reference lossless AV1 encoder loses to PNG on this content type
+    /// (confirmed during the original investigation), so that assertion would be a false positive here, not a
+    /// real regression guard. Instead this bounds AVIF to a fixed multiple of the source PNG's size, per size,
+    /// chosen as the midpoint between this exact fixture/seed's measured before-fix and after-fix ratios
+    /// (128x128: 4.23x before / 3.80x after; 256x256: 4.65x before / 4.37x after; 512x512: 3.63x before / 3.38x
+    /// after) -- tight enough to actually fail if this fix regresses back toward its pre-fix behavior, not just
+    /// a loose sanity bound, while still keeping real margin (not the exact post-fix value) against ordinary
+    /// environment/future-content-specific size drift.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(128, 128, 4.0)]
+    [InlineData(256, 256, 4.5)]
+    [InlineData(512, 512, 3.5)]
+    public void GraphicContentImage_LosslessAvif_DoesNotBlowUpRelativeToSourcePng(int width, int height, double maxRatio)
+    {
+        using var image = CreateGraphicContentImage(width, height, seed: 42);
+
+        using var pngStream = new MemoryStream();
+        image.Save(pngStream, "png");
+
+        using var avifStream = new MemoryStream();
+        image.Save(avifStream, "avif", new AvifEncoderOptions { Lossless = true });
+
+        Assert.True(
+            avifStream.Length < pngStream.Length * maxRatio,
+            $"Lossless AVIF ({avifStream.Length} bytes) was more than {maxRatio:0.#}x the source PNG ({pngStream.Length} bytes) for a {width}x{height} graphic/screen-content-style image.");
+    }
+
+    /// <summary>
+    /// A synthetic "flyer-like" graphic/screen-content-style image: a diagonal smooth gradient background, a
+    /// dense checkerboard-ish grid of small solid-colored rectangular blocks (sharp gradient-to-solid-color
+    /// edges -- many of them, not just a few, is what actually stresses the specific defect this regresses:
+    /// a linear WHT-coefficient-magnitude rate proxy that over-costs a hard edge's few large-magnitude
+    /// coefficients, and a partition floor coarser than spec's true 4x4 minimum, both of which matter more as
+    /// edges become a bigger fraction of the image), and thin dark horizontal line strokes simulating text --
+    /// the content shape that originally exposed this encoder's lossless size blowup (see
+    /// <see cref="GraphicContentImage_LosslessAvif_DoesNotBlowUpRelativeToSourcePng"/>'s remarks), unlike
+    /// <see cref="CreateFractalNoiseImage"/>'s photographic proxy. Deterministic for a given
+    /// <paramref name="seed"/>.
+    /// </summary>
+    private static Image CreateGraphicContentImage(int width, int height, int seed)
+    {
+        var image = Image.Create(width, height, PixelFormat.Rgb24);
+        var pixels = image.GetPixelSpan();
+        var rng = new Random(seed);
+
+        for (int row = 0; row < height; row++)
+        {
+            for (int col = 0; col < width; col++)
+            {
+                int idx = ((row * width) + col) * 3;
+                double t = (double)(row + col) / (width + height);
+                pixels[idx + 0] = (byte)(40 + (t * 180));
+                pixels[idx + 1] = (byte)(60 + (t * 120));
+                pixels[idx + 2] = (byte)(120 + (t * 100));
+            }
+        }
+
+        int cell = Math.Max(6, width / 12);
+        for (int blockY = 0; blockY < height; blockY += cell)
+        {
+            for (int blockX = 0; blockX < width; blockX += cell)
+            {
+                if (rng.NextDouble() < 0.5)
+                {
+                    continue;
+                }
+
+                byte r = (byte)rng.Next(0, 256);
+                byte g = (byte)rng.Next(0, 256);
+                byte b = (byte)rng.Next(0, 256);
+                for (int row = blockY; row < Math.Min(height, blockY + cell); row++)
+                {
+                    for (int col = blockX; col < Math.Min(width, blockX + cell); col++)
+                    {
+                        int idx = ((row * width) + col) * 3;
+                        pixels[idx + 0] = r;
+                        pixels[idx + 1] = g;
+                        pixels[idx + 2] = b;
+                    }
+                }
+            }
+        }
+
+        for (int lineGroup = 0; lineGroup < 6; lineGroup++)
+        {
+            int baseRow = 20 + rng.Next(0, Math.Max(1, height - 40));
+            int baseCol = 10 + rng.Next(0, Math.Max(1, width / 4));
+            int lineWidth = 40 + rng.Next(0, Math.Max(1, width / 3));
+            for (int i = 0; i < 6; i++)
+            {
+                int row = baseRow + (i * 3);
+                if (row >= height)
+                {
+                    break;
+                }
+
+                for (int col = baseCol; col < Math.Min(width, baseCol + lineWidth); col++)
+                {
+                    if (rng.NextDouble() < 0.7)
+                    {
+                        int idx = ((row * width) + col) * 3;
+                        pixels[idx + 0] = 20;
+                        pixels[idx + 1] = 20;
+                        pixels[idx + 2] = 20;
+                    }
+                }
+            }
+        }
+
+        return image;
+    }
+
     /// <summary>One octave of value noise: independent random values on a <paramref name="cellSize"/>-spaced grid, bilinearly interpolated up to full <paramref name="width"/>x<paramref name="height"/> resolution.</summary>
     private static double[,] ValueNoiseLayer(Random rng, int width, int height, int cellSize)
     {
