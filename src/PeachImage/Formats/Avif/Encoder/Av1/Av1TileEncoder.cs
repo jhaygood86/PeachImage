@@ -658,11 +658,6 @@ internal static class Av1TileEncoder
         int x = c * 4;
         int y = r * 4;
 
-        if (sizePixels > 8)
-        {
-            System.IO.File.AppendAllText(@"C:\Users\jhayg\AppData\Local\Temp\claude\C--Sources-GitHub-PeachImage\96139ee2-78d5-4e96-a796-38231678e69f\scratchpad\diag.txt", $"LEAF-START x={x} y={y} sizePixels={sizePixels}\n");
-        }
-
         int aboveYMode = availU ? s.YModes[((r - 1) * s.MiCols) + c] : Av1IntraMode.DcPred;
         int leftYMode = availL ? s.YModes[(r * s.MiCols) + c - 1] : Av1IntraMode.DcPred;
         int yModeCtx0 = Av1BlockTables.IntraModeContext[aboveYMode];
@@ -1045,11 +1040,6 @@ internal static class Av1TileEncoder
         }
         else
         {
-            if (x <= 192 && 192 < x + sizePixels && y <= 128 && 128 < y + sizePixels)
-            {
-                System.IO.File.AppendAllText(@"C:\Users\jhayg\AppData\Local\Temp\claude\C--Sources-GitHub-PeachImage\96139ee2-78d5-4e96-a796-38231678e69f\scratchpad\diag.txt", $"LEAF-RESIDUAL x={x} y={y} sizePixels={sizePixels} bestMode={bestMode} bestAngleDelta={bestAngleDelta} filterIntra={bestUseFilterIntra} filterMode={bestFilterIntraMode}\n");
-            }
-
             if (s.Lossless)
             {
                 // AV1 forces TX_4X4 for every block when lossless -- the leaf's transform splits into
