@@ -69,9 +69,35 @@ internal sealed class Av1CdfContext
     public readonly ushort[][] CflAlpha = Clone(Av1CdfTables.DefaultCflAlpha);
     public readonly ushort[][][] IntraTxTypeSet1 = Clone(Av1CdfTables.DefaultIntraTxTypeSet1);
     public readonly ushort[][][] IntraTxTypeSet2 = Clone(Av1CdfTables.DefaultIntraTxTypeSet2);
+    public readonly ushort[][] InterTxTypeSet1 = Clone(Av1CdfTables.DefaultInterTxTypeSet1);
+    public readonly ushort[][] InterTxTypeSet3 = Clone(Av1CdfTables.DefaultInterTxTypeSet3);
     public readonly ushort[] UseWiener = Clone(Av1CdfTables.DefaultUseWiener);
     public readonly ushort[] UseSgrproj = Clone(Av1CdfTables.DefaultUseSgrproj);
     public readonly ushort[] RestorationType = Clone(Av1CdfTables.DefaultRestorationType);
+
+    public readonly ushort[][] PaletteYSize = Clone(Av1CdfTables.DefaultPaletteYSize);
+    public readonly ushort[][] PaletteUvSize = Clone(Av1CdfTables.DefaultPaletteUvSize);
+    public readonly ushort[][][] PaletteYMode = Clone(Av1CdfTables.DefaultPaletteYMode);
+    public readonly ushort[][] PaletteUvMode = Clone(Av1CdfTables.DefaultPaletteUvMode);
+    public readonly ushort[][][] PaletteYColorIndex = Clone(Av1CdfTables.DefaultPaletteYColorIndex);
+    public readonly ushort[][][] PaletteUvColorIndex = Clone(Av1CdfTables.DefaultPaletteUvColorIndex);
+
+    // MV/IntraBC CDFs. As explained on the Av1CdfTables default tables these come from, the spec's
+    // MV_CONTEXTS context dimension is omitted (always MV_INTRABC_CONTEXT here); the comp dimension (0=row,
+    // 1=col) is kept since read_mv_component(comp) adapts each independently even where the two start from
+    // identical default values. mv_class0_fr/mv_class0_hp/mv_fr/mv_hp have no CDFs here at all: reduced
+    // still_picture_header forces force_integer_mv=1 unconditionally for FrameIsIntra (spec order: the
+    // override happens after seq_force_integer_mv's own bit is read, so this isn't a bitstream choice),
+    // and read_mv_component's own syntax never reads those symbols when force_integer_mv is set -- so
+    // unlike MvClass/MvClass0Bit/MvBit/MvSign, which the DV magnitude/sign always need, these four would be
+    // allocated, cloned, and adapted for a code path that can provably never run. Mirrors the
+    // IsAboveInter/IsLeftInter=false simplification elsewhere in this decoder.
+    public readonly ushort[] Intrabc = Clone(Av1CdfTables.DefaultIntrabc);
+    public readonly ushort[] MvJoint = Clone(Av1CdfTables.DefaultMvJoint);
+    public readonly ushort[][] MvClass = Clone(Av1CdfTables.DefaultMvClass);
+    public readonly ushort[][] MvClass0Bit = [Clone(Av1CdfTables.DefaultMvClass0Bit), Clone(Av1CdfTables.DefaultMvClass0Bit)];
+    public readonly ushort[][] MvSign = [Clone(Av1CdfTables.DefaultMvSign), Clone(Av1CdfTables.DefaultMvSign)];
+    public readonly ushort[][][] MvBit = [Clone(Av1CdfTables.DefaultMvBit), Clone(Av1CdfTables.DefaultMvBit)];
 
     private static ushort[] Clone(ushort[] source) => (ushort[])source.Clone();
 

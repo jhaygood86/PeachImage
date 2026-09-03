@@ -1,4 +1,5 @@
 using PeachImage.Formats.Avif.Decoding.Av1;
+using PeachImage.Formats.Avif.Encoder.Av1.Transform;
 
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
@@ -42,7 +43,10 @@ internal static class Av1ForwardTransform
         double[,] rowInverse = RowInverseMatrices[txSz];
         double[,] colInverse = ColInverseMatrices[txSz];
 
-        var intermediate = new double[size * size];
+        // Fixed-max-literal stackalloc (32 is the largest supported square size, so size*size <= 1024)
+        // sliced down to what this call actually needs -- avoids a heap allocation on every single block.
+        Span<double> intermediateBuffer = stackalloc double[1024];
+        Span<double> intermediate = intermediateBuffer[..(size * size)];
 
         Span<double> rowBuf = stackalloc double[size];
         Span<double> rowOut = stackalloc double[size];
@@ -79,19 +83,9 @@ internal static class Av1ForwardTransform
         }
     }
 
+    /// <summary>Delegates to <see cref="Av1MatrixVectorKernelSelector.Instance"/> -- see <see cref="Transform.IAv1MatrixVectorKernel"/>'s remarks for why this row/column dot product gets its own narrow SIMD-tiered kernel rather than staying inline.</summary>
     private static void ApplyMatrix(double[,] matrix, ReadOnlySpan<double> input, Span<double> output, int size)
-    {
-        for (int row = 0; row < size; row++)
-        {
-            double sum = 0;
-            for (int col = 0; col < size; col++)
-            {
-                sum += matrix[row, col] * input[col];
-            }
-
-            output[row] = sum;
-        }
-    }
+        => Av1MatrixVectorKernelSelector.Instance.Apply(matrix, input, output, size);
 
     /// <summary>Maps a square block size (4/8/16/32) to its <see cref="Av1TxSize"/> constant. Shared with <c>Av1ForwardQuantizer</c> and <c>Av1LocalReconstructor</c>, which need the same mapping to drive <see cref="Av1Dequantizer"/>/<see cref="Av1InverseTransform"/>.</summary>
     internal static int SizeToTxSz(int size) => size switch

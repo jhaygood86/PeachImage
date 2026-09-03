@@ -142,6 +142,14 @@ internal static class Av1FrameDecoder
         var skips = new bool[frameSize];
         var segmentIds = new int[frameSize];
         var interTxSizes = new int[frameSize];
+        var paletteSizesY = new int[frameSize];
+        var paletteSizesUV = new int[frameSize];
+        var paletteColorsYGrid = new int[frameSize * 8];
+        var paletteColorsUGrid = new int[frameSize * 8];
+        var isInters = new bool[frameSize];
+        var mvRowsGrid = new int[frameSize];
+        var mvColsGrid = new int[frameSize];
+        var written = new bool[frameSize];
 
         // Reconstructed-plane buffers are allocated to the superblock-aligned canvas, not just
         // MiCols*4/MiRows*4: a coding/transform block chosen by decode_partition() is only guaranteed to
@@ -240,7 +248,10 @@ internal static class Av1FrameDecoder
             var symbols = new Av1SymbolDecoder(data, tileRange.Offset, tileRange.Length, frame.DisableCdfUpdate);
             var tileDecoder = new Av1TileDecoder(
                 symbols, cdf, sequence, frame, miRowStart, miRowEnd, miColStart, miColEnd,
-                yModes, uvModes, miSizes, skips, segmentIds, interTxSizes, planes, planeWidths, planeHeights,
+                yModes, uvModes, miSizes, skips, segmentIds, interTxSizes,
+                paletteSizesY, paletteSizesUV, paletteColorsYGrid, paletteColorsUGrid,
+                isInters, mvRowsGrid, mvColsGrid, written,
+                planes, planeWidths, planeHeights,
                 deltaLfs, cdefIdx, loopfilterTxSizes, loopfilterTxSizeStrides, restorationUnits);
 
             tileDecoder.DecodeTile();

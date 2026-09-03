@@ -5,7 +5,8 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// <summary>
 /// Dequantizes and inverse-transforms quantized levels, adds the residual to a prediction buffer in place,
 /// and clamps -- the exact same operation <see cref="Av1TileDecoder"/>'s private <c>Reconstruct()</c>
-/// performs (restricted to the DCT_DCT / no-FLIPADST case, the only one this v1 encoder ever produces).
+/// performs (restricted to DCT_DCT, or lossless Walsh-Hadamard when <c>lossless</c> is set -- the only two
+/// transform types this v1 encoder ever produces).
 /// This is not optional plumbing: AV1 intra prediction reads back <em>reconstructed</em> neighbor samples,
 /// never source samples, so the RDO search and the final encode pass must maintain a reconstruction buffer
 /// that is bit-identical to what a real decoder will later reconstruct from the same quantized levels --
@@ -20,17 +21,42 @@ internal static class Av1LocalReconstructor
     /// <paramref name="quantLevels"/>, inverse-transforms, adds onto the existing prediction already
     /// written into <paramref name="plane"/> at that location, and clamps to <c>[0, 255]</c>.
     /// </summary>
-    public static void Reconstruct(int[] plane, int planeStride, int x, int y, int size, int[] quantLevels, int baseQIdx)
+    /// <param name="plane">The full-plane buffer to reconstruct into, of stride <paramref name="planeStride"/>.</param>
+    /// <param name="planeStride">The row stride of <paramref name="plane"/>, in elements.</param>
+    /// <param name="x">The block's left edge within <paramref name="plane"/>.</param>
+    /// <param name="y">The block's top edge within <paramref name="plane"/>.</param>
+    /// <param name="size">The block's width and height (this v1 encoder only ever reconstructs square blocks).</param>
+    /// <param name="quantLevels">The block's quantized coefficient levels, flat <paramref name="size"/> x <paramref name="size"/> row-major.</param>
+    /// <param name="baseQIdx">The frame's base quantizer index.</param>
+    /// <param name="dequantScratch">
+    /// Caller-owned scratch buffer for the dequantized coefficients, at least 64*64 elements (the fixed
+    /// 64-column stride <see cref="Av1Dequantizer.Dequantize"/> and <see cref="Av1InverseTransform.Inverse2D"/>
+    /// both use regardless of the actual transform size -- see their remarks). Every element
+    /// <see cref="Av1InverseTransform.Inverse2D"/> reads back was just written by <see cref="Av1Dequantizer.Dequantize"/>
+    /// in this same call (both bound their [i,j] access to <c>i &lt; size &amp;&amp; j &lt; size</c>), so the
+    /// buffer's contents from a previous call never leak in -- no zeroing needed between calls.
+    /// </param>
+    /// <param name="residualScratch">Caller-owned scratch buffer for the inverse-transformed residual, at least <paramref name="size"/>*<paramref name="size"/> elements.</param>
+    /// <param name="lossless">
+    /// When <see langword="true"/>, inverse-transforms via AV1's lossless Walsh-Hadamard path instead of
+    /// DCT_DCT (<paramref name="size"/> must be 4 -- AV1 lossless forces <c>TX_4X4</c> for every block) and
+    /// <paramref name="baseQIdx"/> must be 0, matching <see cref="Av1ForwardWht"/>'s own pairing.
+    /// </param>
+    /// <remarks>
+    /// Both scratch buffers exist so callers (<see cref="Av1TileEncoder"/>) can rent them once per tile and
+    /// reuse them across every block, rather than this method allocating fresh per call -- previously a
+    /// 16 KB heap allocation on <em>every single block</em> in the image (see git history for the allocation
+    /// profile that motivated this).
+    /// </remarks>
+    public static void Reconstruct(int[] plane, int planeStride, int x, int y, int size, int[] quantLevels, int baseQIdx, int[] dequantScratch, int[] residualScratch, bool lossless = false)
     {
         int txSz = Av1ForwardTransform.SizeToTxSz(size);
         int dcQ = Av1Dequantizer.DcQ(baseQIdx, 8);
         int acQ = Av1Dequantizer.AcQ(baseQIdx, 8);
 
-        var dequant = new int[64 * 64];
-        Av1Dequantizer.Dequantize(quantLevels, dequant, txSz, dcQ, acQ, 8);
+        Av1Dequantizer.Dequantize(quantLevels, dequantScratch, txSz, dcQ, acQ, 8);
 
-        var residual = new int[size * size];
-        Av1InverseTransform.Inverse2D(dequant, residual, txSz, Av1TxType.DctDct, lossless: false, bitDepth: 8);
+        Av1InverseTransform.Inverse2D(dequantScratch, residualScratch, txSz, Av1TxType.DctDct, lossless, bitDepth: 8);
 
         for (int i = 0; i < size; i++)
         {
@@ -39,7 +65,7 @@ internal static class Av1LocalReconstructor
             for (int j = 0; j < size; j++)
             {
                 int idx = rowBase + j;
-                plane[idx] = Math.Clamp(plane[idx] + residual[resBase + j], 0, 255);
+                plane[idx] = Math.Clamp(plane[idx] + residualScratch[resBase + j], 0, 255);
             }
         }
     }

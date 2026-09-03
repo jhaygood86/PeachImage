@@ -39,12 +39,22 @@ internal static class Av1TxClass
     };
 }
 
-/// <summary>AV1 transform-set constants (spec §3) used by <c>get_tx_set</c>/<c>transform_type</c>, restricted to the intra-only values this decoder reaches.</summary>
+/// <summary>
+/// AV1 transform-set constants (spec §3) used by <c>get_tx_set</c>/<c>transform_type</c>. <see cref="Inter1"/>
+/// is the only inter set this decoder ever reaches: IntraBC (the only way <c>is_inter</c> is ever true here)
+/// is restricted to lossless blocks, which always force <c>TxSize=TX_4X4</c> -- and <c>get_tx_set(TX_4X4)</c>
+/// with <c>is_inter</c> true always returns <c>TX_SET_INTER_1</c> (never Inter2/Inter3, which only apply at
+/// TX_16X16 and TX_32X32-and-up respectively).
+/// </summary>
 internal static class Av1TxSet
 {
     public const int DctOnly = 0;
     public const int Intra1 = 1;
     public const int Intra2 = 2;
+    public const int Inter1 = 3;
+
+    /// <summary>The reduced_tx_set variant of <see cref="Inter1"/> at TX_4X4 (2 symbols: IDTX, DCT_DCT only) -- see <see cref="Av1TxTypeTables.TxTypeInterInvSet3"/>.</summary>
+    public const int Inter3 = 4;
 }
 
 /// <summary>
@@ -58,6 +68,17 @@ internal static class Av1TxTypeTables
 
     /// <summary><c>Tx_Type_Intra_Inv_Set2</c> (spec §5.11.47): the 5-symbol inversion table for <c>TX_SET_INTRA_2</c>.</summary>
     public static readonly int[] TxTypeIntraInvSet2 = [Av1TxType.Idtx, Av1TxType.DctDct, Av1TxType.AdstAdst, Av1TxType.AdstDct, Av1TxType.DctAdst];
+
+    /// <summary><c>Tx_Type_Inter_Inv_Set1</c> (spec §5.11.47): the 16-symbol inversion table for <c>TX_SET_INTER_1</c> -- the only inter transform set an IntraBC block in this decoder ever reaches (see <see cref="Av1TxSet.Inter1"/>).</summary>
+    public static readonly int[] TxTypeInterInvSet1 =
+        [
+            Av1TxType.Idtx, Av1TxType.VDct, Av1TxType.HDct, Av1TxType.VAdst, Av1TxType.HAdst, Av1TxType.VFlipadst, Av1TxType.HFlipadst,
+            Av1TxType.DctDct, Av1TxType.AdstDct, Av1TxType.DctAdst, Av1TxType.FlipadstDct, Av1TxType.DctFlipadst, Av1TxType.AdstAdst,
+            Av1TxType.FlipadstFlipadst, Av1TxType.AdstFlipadst, Av1TxType.FlipadstAdst,
+        ];
+
+    /// <summary><c>Tx_Type_Inter_Inv_Set3</c> (spec §5.11.47): the 2-symbol inversion table for <c>TX_SET_INTER_3</c> (the reduced_tx_set variant of <see cref="Av1TxSet.Inter1"/> at TX_4X4).</summary>
+    public static readonly int[] TxTypeInterInvSet3 = [Av1TxType.Idtx, Av1TxType.DctDct];
 
     /// <summary><c>Tx_Type_In_Set_Intra[TX_SET_TYPES_INTRA][TX_TYPES]</c> (spec §5.11.40): whether a given transform type is a legal member of a given intra transform set. Indexed [DCTONLY=0, INTRA_1=1, INTRA_2=2][txType].</summary>
     public static readonly bool[][] TxTypeInSetIntra =

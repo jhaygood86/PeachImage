@@ -110,7 +110,9 @@ public class Av1QuantizerAndReconstructorTests
         const int predictionBaseline = 128;
         int[] plane = new int[size * size];
         Array.Fill(plane, predictionBaseline);
-        Av1LocalReconstructor.Reconstruct(plane, planeStride: size, x: 0, y: 0, size, levels, baseQIdx);
+        int[] dequantScratch = new int[64 * 64];
+        int[] residualScratch = new int[size * size];
+        Av1LocalReconstructor.Reconstruct(plane, planeStride: size, x: 0, y: 0, size, levels, baseQIdx, dequantScratch, residualScratch);
 
         // Quantization is genuinely lossy by design -- bound the error by a generous multiple of the
         // quantizer's own AC step (coarser baseQIdx => larger acceptable error), not an exact match.

@@ -40,6 +40,32 @@ internal sealed class Av1TileDecoder
     private readonly int[] _segmentIds;
     private readonly int[] _interTxSizes;
 
+    // Frame-sized palette neighbor context (spec's PaletteSizes/PaletteColors, redundantly written across
+    // every mi cell a block covers -- same convention as _yModes/_miSizes above): needed for
+    // palette_mode_info()'s mode-context derivation and its color-cache lookup (spec's get_palette_cache(),
+    // which reads the above/left neighbor *block's* palette, not just its size). Only Y and U colors are
+    // ever cached from a neighbor (spec's own read_palette_colors_uv never caches V, always delta-codes it
+    // fresh -- see ReadPaletteColorsUv), so there's no frame-shared V grid. Flat [(row*miCols+col)*8 + slot].
+    private readonly int[] _paletteSizesY;
+    private readonly int[] _paletteSizesUV;
+    private readonly int[] _paletteColorsYGrid;
+    private readonly int[] _paletteColorsUGrid;
+
+    // Frame-sized IntraBC/MV neighbor context: IsInters[idx] mirrors the spec's IsInters grid, but since
+    // this decoder is otherwise intra-only, it is only ever true for a block that used use_intrabc (a
+    // regular intra block always has is_inter=0) -- see FindMvStack/AddRefMvCandidate for why that
+    // collapses the spec's general is_inter/RefFrame-matching gate down to a single bool check. Mvs*[idx]
+    // are that same intrabc block's displacement vector (1/8th-luma-sample units, always a multiple of 8
+    // since force_integer_mv is unconditionally 1 here). Written[idx] mirrors "RefFrames[r][c][0] has been
+    // written for this frame" (spec §7.10.2.4's scan point process) -- needed because, unlike scan_row/
+    // scan_col's directly-adjacent-row/column positions (always already decoded by raster/partition
+    // order), scan_point's diagonal/top-right offsets can land on a position the current superblock's own
+    // partition recursion hasn't reached yet.
+    private readonly bool[] _isInters;
+    private readonly int[] _mvRowsGrid;
+    private readonly int[] _mvColsGrid;
+    private readonly bool[] _written;
+
     // Frame-sized reconstructed pixel planes (spec's CurrFrame), shared across every tile of the frame --
     // safe for the same reason the neighbor-context arrays above are: every read this decoder performs
     // either targets already-reconstructed positions (raster decode order) or is gated by AvailU/AvailL
@@ -128,6 +154,44 @@ internal sealed class Av1TileDecoder
     private int _filterIntraMode;
     private int _txSize;
 
+    // IntraBC per-block transient state (spec's use_intrabc/is_inter/Mv/PredMv, restricted to the
+    // isCompound=0, ref=0 case -- intrabc is always single-prediction).
+    private bool _useIntrabc;
+    private bool _isInter;
+    private int _mvRow;
+    private int _mvCol;
+    private int _predMvRow;
+    private int _predMvCol;
+    private int _numMvFound;
+    private readonly int[,] _refStackMv = new int[MaxRefMvStackSize, 2];
+    private readonly int[] _weightStack = new int[MaxRefMvStackSize];
+
+    private const int MaxRefMvStackSize = 8;
+    private const int RefCatLevel = 640;
+    private const int MvBorder = 128;
+    private const int IntrabcDelayPixels = 256;
+    private const int IntrabcDelaySb64 = 4;
+    private const int MvJointHzvnz = 2;
+    private const int MvJointHnzvz = 1;
+    private const int MvJointHnzvnz = 3;
+    private const int MvClass0 = 0;
+
+    // Palette mode per-block transient state (spec §5.11.46 palette_mode_info(), §5.11.47 palette_tokens()).
+    private int _paletteSizeY;
+    private int _paletteSizeUV;
+    private readonly int[] _paletteColorsY = new int[8];
+    private readonly int[] _paletteColorsU = new int[8];
+    private readonly int[] _paletteColorsV = new int[8];
+
+    // Block-local color-index maps (spec's ColorMapY/ColorMapUV), populated once by PaletteTokens() and
+    // consumed by every TransformBlock() call for this same coding block -- flat, row-major, stride equal
+    // to that plane's own (full, possibly off-screen-extended) block width. Sized to the largest palette-
+    // eligible block (64x64, spec's MAX_PALETTE_BLOCK_WIDTH/HEIGHT) regardless of subsampling, since a
+    // 4:4:4 stream's chroma block can be just as large as luma's.
+    private readonly int[] _colorMapY = new int[64 * 64];
+    private readonly int[] _colorMapUv = new int[64 * 64];
+    internal static readonly int[] ColorContextHashLookup = [-1, -1, 0, -1, -1, 4, 3, 2, 1];
+
     // Coefficient decode scratch/context (spec §5.11.34/§5.11.39). AboveLevelContext/AboveDcContext span
     // the tile's full width (reset once per tile, per plane); LeftLevelContext/LeftDcContext are sized to
     // the whole frame height and re-cleared every superblock row (matching clear_left_context()) rather
@@ -183,6 +247,14 @@ internal sealed class Av1TileDecoder
         bool[] skips,
         int[] segmentIds,
         int[] interTxSizes,
+        int[] paletteSizesY,
+        int[] paletteSizesUV,
+        int[] paletteColorsYGrid,
+        int[] paletteColorsUGrid,
+        bool[] isInters,
+        int[] mvRowsGrid,
+        int[] mvColsGrid,
+        bool[] written,
         int[][] planes,
         int[] planeWidths,
         int[] planeHeights,
@@ -208,6 +280,14 @@ internal sealed class Av1TileDecoder
         _skips = skips;
         _segmentIds = segmentIds;
         _interTxSizes = interTxSizes;
+        _paletteSizesY = paletteSizesY;
+        _paletteSizesUV = paletteSizesUV;
+        _paletteColorsYGrid = paletteColorsYGrid;
+        _paletteColorsUGrid = paletteColorsUGrid;
+        _isInters = isInters;
+        _mvRowsGrid = mvRowsGrid;
+        _mvColsGrid = mvColsGrid;
+        _written = written;
         _planes = planes;
         _planeWidths = planeWidths;
         _planeHeights = planeHeights;
@@ -732,7 +812,17 @@ internal sealed class Av1TileDecoder
 
         IntraFrameModeInfo();
 
+        // palette_tokens() (spec §5.11.47): reads this block's color-index map(s) immediately after mode
+        // info and before tx-size/residual -- see PaletteTokens' remarks for why this needs its own step
+        // here rather than folding into Residual()'s existing per-transform-block loop.
+        PaletteTokens();
+
         ReadBlockTxSize(bw4, bh4);
+
+        if (_skip)
+        {
+            ResetBlockContext(bw4, bh4);
+        }
 
         for (int y = 0; y < bh4 && r + y < _miRows; y++)
         {
@@ -748,12 +838,57 @@ internal sealed class Av1TileDecoder
                 {
                     _deltaLfs[i][idx] = _deltaLf[i];
                 }
+
+                _paletteSizesY[idx] = _paletteSizeY;
+                _paletteSizesUV[idx] = _paletteSizeUV;
+                int colorBase = idx * 8;
+                for (int k = 0; k < 8; k++)
+                {
+                    _paletteColorsYGrid[colorBase + k] = _paletteColorsY[k];
+                    _paletteColorsUGrid[colorBase + k] = _paletteColorsU[k];
+                }
+
+                _isInters[idx] = _isInter;
+                _mvRowsGrid[idx] = _mvRow;
+                _mvColsGrid[idx] = _mvCol;
+                _written[idx] = true;
             }
         }
 
         Residual(bw4, bh4);
 
         BlocksDecoded++;
+    }
+
+    /// <summary>
+    /// <c>reset_block_context(bw4, bh4)</c> (spec §5.11.5): for a skipped block, explicitly zeroes the
+    /// coefficient-context arrays (<see cref="_aboveLevelContext"/>/<see cref="_aboveDcContext"/>/
+    /// <see cref="_leftLevelContext"/>/<see cref="_leftDcContext"/>) across the block's own footprint in
+    /// every plane it covers -- <c>Coeffs()</c> never runs for a skipped block (no residual to decode), so
+    /// without this call those slots would keep whatever value an earlier, unrelated block last left there,
+    /// silently feeding a stale (and possibly nonzero) neighbor context into the next real coefficient
+    /// read's <c>all_zero</c>/<c>dc_sign</c> context derivation.
+    /// </summary>
+    private void ResetBlockContext(int bw4, int bh4)
+    {
+        int planeCount = _hasChroma ? 3 : 1;
+        for (int plane = 0; plane < planeCount; plane++)
+        {
+            int subX = plane > 0 && _seq.SubsamplingX ? 1 : 0;
+            int subY = plane > 0 && _seq.SubsamplingY ? 1 : 0;
+
+            for (int i = _miCol >> subX; i < (_miCol + bw4) >> subX; i++)
+            {
+                _aboveLevelContext[plane][i] = 0;
+                _aboveDcContext[plane][i] = 0;
+            }
+
+            for (int i = _miRow >> subY; i < (_miRow + bh4) >> subY; i++)
+            {
+                _leftLevelContext[plane][i] = 0;
+                _leftDcContext[plane][i] = 0;
+            }
+        }
     }
 
     /// <summary><c>intra_frame_mode_info()</c> (spec §5.11.7), restricted to the non-IntraBC path (IntraBC is rejected earlier, at frame-header parse time).</summary>
@@ -778,8 +913,37 @@ internal sealed class Av1TileDecoder
         ReadDeltaLf();
         _readDeltas = false;
 
-        // allow_intrabc is always false here (rejected during frame-header parsing), so use_intrabc is
-        // never read and is unconditionally 0 -- go straight to the intra-mode path.
+        _useIntrabc = _frame.AllowIntrabc && _s.ReadSymbol(_cdf.Intrabc) != 0;
+        if (_useIntrabc)
+        {
+            // This decoder's IntraBC support targets this project's own lossless-only encoder use case
+            // (project plan Phase C): a non-lossless IntraBC block would need the spec's separate
+            // is_inter/inter_tx_type transform-type/tx-set selection (TransformType/GetTxSet below only
+            // implement the intra_tx_type path) and the variable transform-partition tree (see
+            // ReadBlockTxSize) -- neither is implemented, so fail loudly rather than silently desyncing.
+            if (!_lossless)
+            {
+                throw new AvifUnsupportedFeatureException("AV1 IntraBC in a non-lossless segment is not supported.");
+            }
+
+            // spec §5.11.7's use_intrabc branch: forces is_inter=1, YMode/UVMode=DC_PRED, no palette/
+            // filter-intra/angle-delta/CFL -- then finds and reads this block's displacement vector.
+            _isInter = true;
+            _yMode = Av1IntraMode.DcPred;
+            _uvMode = Av1IntraMode.DcPred;
+            _paletteSizeY = 0;
+            _paletteSizeUV = 0;
+            _angleDeltaY = 0;
+            _angleDeltaUv = 0;
+            _cflAlphaU = 0;
+            _cflAlphaV = 0;
+            _useFilterIntra = false;
+            FindMvStack();
+            AssignMv();
+            return;
+        }
+
+        _isInter = false;
         _angleDeltaY = 0;
         _angleDeltaUv = 0;
         _cflAlphaU = 0;
@@ -806,10 +970,369 @@ internal sealed class Av1TileDecoder
             _uvMode = Av1IntraMode.DcPred;
         }
 
-        // PaletteSizeY/PaletteSizeUV are always 0 (palette mode is rejected during frame-header parsing
-        // via allow_screen_content_tools, since palette_mode_info() is only ever invoked when it's set).
+        _paletteSizeY = 0;
+        _paletteSizeUV = 0;
+        if (AllowPalette(_miSize))
+        {
+            PaletteModeInfo();
+        }
+
         FilterIntraModeInfo();
     }
+
+    /// <summary>
+    /// <c>find_mv_stack(0)</c> (spec §7.10.2), specialized to isCompound=0 (intrabc is always single
+    /// prediction). Several of the general process's steps are simplified or dropped for reasons specific
+    /// to this always-intra-frame decoder rather than to intrabc generally:
+    /// <list type="bullet">
+    /// <item>GlobalMvs[0] is never computed -- spec's setup_global_mv always returns (0,0) when
+    /// <c>ref == INTRA_FRAME</c> (spec §7.10.2.1), which is always true here (RefFrame[0] is always
+    /// INTRA_FRAME, whether or not use_intrabc), so it's used as a literal 0 wherever referenced.</item>
+    /// <item>The temporal scan process (step 17) never runs -- <c>use_ref_frame_mvs</c> is always 0 for a
+    /// still-picture decoder (there is never a previous frame's motion field to scan).</item>
+    /// <item>The extra search process (§7.10.2.12/13) degenerates to its own final fallback: candList's
+    /// add_extra_mv_candidate can only ever contribute when a neighbor's OWN stored reference is a genuine
+    /// non-intra reference (<c>RefFrames[..][candList] &gt; INTRA_FRAME</c>) -- impossible here, since every
+    /// already-decoded position's RefFrame[0] is exactly INTRA_FRAME (regardless of intrabc-ness). So this
+    /// just fills any stack slot below index 2 with (0,0) without incrementing NumMvFound, per the process's
+    /// own note.</item>
+    /// <item>DrlCtxStack/NewMvContext/RefMvContext (also produced by the context-and-clamping process,
+    /// §7.10.2.14) are never computed -- intrabc's assign_mv never reads a DRL-index or compound-mode
+    /// symbol that would need them (compMode is unconditionally NEWMV for intrabc).</item>
+    /// </list>
+    /// </summary>
+    private void FindMvStack()
+    {
+        int bw4 = Av1BlockTables.Num4x4BlocksWide[_miSize];
+        int bh4 = Av1BlockTables.Num4x4BlocksHigh[_miSize];
+
+        _numMvFound = 0;
+
+        ScanRow(-1, bw4);
+        ScanCol(-1, bh4);
+        if (Math.Max(bw4, bh4) <= 16)
+        {
+            ScanPoint(-1, bw4);
+        }
+
+        int numNearest = _numMvFound;
+        if (numNearest > 0)
+        {
+            for (int idx = 0; idx < numNearest; idx++)
+            {
+                _weightStack[idx] += RefCatLevel;
+            }
+        }
+
+        // use_ref_frame_mvs is always 0 here -- see this method's remarks -- so the temporal scan process
+        // (spec step 17) is skipped entirely.
+        ScanPoint(-1, -1);
+        ScanRow(-3, bw4);
+        ScanCol(-3, bh4);
+        if (bh4 > 1)
+        {
+            ScanRow(-5, bw4);
+        }
+
+        if (bw4 > 1)
+        {
+            ScanCol(-5, bh4);
+        }
+
+        SortStack(0, numNearest);
+        SortStack(numNearest, _numMvFound);
+
+        if (_numMvFound < 2)
+        {
+            // Extra search process, degenerated to its own final fallback -- see this method's remarks.
+            for (int idx = _numMvFound; idx < 2; idx++)
+            {
+                _refStackMv[idx, 0] = 0;
+                _refStackMv[idx, 1] = 0;
+            }
+        }
+
+        // Context and clamping process (spec §7.10.2.14): only the clamp is implemented -- see this
+        // method's remarks for why the context outputs it also produces are never needed here.
+        int bw = Av1BlockTables.BlockWidth(_miSize);
+        int bh = Av1BlockTables.BlockHeight(_miSize);
+        for (int idx = 0; idx < _numMvFound; idx++)
+        {
+            _refStackMv[idx, 0] = ClampMvRow(_refStackMv[idx, 0], MvBorder + (bh * 8));
+            _refStackMv[idx, 1] = ClampMvCol(_refStackMv[idx, 1], MvBorder + (bw * 8));
+        }
+    }
+
+    /// <summary><c>Scan row process</c> (spec §7.10.2.2), isCompound=0.</summary>
+    private void ScanRow(int deltaRow, int bw4)
+    {
+        int end4 = Math.Min(Math.Min(bw4, _miCols - _miCol), 16);
+        int deltaCol = 0;
+        bool useStep16 = bw4 >= 16;
+        if (Math.Abs(deltaRow) > 1)
+        {
+            deltaRow += _miRow & 1;
+            deltaCol = 1 - (_miCol & 1);
+        }
+
+        int i = 0;
+        while (i < end4)
+        {
+            int mvRow = _miRow + deltaRow;
+            int mvCol = _miCol + deltaCol + i;
+            if (!IsInside(mvRow, mvCol))
+            {
+                break;
+            }
+
+            int len = Math.Min(bw4, Av1BlockTables.Num4x4BlocksWide[_miSizes[(mvRow * _miCols) + mvCol]]);
+            if (Math.Abs(deltaRow) > 1)
+            {
+                len = Math.Max(2, len);
+            }
+
+            if (useStep16)
+            {
+                len = Math.Max(4, len);
+            }
+
+            AddRefMvCandidate(mvRow, mvCol, len * 2);
+            i += len;
+        }
+    }
+
+    /// <summary><c>Scan col process</c> (spec §7.10.2.3), isCompound=0.</summary>
+    private void ScanCol(int deltaCol, int bh4)
+    {
+        int end4 = Math.Min(Math.Min(bh4, _miRows - _miRow), 16);
+        int deltaRow = 0;
+        bool useStep16 = bh4 >= 16;
+        if (Math.Abs(deltaCol) > 1)
+        {
+            deltaRow = 1 - (_miRow & 1);
+            deltaCol += _miCol & 1;
+        }
+
+        int i = 0;
+        while (i < end4)
+        {
+            int mvRow = _miRow + deltaRow + i;
+            int mvCol = _miCol + deltaCol;
+            if (!IsInside(mvRow, mvCol))
+            {
+                break;
+            }
+
+            int len = Math.Min(bh4, Av1BlockTables.Num4x4BlocksHigh[_miSizes[(mvRow * _miCols) + mvCol]]);
+            if (Math.Abs(deltaCol) > 1)
+            {
+                len = Math.Max(2, len);
+            }
+
+            if (useStep16)
+            {
+                len = Math.Max(4, len);
+            }
+
+            AddRefMvCandidate(mvRow, mvCol, len * 2);
+            i += len;
+        }
+    }
+
+    /// <summary><c>Scan point process</c> (spec §7.10.2.4), isCompound=0. Unlike <see cref="ScanRow"/>/<see cref="ScanCol"/>, this needs the explicit "has been written" check (<see cref="_written"/>): its diagonal/top-right offset can land on a position the current superblock's own partition recursion hasn't reached yet, unlike scan_row/scan_col's directly-adjacent positions (always already decoded by raster/partition order).</summary>
+    private void ScanPoint(int deltaRow, int deltaCol)
+    {
+        int mvRow = _miRow + deltaRow;
+        int mvCol = _miCol + deltaCol;
+        if (IsInside(mvRow, mvCol) && _written[(mvRow * _miCols) + mvCol])
+        {
+            AddRefMvCandidate(mvRow, mvCol, 4);
+        }
+    }
+
+    /// <summary>
+    /// <c>Add reference motion vector process</c> (spec §7.10.2.7), isCompound=0. The spec's general
+    /// candList=0..1 loop collapses to a single check: <c>RefFrames[mvRow][mvCol][1]</c> is always NONE for
+    /// every block this decoder ever writes (both intrabc and plain intra always set RefFrame[1]=NONE), so
+    /// candList=1 (checking against RefFrame[0]==INTRA_FRAME) can never match -- and the
+    /// <c>IsInters[mvRow][mvCol]==0</c> early-return (spec's own gate) is exactly this decoder's
+    /// <see cref="_isInters"/> grid, which is only ever true for an intrabc neighbor in the first place.
+    /// </summary>
+    private void AddRefMvCandidate(int mvRow, int mvCol, int weight)
+    {
+        int idx = (mvRow * _miCols) + mvCol;
+        if (!_isInters[idx])
+        {
+            return;
+        }
+
+        SearchStack(mvRow, mvCol, weight);
+    }
+
+    /// <summary>
+    /// <c>Search stack process</c> (spec §7.10.2.8), isCompound=0. <c>candMode</c> (<c>YModes[mvRow][mvCol]</c>)
+    /// is always DC_PRED for an intrabc neighbor (use_intrabc forces YMode=DC_PRED), so the
+    /// GLOBALMV/GLOBAL_GLOBALMV special case (which would substitute GlobalMvs[0]) never applies, and
+    /// <c>has_newmv(DC_PRED)</c> is always false, so NewMvCount is never incremented (matching
+    /// <see cref="FindMvStack"/>'s remarks on why it isn't even tracked). The lower precision process
+    /// (§7.10.2.10) is a no-op here: <see cref="_mvRowsGrid"/>/<see cref="_mvColsGrid"/> are already stored
+    /// as multiples of 8 (force_integer_mv is unconditionally 1), so it's omitted rather than transcribed as
+    /// dead code.
+    /// </summary>
+    private void SearchStack(int mvRow, int mvCol, int weight)
+    {
+        int idx = (mvRow * _miCols) + mvCol;
+        int candMvRow = _mvRowsGrid[idx];
+        int candMvCol = _mvColsGrid[idx];
+
+        for (int i = 0; i < _numMvFound; i++)
+        {
+            if (_refStackMv[i, 0] == candMvRow && _refStackMv[i, 1] == candMvCol)
+            {
+                _weightStack[i] += weight;
+                return;
+            }
+        }
+
+        if (_numMvFound < MaxRefMvStackSize)
+        {
+            _refStackMv[_numMvFound, 0] = candMvRow;
+            _refStackMv[_numMvFound, 1] = candMvCol;
+            _weightStack[_numMvFound] = weight;
+            _numMvFound++;
+        }
+    }
+
+    /// <summary><c>Sorting process</c> (spec §7.10.2.11), isCompound=0 (so <c>swap_stack</c>'s <c>list</c> loop only ever covers list 0).</summary>
+    private void SortStack(int start, int end)
+    {
+        while (end > start)
+        {
+            int newEnd = start;
+            for (int idx = start + 1; idx < end; idx++)
+            {
+                if (_weightStack[idx - 1] < _weightStack[idx])
+                {
+                    (_weightStack[idx - 1], _weightStack[idx]) = (_weightStack[idx], _weightStack[idx - 1]);
+                    (_refStackMv[idx - 1, 0], _refStackMv[idx, 0]) = (_refStackMv[idx, 0], _refStackMv[idx - 1, 0]);
+                    (_refStackMv[idx - 1, 1], _refStackMv[idx, 1]) = (_refStackMv[idx, 1], _refStackMv[idx - 1, 1]);
+                    newEnd = idx;
+                }
+            }
+
+            end = newEnd;
+        }
+    }
+
+    /// <summary><c>clamp_mv_row(mvec, border)</c> (spec §5.11.53).</summary>
+    private int ClampMvRow(int mvec, int border)
+    {
+        int bh4 = Av1BlockTables.Num4x4BlocksHigh[_miSize];
+        int mbToTopEdge = -(_miRow * 4 * 8);
+        int mbToBottomEdge = (_miRows - bh4 - _miRow) * 4 * 8;
+        return Math.Clamp(mvec, mbToTopEdge - border, mbToBottomEdge + border);
+    }
+
+    /// <summary><c>clamp_mv_col(mvec, border)</c> (spec §5.11.54).</summary>
+    private int ClampMvCol(int mvec, int border)
+    {
+        int bw4 = Av1BlockTables.Num4x4BlocksWide[_miSize];
+        int mbToLeftEdge = -(_miCol * 4 * 8);
+        int mbToRightEdge = (_miCols - bw4 - _miCol) * 4 * 8;
+        return Math.Clamp(mvec, mbToLeftEdge - border, mbToRightEdge + border);
+    }
+
+    /// <summary>
+    /// <c>assign_mv(0)</c> (spec §5.11.26), specialized to <c>use_intrabc</c> (the only way this decoder ever
+    /// calls it): compMode is unconditionally NEWMV, so PredMv always comes from the RefStackMv-or-fallback
+    /// derivation below, and <c>read_mv(0)</c> always runs (there's no "reuse PredMv exactly" case, unlike
+    /// GLOBALMV/NEARESTMV/NEARMV for real inter prediction).
+    /// </summary>
+    private void AssignMv()
+    {
+        _predMvRow = _refStackMv[0, 0];
+        _predMvCol = _refStackMv[0, 1];
+        if (_predMvRow == 0 && _predMvCol == 0)
+        {
+            _predMvRow = _refStackMv[1, 0];
+            _predMvCol = _refStackMv[1, 1];
+        }
+
+        if (_predMvRow == 0 && _predMvCol == 0)
+        {
+            int sbSize = _seq.Use128x128Superblock ? Av1BlockSize.Block128x128 : Av1BlockSize.Block64x64;
+            int sbSize4 = Av1BlockTables.Num4x4BlocksHigh[sbSize];
+            if (_miRow - sbSize4 < _miRowStart)
+            {
+                _predMvRow = 0;
+                _predMvCol = -((sbSize4 * 4) + IntrabcDelayPixels) * 8;
+            }
+            else
+            {
+                _predMvRow = -(sbSize4 * 4 * 8);
+                _predMvCol = 0;
+            }
+        }
+
+        ReadMv();
+    }
+
+    /// <summary><c>read_mv(ref)</c> (spec §5.11.31), ref=0 always (intrabc is single-prediction). MvCtx is always MV_INTRABC_CONTEXT -- see the CDF fields' own remarks for why that context dimension isn't modeled here at all.</summary>
+    private void ReadMv()
+    {
+        int diffMvRow = 0;
+        int diffMvCol = 0;
+        int mvJoint = _s.ReadSymbol(_cdf.MvJoint);
+        if (mvJoint == MvJointHzvnz || mvJoint == MvJointHnzvnz)
+        {
+            diffMvRow = ReadMvComponent(0);
+        }
+
+        if (mvJoint == MvJointHnzvz || mvJoint == MvJointHnzvnz)
+        {
+            diffMvCol = ReadMvComponent(1);
+        }
+
+        _mvRow = _predMvRow + diffMvRow;
+        _mvCol = _predMvCol + diffMvCol;
+    }
+
+    /// <summary>
+    /// <c>read_mv_component(comp)</c> (spec §5.11.32). <c>force_integer_mv</c> is unconditionally 1 in this
+    /// decoder (see the CDF fields' remarks), so <c>mv_class0_fr</c>/<c>mv_class0_hp</c>/<c>mv_fr</c>/
+    /// <c>mv_hp</c> are never read -- their spec-mandated forced values (3, 1, 3, 1) are used directly.
+    /// </summary>
+    private int ReadMvComponent(int comp)
+    {
+        int sign = _s.ReadSymbol(_cdf.MvSign[comp]);
+        int mvClass = _s.ReadSymbol(_cdf.MvClass[comp]);
+        int mag;
+        if (mvClass == MvClass0)
+        {
+            int class0Bit = _s.ReadSymbol(_cdf.MvClass0Bit[comp]);
+            mag = ((class0Bit << 3) | (3 << 1) | 1) + 1;
+        }
+        else
+        {
+            int d = 0;
+            for (int i = 0; i < mvClass; i++)
+            {
+                int bit = _s.ReadSymbol(_cdf.MvBit[comp][i]);
+                d |= bit << i;
+            }
+
+            mag = (2 << (mvClass + 2)) + (((d << 3) | (3 << 1) | 1) + 1);
+        }
+
+        return sign != 0 ? -mag : mag;
+    }
+
+    /// <summary><c>allow_palette</c> (spec §5.11.46's own gating condition / libaom's av1_allow_palette): palette is only ever tried for a block at least 8x8 and no bigger than 64 in either dimension.</summary>
+    private bool AllowPalette(int bSize) =>
+        _frame.AllowScreenContentTools
+        && Av1BlockTables.BlockWidth(bSize) <= 64
+        && Av1BlockTables.BlockHeight(bSize) <= 64
+        && bSize >= Av1BlockSize.Block8x8;
 
     /// <summary><c>intra_segment_id()</c> (spec §5.11.8).</summary>
     private void IntraSegmentId()
@@ -1099,7 +1622,7 @@ internal sealed class Av1TileDecoder
         }
     }
 
-    /// <summary><c>filter_intra_mode_info()</c> (spec §5.11.24).</summary>
+    /// <summary><c>filter_intra_mode_info()</c> (spec §5.11.24), gated on <c>PaletteSizeY == 0</c> in addition to the spec's other <c>av1_filter_intra_allowed_bsize</c> conditions -- filter-intra and palette are mutually exclusive luma prediction methods.</summary>
     private void FilterIntraModeInfo()
     {
         _useFilterIntra = false;
@@ -1107,6 +1630,7 @@ internal sealed class Av1TileDecoder
 
         if (_seq.EnableFilterIntra
             && _yMode == Av1IntraMode.DcPred
+            && _paletteSizeY == 0
             && Math.Max(Av1BlockTables.BlockWidth(_miSize), Av1BlockTables.BlockHeight(_miSize)) <= 32)
         {
             _useFilterIntra = _s.ReadSymbol(_cdf.FilterIntra[_miSize]) != 0;
@@ -1115,6 +1639,478 @@ internal sealed class Av1TileDecoder
                 _filterIntraMode = _s.ReadSymbol(_cdf.FilterIntraMode);
             }
         }
+    }
+
+    // ----- Palette mode (spec §5.11.46 palette_mode_info(), §5.11.47 palette_tokens()) -----
+    //
+    // Transcribed against the AOMedia libaom reference decoder (av1/decoder/decodemv.c's
+    // read_palette_mode_info/read_palette_colors_y/read_palette_colors_uv, av1/decoder/detokenize.c's
+    // av1_decode_palette_tokens/decode_color_map_tokens, av1/common/entropymode.c's
+    // av1_get_palette_color_index_context, av1/common/pred_common.c's av1_get_palette_cache) rather than
+    // the AV1 specification's own prose, for the same reason as this file's other spec citations note when
+    // no independent AV1 decoder is available locally to differentially test against: libaom *is* the
+    // implementation the specification's own palette section was written from, so it's an equally
+    // authoritative (and, for exact bit-width/ordering details, easier to verify precisely) source. Cross-
+    // checked end to end against an independent decoder (ffmpeg's libdav1d) once implemented -- see the
+    // project plan's Phase B verification notes.
+
+    /// <summary>
+    /// <c>get_palette_bsize_ctx</c>: <c>FloorLog2(pixel count) - FloorLog2(64)</c>, i.e. how many doublings
+    /// of area a block is above the 8x8 (64-pixel) floor -- 0 for 8x8 up to 6 for 64x64, indexing the
+    /// 7-row <see cref="Av1CdfContext.PaletteYSize"/>/<see cref="Av1CdfContext.PaletteUvSize"/>/
+    /// <see cref="Av1CdfContext.PaletteYMode"/> tables' outer dimension.
+    /// </summary>
+    private static int GetPaletteBsizeCtx(int bSize)
+    {
+        int numPels = Av1BlockTables.BlockWidth(bSize) * Av1BlockTables.BlockHeight(bSize);
+        return Av1CdfAdaptation.FloorLog2((uint)numPels) - 6;
+    }
+
+    /// <summary><c>av1_get_palette_mode_ctx</c>: count of {above, left} neighbors (plain AvailU/AvailL, no superblock-row exclusion -- that only applies to <see cref="GetPaletteCache"/>) that themselves used a luma palette.</summary>
+    private int GetPaletteModeCtx()
+    {
+        int ctx = 0;
+        if (_availU && _paletteSizesY[((_miRow - 1) * _miCols) + _miCol] > 0)
+        {
+            ctx++;
+        }
+
+        if (_availL && _paletteSizesY[(_miRow * _miCols) + _miCol - 1] > 0)
+        {
+            ctx++;
+        }
+
+        return ctx;
+    }
+
+    /// <summary><c>palette_mode_info()</c> (spec §5.11.46). Only reachable when <see cref="AllowPalette"/> already held for this block's size.</summary>
+    private void PaletteModeInfo()
+    {
+        int bsizeCtx = GetPaletteBsizeCtx(_miSize);
+
+        if (_yMode == Av1IntraMode.DcPred)
+        {
+            int paletteModeCtx = GetPaletteModeCtx();
+            bool hasPaletteY = _s.ReadSymbol(_cdf.PaletteYMode[bsizeCtx][paletteModeCtx]) != 0;
+            if (hasPaletteY)
+            {
+                _paletteSizeY = _s.ReadSymbol(_cdf.PaletteYSize[bsizeCtx]) + 2;
+                ReadPaletteColorsY();
+            }
+        }
+
+        if (_hasChroma && _uvMode == Av1IntraMode.DcPred)
+        {
+            int paletteUvModeCtx = _paletteSizeY > 0 ? 1 : 0;
+            bool hasPaletteUv = _s.ReadSymbol(_cdf.PaletteUvMode[paletteUvModeCtx]) != 0;
+            if (hasPaletteUv)
+            {
+                _paletteSizeUV = _s.ReadSymbol(_cdf.PaletteUvSize[bsizeCtx]) + 2;
+                ReadPaletteColorsUv();
+            }
+        }
+    }
+
+    /// <summary>
+    /// <c>get_palette_cache</c>: the sorted, de-duplicated union of the above and left neighbor blocks' own
+    /// palette colors for <paramref name="plane"/> (0 = Y, 1 = U -- V is never cached, see
+    /// <see cref="ReadPaletteColorsUv"/>), written ascending into <paramref name="cache"/> (caller-sized to
+    /// at least 16 = 2 * the max palette size). The above neighbor is deliberately excluded whenever this
+    /// block sits at the very first mi row of a new 64-pixel superblock row (<c>MIN_SB_SIZE_LOG2 == 6</c> in
+    /// the reference decoder, i.e. every 16 mi rows here) -- a normative bitstream detail, not an
+    /// availability check (AvailU can still be true there, e.g. mid-tile): the encoder that produced any
+    /// conformant bitstream also excluded it, so a decoder that included it anyway would compute a
+    /// different cache size and desync the very next bit it reads.
+    /// </summary>
+    private int GetPaletteCache(int plane, int[] cache)
+    {
+        bool aboveExcluded = _miRow % 16 == 0;
+        bool useAbove = _availU && !aboveExcluded;
+        bool useLeft = _availL;
+
+        int[] sizes = plane == 0 ? _paletteSizesY : _paletteSizesUV;
+        int[] grid = plane == 0 ? _paletteColorsYGrid : _paletteColorsUGrid;
+
+        int aboveN = 0, leftN = 0, aboveBase = 0, leftBase = 0;
+        if (useAbove)
+        {
+            int idx = ((_miRow - 1) * _miCols) + _miCol;
+            aboveN = sizes[idx];
+            aboveBase = idx * 8;
+        }
+
+        if (useLeft)
+        {
+            int idx = (_miRow * _miCols) + _miCol - 1;
+            leftN = sizes[idx];
+            leftBase = idx * 8;
+        }
+
+        if (aboveN == 0 && leftN == 0)
+        {
+            return 0;
+        }
+
+        int n = 0;
+        int aboveIdx = 0, leftIdx = 0;
+        while (aboveIdx < aboveN && leftIdx < leftN)
+        {
+            int vAbove = grid[aboveBase + aboveIdx];
+            int vLeft = grid[leftBase + leftIdx];
+            if (vLeft < vAbove)
+            {
+                AddToPaletteCache(cache, ref n, vLeft);
+                leftIdx++;
+            }
+            else
+            {
+                AddToPaletteCache(cache, ref n, vAbove);
+                aboveIdx++;
+                if (vLeft == vAbove)
+                {
+                    leftIdx++;
+                }
+            }
+        }
+
+        while (aboveIdx < aboveN)
+        {
+            AddToPaletteCache(cache, ref n, grid[aboveBase + aboveIdx++]);
+        }
+
+        while (leftIdx < leftN)
+        {
+            AddToPaletteCache(cache, ref n, grid[leftBase + leftIdx++]);
+        }
+
+        return n;
+    }
+
+    private static void AddToPaletteCache(int[] cache, ref int n, int value)
+    {
+        if (n > 0 && value == cache[n - 1])
+        {
+            return;
+        }
+
+        cache[n++] = value;
+    }
+
+    /// <summary><c>aom_ceil_log2</c>: <c>n &lt; 2 ? 0 : FloorLog2(n - 1) + 1</c>.</summary>
+    internal static int CeilLog2(int n) => n < 2 ? 0 : Av1CdfAdaptation.FloorLog2((uint)(n - 1)) + 1;
+
+    /// <summary>
+    /// Merges the ascending <paramref name="cachedColors"/> (length <paramref name="nCachedColors"/>) with
+    /// the ascending, explicitly-transmitted colors already sitting at
+    /// <c>colors[nCachedColors..nColors)</c> into one ascending run written back into
+    /// <c>colors[0..nColors)</c>, in place. Safe in place because the write index never overtakes either
+    /// read index (mirrors libaom's own <c>merge_colors</c> exactly, including this same in-place
+    /// technique).
+    /// </summary>
+    private static void MergeColors(int[] colors, int[] cachedColors, int nColors, int nCachedColors)
+    {
+        if (nCachedColors == 0)
+        {
+            return;
+        }
+
+        int cacheIdx = 0;
+        int transIdx = nCachedColors;
+        for (int i = 0; i < nColors; i++)
+        {
+            if (cacheIdx < nCachedColors && (transIdx >= nColors || cachedColors[cacheIdx] <= colors[transIdx]))
+            {
+                colors[i] = cachedColors[cacheIdx++];
+            }
+            else
+            {
+                colors[i] = colors[transIdx++];
+            }
+        }
+    }
+
+    /// <summary><c>read_palette_colors_y</c>: reads <see cref="_paletteSizeY"/> ascending Y colors -- some pulled from the neighbor color cache (one bypass bit per cache candidate), the rest explicitly transmitted (first as a raw <c>BitDepth</c>-bit literal, the rest as ascending deltas with a shrinking bit width) -- then merges both groups into <see cref="_paletteColorsY"/> in ascending order.</summary>
+    private void ReadPaletteColorsY()
+    {
+        int n = _paletteSizeY;
+        int bitDepth = _seq.BitDepth;
+        var cache = new int[16];
+        int nCache = GetPaletteCache(0, cache);
+        var cachedColors = new int[8];
+
+        int idx = 0;
+        for (int i = 0; i < nCache && idx < n; i++)
+        {
+            if (_s.ReadLiteral(1) != 0)
+            {
+                cachedColors[idx++] = cache[i];
+            }
+        }
+
+        if (idx < n)
+        {
+            int nCachedColors = idx;
+            _paletteColorsY[idx] = (int)_s.ReadLiteral(bitDepth);
+            idx++;
+
+            if (idx < n)
+            {
+                int minBits = bitDepth - 3;
+                int bits = minBits + (int)_s.ReadLiteral(2);
+                int range = (1 << bitDepth) - _paletteColorsY[idx - 1] - 1;
+                for (; idx < n; idx++)
+                {
+                    int delta = (int)_s.ReadLiteral(bits) + 1;
+                    _paletteColorsY[idx] = Math.Clamp(_paletteColorsY[idx - 1] + delta, 0, (1 << bitDepth) - 1);
+                    range -= _paletteColorsY[idx] - _paletteColorsY[idx - 1];
+                    bits = Math.Min(bits, CeilLog2(range));
+                }
+            }
+
+            MergeColors(_paletteColorsY, cachedColors, n, nCachedColors);
+        }
+        else
+        {
+            Array.Copy(cachedColors, _paletteColorsY, n);
+        }
+    }
+
+    /// <summary><c>read_palette_colors_uv</c>: U colors follow the exact same cache-then-transmit-then-merge shape as <see cref="ReadPaletteColorsY"/> (against the U-specific cache); V is never cached, always either a flat per-color literal or, when the leading bypass bit is set, an ascending run of signed deltas (its own, narrower minimum bit width) relative to <see cref="_paletteColorsU"/>'s already-decoded values -- <em>not</em> its own previous V value, matching libaom's own (slightly surprising) choice of delta base.</summary>
+    private void ReadPaletteColorsUv()
+    {
+        int n = _paletteSizeUV;
+        int bitDepth = _seq.BitDepth;
+        var cache = new int[16];
+        int nCache = GetPaletteCache(1, cache);
+        var cachedColors = new int[8];
+
+        int idx = 0;
+        for (int i = 0; i < nCache && idx < n; i++)
+        {
+            if (_s.ReadLiteral(1) != 0)
+            {
+                cachedColors[idx++] = cache[i];
+            }
+        }
+
+        if (idx < n)
+        {
+            int nCachedColors = idx;
+            _paletteColorsU[idx] = (int)_s.ReadLiteral(bitDepth);
+            idx++;
+
+            if (idx < n)
+            {
+                int minBits = bitDepth - 3;
+                int bits = minBits + (int)_s.ReadLiteral(2);
+                int range = (1 << bitDepth) - _paletteColorsU[idx - 1];
+                for (; idx < n; idx++)
+                {
+                    int delta = (int)_s.ReadLiteral(bits);
+                    _paletteColorsU[idx] = Math.Clamp(_paletteColorsU[idx - 1] + delta, 0, (1 << bitDepth) - 1);
+                    range -= _paletteColorsU[idx] - _paletteColorsU[idx - 1];
+                    bits = Math.Min(bits, CeilLog2(range));
+                }
+            }
+
+            MergeColors(_paletteColorsU, cachedColors, n, nCachedColors);
+        }
+        else
+        {
+            Array.Copy(cachedColors, _paletteColorsU, n);
+        }
+
+        bool vDeltaEncoded = _s.ReadLiteral(1) != 0;
+        if (vDeltaEncoded)
+        {
+            int minBitsV = bitDepth - 4;
+            int maxVal = 1 << bitDepth;
+            int bits = minBitsV + (int)_s.ReadLiteral(2);
+            _paletteColorsV[0] = (int)_s.ReadLiteral(bitDepth);
+            for (int i = 1; i < n; i++)
+            {
+                int delta = (int)_s.ReadLiteral(bits);
+                if (delta != 0 && _s.ReadLiteral(1) != 0)
+                {
+                    delta = -delta;
+                }
+
+                int val = _paletteColorsV[i - 1] + delta;
+                if (val < 0)
+                {
+                    val += maxVal;
+                }
+
+                if (val >= maxVal)
+                {
+                    val -= maxVal;
+                }
+
+                _paletteColorsV[i] = val;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < n; i++)
+            {
+                _paletteColorsV[i] = (int)_s.ReadLiteral(bitDepth);
+            }
+        }
+    }
+
+    /// <summary>
+    /// <c>palette_tokens()</c> (spec §5.11.47): decodes this block's full color-index map(s) into
+    /// <see cref="_colorMapY"/>/<see cref="_colorMapUv"/> -- once per palette-using plane group, immediately
+    /// after mode info (see the call site in <c>DecodeBlock</c>) and well before that plane's own
+    /// transform-block loop even starts, unlike ordinary coefficient data. This has to be its own step
+    /// rather than folding into <see cref="Residual"/>'s existing per-transform-block loop because the
+    /// index map spans the <em>whole coding block</em> (decoded via one wavefront pass over all of it) while
+    /// <see cref="TransformBlock"/> only ever sees one transform-sized piece of a block at a time -- and
+    /// prediction for the very first transform block already needs the map's top-left corner, so it must be
+    /// fully ready before <see cref="Residual"/> runs at all, not produced incrementally alongside it. Once
+    /// decoded here, a plane's map is pure prediction data: <see cref="TransformBlock"/>'s existing
+    /// coefficient-decode-and-add-residual path runs completely unchanged afterward (see its own remarks) --
+    /// this only ever changes how each transform block's prediction step is produced, not the ordinary
+    /// residual coding that still follows it exactly as for any other intra mode.
+    /// </summary>
+    private void PaletteTokens()
+    {
+        if (_paletteSizeY > 0)
+        {
+            int width = Av1BlockTables.BlockWidth(_miSize);
+            int height = Av1BlockTables.BlockHeight(_miSize);
+            int onscreenWidth = Math.Min(width, (_miCols - _miCol) * 4);
+            int onscreenHeight = Math.Min(height, (_miRows - _miRow) * 4);
+            DecodeColorMapTokens(_colorMapY, width, height, onscreenWidth, onscreenHeight, _paletteSizeY, _cdf.PaletteYColorIndex);
+        }
+
+        if (_paletteSizeUV > 0)
+        {
+            int subX = _seq.SubsamplingX ? 1 : 0;
+            int subY = _seq.SubsamplingY ? 1 : 0;
+            int chromaBSize = Av1BlockTables.GetPlaneResidualSize(_miSize, 1, _seq.SubsamplingX, _seq.SubsamplingY);
+            int width = Av1BlockTables.BlockWidth(chromaBSize);
+            int height = Av1BlockTables.BlockHeight(chromaBSize);
+            int onscreenWidth = Math.Max(1, Math.Min(width, ((_miCols - _miCol) * 4) >> subX));
+            int onscreenHeight = Math.Max(1, Math.Min(height, ((_miRows - _miRow) * 4) >> subY));
+            DecodeColorMapTokens(_colorMapUv, width, height, onscreenWidth, onscreenHeight, _paletteSizeUV, _cdf.PaletteUvColorIndex);
+        }
+    }
+
+    /// <summary>
+    /// <c>decode_color_map_tokens</c>: the first index is read as an <see cref="ReadNs"/>-uniform symbol
+    /// (no CDF -- there's no neighbor context for a position with neither a left nor an above sample yet);
+    /// every later on-screen position is visited in anti-diagonal ("wavefront") order -- not raster order --
+    /// so that <see cref="GetPaletteColorIndexContext"/>'s left/above-left/above neighbors are always
+    /// already-decoded, matching libaom's own <c>decode_color_map_tokens</c> loop exactly (this ordering is
+    /// itself part of the normative bitstream contract, not an implementation choice -- a raster-order
+    /// decode would desync context on the very first row past position 0). Off-screen columns/rows (when
+    /// the block overhangs the frame edge) are never coded at all; they're filled by replicating the
+    /// nearest on-screen edge afterward, matching <see cref="Av1IntraPrediction"/>'s own edge-replication
+    /// philosophy elsewhere in this decoder.
+    /// </summary>
+    private void DecodeColorMapTokens(int[] colorMap, int width, int height, int onscreenWidth, int onscreenHeight, int n, ushort[][][] mapCdf)
+    {
+        var colorOrder = new int[8];
+
+        colorMap[0] = ReadNs(n);
+
+        for (int i = 1; i < onscreenHeight + onscreenWidth - 1; i++)
+        {
+            for (int j = Math.Min(i, onscreenWidth - 1); j >= Math.Max(0, i - onscreenHeight + 1); j--)
+            {
+                int row = i - j;
+                int col = j;
+                int colorCtx = GetPaletteColorIndexContext(colorMap, width, row, col, n, colorOrder);
+                int colorIdx = _s.ReadSymbol(mapCdf[n - 2][colorCtx]);
+                colorMap[(row * width) + col] = colorOrder[colorIdx];
+            }
+        }
+
+        if (onscreenWidth < width)
+        {
+            for (int i = 0; i < onscreenHeight; i++)
+            {
+                int fill = colorMap[(i * width) + onscreenWidth - 1];
+                for (int j = onscreenWidth; j < width; j++)
+                {
+                    colorMap[(i * width) + j] = fill;
+                }
+            }
+        }
+
+        for (int i = onscreenHeight; i < height; i++)
+        {
+            Array.Copy(colorMap, (onscreenHeight - 1) * width, colorMap, i * width, width);
+        }
+    }
+
+    /// <summary>
+    /// <c>get_palette_color_context</c> / <c>av1_get_palette_color_index_context</c> (spec §5.11.47's
+    /// context derivation): scores the left (weight 2), above-left (weight 1), and above (weight 2)
+    /// neighbor indices, selection-sorts the top 3 scores (there are only ever 3 neighbors to rank) into
+    /// <paramref name="colorOrder"/> (the permutation the decoded symbol must be mapped through -- the CDF
+    /// is trained against "rank among neighbors", not the raw palette index), and hashes the top 3 sorted
+    /// scores (weights 1, 2, 2) through a fixed 9-entry lookup table into one of 5 contexts.
+    /// </summary>
+    internal static int GetPaletteColorIndexContext(int[] colorMap, int stride, int r, int c, int n, int[] colorOrder)
+    {
+        int left = c - 1 >= 0 ? colorMap[(r * stride) + c - 1] : -1;
+        int aboveLeft = c - 1 >= 0 && r - 1 >= 0 ? colorMap[((r - 1) * stride) + c - 1] : -1;
+        int above = r - 1 >= 0 ? colorMap[((r - 1) * stride) + c] : -1;
+
+        Span<int> scores = stackalloc int[8];
+        scores.Clear();
+        if (left >= 0)
+        {
+            scores[left] += 2;
+        }
+
+        if (aboveLeft >= 0)
+        {
+            scores[aboveLeft] += 1;
+        }
+
+        if (above >= 0)
+        {
+            scores[above] += 2;
+        }
+
+        for (int i = 0; i < 8; i++)
+        {
+            colorOrder[i] = i;
+        }
+
+        for (int i = 0; i < 3; i++)
+        {
+            int max = scores[i];
+            int maxIdx = i;
+            for (int j = i + 1; j < n; j++)
+            {
+                if (scores[j] > max)
+                {
+                    max = scores[j];
+                    maxIdx = j;
+                }
+            }
+
+            if (maxIdx != i)
+            {
+                int maxScore = scores[maxIdx];
+                int maxColorOrder = colorOrder[maxIdx];
+                for (int k = maxIdx; k > i; k--)
+                {
+                    scores[k] = scores[k - 1];
+                    colorOrder[k] = colorOrder[k - 1];
+                }
+
+                scores[i] = maxScore;
+                colorOrder[i] = maxColorOrder;
+            }
+        }
+
+        int hash = scores[0] + (scores[1] * 2) + (scores[2] * 2);
+        return ColorContextHashLookup[hash];
     }
 
     /// <summary><c>read_tx_size(allowSelect)</c> (spec §5.11.15).</summary>
@@ -1146,7 +2142,7 @@ internal sealed class Av1TileDecoder
         int maxTxHeight = Av1TxDimensions.Height[maxRectTxSize];
 
         int aboveW;
-        if (_availU && IsAboveInter)
+        if (_availU && _isInters[((_miRow - 1) * _miCols) + _miCol])
         {
             aboveW = Av1BlockTables.BlockWidth(_miSizes[((_miRow - 1) * _miCols) + _miCol]);
         }
@@ -1160,7 +2156,7 @@ internal sealed class Av1TileDecoder
         }
 
         int leftH;
-        if (_availL && IsLeftInter)
+        if (_availL && _isInters[(_miRow * _miCols) + _miCol - 1])
         {
             leftH = Av1BlockTables.BlockHeight(_miSizes[(_miRow * _miCols) + _miCol - 1]);
         }
@@ -1187,40 +2183,53 @@ internal sealed class Av1TileDecoder
         return _s.ReadSymbol(cdf);
     }
 
-    // This decoder is intra-only, so every already-decoded neighbor is intra (IsInters is never true);
-    // kept as named constants matching the spec's own IsInters[] checks for readability/traceability
-    // rather than inlining `false` at each call site.
-    private const bool IsAboveInter = false;
-
-    private const bool IsLeftInter = false;
-
     /// <summary>
     /// <c>get_above_tx_width(row, col)</c> (spec §8.3.2, defined alongside <c>txfm_split</c>), specialized
     /// to its only call site here (<c>tx_depth</c>'s context derivation, always called as
     /// <c>get_above_tx_width(MiRow, MiCol)</c> with <c>AvailU</c> already confirmed true by the caller) --
     /// the general form's <c>row == MiRow</c> and <c>!AvailU</c> branches are therefore always/never taken
-    /// respectively and are omitted. <c>Skips[...] &amp;&amp; IsInters[...]</c> is always false (this
-    /// decoder is intra-only), so this always falls through to the general
-    /// <c>Tx_Width[InterTxSizes[row-1][col]]</c> case -- <see cref="_interTxSizes"/> is populated for
-    /// every block (including intra ones) by <see cref="ReadBlockTxSize"/>, matching
-    /// <c>read_block_tx_size()</c>'s own unconditional <c>InterTxSizes[row][col] = TxSize</c> write in its
-    /// non-inter-var-tx branch.
+    /// respectively and are omitted. <c>Skips[row-1][col] &amp;&amp; IsInters[row-1][col]</c> can now be
+    /// true (an IntraBC neighbor can be both skip and is_inter), so both branches are implemented --
+    /// <see cref="_interTxSizes"/> is populated for every block (including intra and IntraBC ones) by
+    /// <see cref="ReadBlockTxSize"/>, matching <c>read_block_tx_size()</c>'s own unconditional
+    /// <c>InterTxSizes[row][col] = TxSize</c> write in its non-var-tx branch (the only branch this decoder
+    /// implements -- see <see cref="ReadBlockTxSize"/>'s remarks).
     /// </summary>
-    private int GetAboveTxWidth() => Av1TxDimensions.Width[_interTxSizes[((_miRow - 1) * _miCols) + _miCol]];
+    private int GetAboveTxWidth()
+    {
+        int idx = ((_miRow - 1) * _miCols) + _miCol;
+        if (_skips[idx] && _isInters[idx])
+        {
+            return Av1BlockTables.BlockWidth(_miSizes[idx]);
+        }
+
+        return Av1TxDimensions.Width[_interTxSizes[idx]];
+    }
 
     /// <summary>Mirror of <see cref="GetAboveTxWidth"/> for the left neighbor.</summary>
-    private int GetLeftTxHeight() => Av1TxDimensions.Height[_interTxSizes[(_miRow * _miCols) + _miCol - 1]];
+    private int GetLeftTxHeight()
+    {
+        int idx = (_miRow * _miCols) + _miCol - 1;
+        if (_skips[idx] && _isInters[idx])
+        {
+            return Av1BlockTables.BlockHeight(_miSizes[idx]);
+        }
+
+        return Av1TxDimensions.Height[_interTxSizes[idx]];
+    }
 
     /// <summary>
-    /// <c>read_block_tx_size()</c> (spec §5.11.16), restricted to the intra path -- the <c>is_inter</c>
-    /// branch (which recurses via <c>read_var_tx_size</c>) is never taken here, so this always reduces to
-    /// <c>read_tx_size(!skip || !is_inter)</c> (with <c>is_inter</c> always false, i.e. always
-    /// <c>allowSelect = true</c>) followed by writing <see cref="_txSize"/> into every 4x4 position the
-    /// block covers, exactly as the spec's non-inter-var-tx branch does.
+    /// <c>read_block_tx_size()</c> (spec §5.11.16). The spec's <c>is_inter</c> branch (which recurses via
+    /// <c>read_var_tx_size</c> over a variable transform-partition tree) only ever applies to a non-lossless
+    /// block, and <c>is_inter</c> is only ever true here for an IntraBC block -- which <see cref="IntraFrameModeInfo"/>
+    /// already rejects outright whenever it isn't lossless. So <c>is_inter &amp;&amp; !Lossless</c> can never
+    /// both hold by the time this runs, and this always reduces to the spec's non-var-tx branch:
+    /// <c>read_tx_size(!skip || !is_inter)</c>, which itself immediately forces TX_4X4 for any lossless
+    /// block (including every IntraBC one) regardless of <c>allowSelect</c>.
     /// </summary>
     private void ReadBlockTxSize(int bw4, int bh4)
     {
-        ReadTxSize(allowSelect: true);
+        ReadTxSize(allowSelect: !_isInter || !_skip);
 
         for (int row = _miRow; row < _miRow + bh4 && row < _miRows; row++)
         {
@@ -1395,7 +2404,18 @@ internal sealed class Av1TileDecoder
         return uvTx;
     }
 
-    /// <summary><c>transform_block()</c> (spec §5.11.35), restricted to the intra (<c>!is_inter</c>) path and to non-palette blocks (palette is rejected during frame-header parsing).</summary>
+    /// <summary>
+    /// <c>transform_block()</c> (spec §5.11.35). <c>is_inter</c> is only ever true for an IntraBC block here
+    /// (see <see cref="IntraFrameModeInfo"/>'s remarks) -- neither real inter prediction nor OBMC/warp/
+    /// compound machinery is implemented, only IntraBC's own block-copy prediction (<see cref="Av1InterPrediction"/>).
+    /// Palette blocks (spec §5.11.46/§5.11.47) are not a special case of coefficient decode or reconstruction
+    /// here -- only of <em>prediction</em>: <see cref="PaletteTokens"/> already decoded this coding block's
+    /// full color-index map(s) before this method is ever called for it, so this just does a per-pixel
+    /// palette lookup instead of the usual edge-build-then-predict steps, then falls straight through into
+    /// the same unmodified skip/coefficient/reconstruct path every other mode uses -- a palette-predicted
+    /// block can still carry ordinary residual coefficients on top, exactly like DC/directional/smooth
+    /// prediction (and IntraBC) can.
+    /// </summary>
     private void TransformBlock(int plane, int baseX, int baseY, int txSz, int x, int y)
     {
         int startX = baseX + (4 * x);
@@ -1426,30 +2446,78 @@ internal sealed class Av1TileDecoder
         int w = 1 << log2W;
         int h = 1 << log2H;
 
-        bool haveLeft = (plane == 0 ? _availL : _availLChroma) || x > 0;
-        bool haveAbove = (plane == 0 ? _availU : _availUChroma) || y > 0;
-        bool haveAboveRight = GetBlockDecoded(plane, (subBlockMiRow >> subY) - 1, (subBlockMiCol >> subX) + stepX);
-        bool haveBelowLeft = GetBlockDecoded(plane, (subBlockMiRow >> subY) + stepY, (subBlockMiCol >> subX) - 1);
-
-        Av1IntraPrediction.BuildEdges(
-            _aboveRow, _leftCol,
-            _planes[plane], _planeWidths[plane], startX, startY, w, h,
-            haveLeft, haveAbove, haveAboveRight, haveBelowLeft, maxX - 1, maxY - 1, _seq.BitDepth);
-
-        bool filterTypeSmooth = GetFilterType(plane);
-        int angleDelta = plane == 0 ? _angleDeltaY : _angleDeltaUv;
-
-        Av1IntraPrediction.Predict(
-            _reconPred, w, h, log2W, log2H, _aboveRow, _leftCol, mode, haveLeft, haveAbove,
-            plane == 0 && _useFilterIntra, _filterIntraMode, angleDelta, _seq.EnableIntraEdgeFilter,
-            filterTypeSmooth, maxX - 1, maxY - 1, startX, startY, _seq.BitDepth);
-
+        bool usesPalette = plane == 0 ? _paletteSizeY > 0 : _paletteSizeUV > 0;
         int stride = _planeWidths[plane];
-        for (int i = 0; i < h; i++)
+
+        if (_isInter)
         {
-            for (int j = 0; j < w; j++)
+            // IntraBC block-copy prediction (spec §7.11.3, refIdx=-1): see Av1InterPrediction's remarks for
+            // why this needs real (if simplified) subpel filtering rather than a plain strided copy -- a
+            // luma DV is always integer-pixel (force_integer_mv=1), but the equivalent chroma DV can land on
+            // a half-pixel position once subsampling divides an odd luma-pixel displacement.
+            int lastX = ((_frame.UpscaledWidth + subX) >> subX) - 1;
+            int lastY = ((_frame.FrameHeight + subY) >> subY) - 1;
+            Av1InterPrediction.PredictIntrabc(
+                _reconPred, _planes[plane], stride, startX, startY, w, h,
+                _mvRow, _mvCol, subX, subY, lastX, lastY, _seq.BitDepth);
+
+            for (int i = 0; i < h; i++)
             {
-                _planes[plane][((startY + i) * stride) + startX + j] = _reconPred[(i * w) + j];
+                for (int j = 0; j < w; j++)
+                {
+                    _planes[plane][((startY + i) * stride) + startX + j] = _reconPred[(i * w) + j];
+                }
+            }
+        }
+        else if (usesPalette)
+        {
+            int[] palette = plane switch { 0 => _paletteColorsY, 1 => _paletteColorsU, _ => _paletteColorsV };
+            int[] colorMap = plane == 0 ? _colorMapY : _colorMapUv;
+            int mapWidth = GetPaletteMapWidth(plane);
+
+            // (startX - baseX, startY - baseY): baseX/baseY are already this same plane's coding-block base
+            // position (see Residual()'s baseXBlock/baseYBlock, passed straight through as this method's
+            // own baseX/baseY parameters), so this is the transform block's offset within the color map
+            // PaletteTokens() decoded for the *whole* coding block, not just this one transform-sized piece.
+            int localBaseX = startX - baseX;
+            int localBaseY = startY - baseY;
+
+            for (int i = 0; i < h; i++)
+            {
+                int mapRowBase = (localBaseY + i) * mapWidth;
+                for (int j = 0; j < w; j++)
+                {
+                    int colorIndex = colorMap[mapRowBase + localBaseX + j];
+                    _planes[plane][((startY + i) * stride) + startX + j] = palette[colorIndex];
+                }
+            }
+        }
+        else
+        {
+            bool haveLeft = (plane == 0 ? _availL : _availLChroma) || x > 0;
+            bool haveAbove = (plane == 0 ? _availU : _availUChroma) || y > 0;
+            bool haveAboveRight = GetBlockDecoded(plane, (subBlockMiRow >> subY) - 1, (subBlockMiCol >> subX) + stepX);
+            bool haveBelowLeft = GetBlockDecoded(plane, (subBlockMiRow >> subY) + stepY, (subBlockMiCol >> subX) - 1);
+
+            Av1IntraPrediction.BuildEdges(
+                _aboveRow, _leftCol,
+                _planes[plane], _planeWidths[plane], startX, startY, w, h,
+                haveLeft, haveAbove, haveAboveRight, haveBelowLeft, maxX - 1, maxY - 1, _seq.BitDepth);
+
+            bool filterTypeSmooth = GetFilterType(plane);
+            int angleDelta = plane == 0 ? _angleDeltaY : _angleDeltaUv;
+
+            Av1IntraPrediction.Predict(
+                _reconPred, w, h, log2W, log2H, _aboveRow, _leftCol, mode, haveLeft, haveAbove,
+                plane == 0 && _useFilterIntra, _filterIntraMode, angleDelta, _seq.EnableIntraEdgeFilter,
+                filterTypeSmooth, maxX - 1, maxY - 1, startX, startY, _seq.BitDepth);
+
+            for (int i = 0; i < h; i++)
+            {
+                for (int j = 0; j < w; j++)
+                {
+                    _planes[plane][((startY + i) * stride) + startX + j] = _reconPred[(i * w) + j];
+                }
             }
         }
 
@@ -1485,6 +2553,18 @@ internal sealed class Av1TileDecoder
                 _loopfilterTxSizes[plane][(((row >> subY) + i) * lfStride) + (col >> subX) + j] = txSz;
             }
         }
+    }
+
+    /// <summary>The stride <see cref="PaletteTokens"/> used for <paramref name="plane"/>'s color-index map -- that plane's own full (possibly off-screen-extended) coding-block width, recomputed here rather than cached since it's a cheap, pure function of already-available block state.</summary>
+    private int GetPaletteMapWidth(int plane)
+    {
+        if (plane == 0)
+        {
+            return Av1BlockTables.BlockWidth(_miSize);
+        }
+
+        int chromaBSize = Av1BlockTables.GetPlaneResidualSize(_miSize, 1, _seq.SubsamplingX, _seq.SubsamplingY);
+        return Av1BlockTables.BlockWidth(chromaBSize);
     }
 
     /// <summary><c>get_filter_type(plane)</c> (spec §7.11.2.8).</summary>
@@ -2115,7 +3195,15 @@ internal sealed class Av1TileDecoder
 
     private static bool IsTxTypeInSetIntra(int txSet, int txType) => Av1TxTypeTables.TxTypeInSetIntra[txSet][txType];
 
-    /// <summary><c>transform_type(x4, y4, txSz)</c> (spec §5.11.47), restricted to the intra path. Returns the selected <see cref="Av1TxType"/> directly rather than writing the spec's frame-sized <c>TxTypes[][]</c> array -- see this section's header remarks for why nothing else needs to read it back from elsewhere in this decoder's current (entropy-decode-only) scope.</summary>
+    /// <summary>
+    /// <c>transform_type(x4, y4, txSz)</c> (spec §5.11.47). The <c>is_inter</c> branch (<c>inter_tx_type</c>)
+    /// is only reachable for an IntraBC block, which is always lossless in this decoder and therefore always
+    /// has <c>txSz == TX_4X4</c> -- so <see cref="GetTxSet"/> can only ever return <see cref="Av1TxSet.Inter1"/>
+    /// or (when <c>reduced_tx_set</c>) <see cref="Av1TxSet.Inter3"/> on that branch, never Inter2 (which
+    /// only applies at TX_16X16). Returns the selected <see cref="Av1TxType"/> directly rather than writing
+    /// the spec's frame-sized <c>TxTypes[][]</c> array -- see this section's header remarks for why nothing
+    /// else needs to read it back from elsewhere in this decoder's current (entropy-decode-only) scope.
+    /// </summary>
     private int TransformType(int x4, int y4, int txSz)
     {
         _ = x4;
@@ -2127,6 +3215,18 @@ internal sealed class Av1TileDecoder
         if (set <= 0 || qindex <= 0)
         {
             return Av1TxType.DctDct;
+        }
+
+        if (_isInter)
+        {
+            if (set == Av1TxSet.Inter3)
+            {
+                int interTxType3 = _s.ReadSymbol(_cdf.InterTxTypeSet3[Av1CoeffTables.TxSizeSqr[txSz]]);
+                return Av1TxTypeTables.TxTypeInterInvSet3[interTxType3];
+            }
+
+            int interTxType1 = _s.ReadSymbol(_cdf.InterTxTypeSet1[Av1CoeffTables.TxSizeSqr[txSz]]);
+            return Av1TxTypeTables.TxTypeInterInvSet1[interTxType1];
         }
 
         int intraDir = _useFilterIntra ? Av1TxTypeTables.FilterIntraModeToIntraDir[_filterIntraMode] : _yMode;
@@ -2147,7 +3247,12 @@ internal sealed class Av1TileDecoder
         return _frame.BaseQIdx;
     }
 
-    /// <summary><c>get_tx_set(txSz)</c> (spec §5.11.48), restricted to the intra path.</summary>
+    /// <summary>
+    /// <c>get_tx_set(txSz)</c> (spec §5.11.48). The <c>is_inter</c> branch only ever needs to return
+    /// <see cref="Av1TxSet.Inter1"/>/<see cref="Av1TxSet.Inter3"/> in practice (see <see cref="TransformType"/>'s
+    /// remarks for why Inter2/DctOnly can't actually be reached on that branch here), but is implemented per
+    /// spec in full rather than relying on that assumption inside this method itself.
+    /// </summary>
     private int GetTxSet(int txSz)
     {
         int txSzSqr = Av1CoeffTables.TxSizeSqr[txSz];
@@ -2156,6 +3261,21 @@ internal sealed class Av1TileDecoder
         if (txSzSqrUp > Av1TxSize.Tx32x32)
         {
             return Av1TxSet.DctOnly;
+        }
+
+        if (_isInter)
+        {
+            if (_frame.ReducedTxSet || txSzSqrUp == Av1TxSize.Tx32x32)
+            {
+                return Av1TxSet.Inter3;
+            }
+
+            if (txSzSqr == Av1TxSize.Tx16x16)
+            {
+                throw new AvifUnsupportedFeatureException("AV1 IntraBC with TX_SET_INTER_2 (TX_16X16, non-reduced tx set) is not supported.");
+            }
+
+            return Av1TxSet.Inter1;
         }
 
         if (txSzSqrUp == Av1TxSize.Tx32x32)

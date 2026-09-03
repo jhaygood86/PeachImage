@@ -29,7 +29,7 @@ public class Av1HeaderWritersTests
         Assert.Equal(width, seq.MaxFrameWidth);
         Assert.Equal(height, seq.MaxFrameHeight);
         Assert.False(seq.Use128x128Superblock);
-        Assert.False(seq.EnableFilterIntra);
+        Assert.True(seq.EnableFilterIntra);
         Assert.Equal(Av1SequenceHeaderWriter.EnableIntraEdgeFilter, seq.EnableIntraEdgeFilter);
         Assert.False(seq.EnableSuperres);
         Assert.False(seq.EnableCdef);

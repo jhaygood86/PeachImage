@@ -339,6 +339,195 @@ internal static class Av1CdfTables
     public static readonly ushort[] DefaultRestorationType =
         [9413, 22581, 32768, 0];
 
+    // The palette tables below (through DefaultPaletteUvColorIndex) were added for palette-mode support
+    // and sourced differently from the rest of this file: mechanically generated from
+    // av1/common/entropymode.c in the AOMedia libaom reference implementation (the same numbers the AV1
+    // specification's own section 9.4 tables are derived from), not hand-transcribed. Each source array is
+    // built from `AOM_CDFn(a0, a1, ..., a_{n-2})` macro calls; libaom's own runtime storage inverts each
+    // argument via `AOM_ICDF(x) = 32768 - x` before use, but the macro *arguments* themselves are already
+    // this file's own forward-CDF convention (confirmed by an exact byte-for-byte match against this file's
+    // pre-existing, spec-sourced DefaultAngleDelta against libaom's default_angle_delta_cdf) -- so each row
+    // here is simply `[a0, a1, ..., a_{n-2}, 32768, 0]`, mirroring every other table in this file.
+
+    /// <summary>Default_Palette_Y_Size_Cdf, spec shape (7, 8) [7 bsize contexts x CDF_SIZE(7)].</summary>
+    public static readonly ushort[][] DefaultPaletteYSize =
+        [
+            [7952, 13000, 18149, 21478, 25527, 29241, 32768, 0],
+            [7139, 11421, 16195, 19544, 23666, 28073, 32768, 0],
+            [7788, 12741, 17325, 20500, 24315, 28530, 32768, 0],
+            [8271, 14064, 18246, 21564, 25071, 28533, 32768, 0],
+            [12725, 19180, 21863, 24839, 27535, 30120, 32768, 0],
+            [9711, 14888, 16923, 21052, 25661, 27875, 32768, 0],
+            [14940, 20797, 21678, 24186, 27033, 28999, 32768, 0],
+        ];
+
+    /// <summary>Default_Palette_Uv_Size_Cdf, spec shape (7, 8) [7 bsize contexts x CDF_SIZE(7)].</summary>
+    public static readonly ushort[][] DefaultPaletteUvSize =
+        [
+            [8713, 19979, 27128, 29609, 31331, 32272, 32768, 0],
+            [5839, 15573, 23581, 26947, 29848, 31700, 32768, 0],
+            [4426, 11260, 17999, 21483, 25863, 29430, 32768, 0],
+            [3228, 9464, 14993, 18089, 22523, 27420, 32768, 0],
+            [3768, 8886, 13091, 17852, 22495, 27207, 32768, 0],
+            [2464, 8451, 12861, 21632, 25525, 28555, 32768, 0],
+            [1269, 5435, 10433, 18963, 21700, 25865, 32768, 0],
+        ];
+
+    /// <summary>Default_Palette_Y_Mode_Cdf, spec shape (7, 3, 3) [7 bsize contexts x 3 mode contexts x CDF_SIZE(2)].</summary>
+    public static readonly ushort[][][] DefaultPaletteYMode =
+        [
+            [
+                [31676, 32768, 0],
+                [3419, 32768, 0],
+                [1261, 32768, 0],
+            ],
+            [
+                [31912, 32768, 0],
+                [2859, 32768, 0],
+                [980, 32768, 0],
+            ],
+            [
+                [31823, 32768, 0],
+                [3400, 32768, 0],
+                [781, 32768, 0],
+            ],
+            [
+                [32030, 32768, 0],
+                [3561, 32768, 0],
+                [904, 32768, 0],
+            ],
+            [
+                [32309, 32768, 0],
+                [7337, 32768, 0],
+                [1462, 32768, 0],
+            ],
+            [
+                [32265, 32768, 0],
+                [4015, 32768, 0],
+                [1521, 32768, 0],
+            ],
+            [
+                [32450, 32768, 0],
+                [7946, 32768, 0],
+                [129, 32768, 0],
+            ],
+        ];
+
+    /// <summary>Default_Palette_Uv_Mode_Cdf, spec shape (2, 3) [2 mode contexts x CDF_SIZE(2)].</summary>
+    public static readonly ushort[][] DefaultPaletteUvMode =
+        [
+            [32461, 32768, 0],
+            [21488, 32768, 0],
+        ];
+
+    /// <summary>Default_Palette_Y_Color_Index_Cdf, spec shape (7, 5, variable) [7 palette sizes (2..8) x 5 color-index contexts x CDF_SIZE(paletteSize)].</summary>
+    public static readonly ushort[][][] DefaultPaletteYColorIndex =
+        [
+            [
+                [28710, 32768, 0],
+                [16384, 32768, 0],
+                [10553, 32768, 0],
+                [27036, 32768, 0],
+                [31603, 32768, 0],
+            ],
+            [
+                [27877, 30490, 32768, 0],
+                [11532, 25697, 32768, 0],
+                [6544, 30234, 32768, 0],
+                [23018, 28072, 32768, 0],
+                [31915, 32385, 32768, 0],
+            ],
+            [
+                [25572, 28046, 30045, 32768, 0],
+                [9478, 21590, 27256, 32768, 0],
+                [7248, 26837, 29824, 32768, 0],
+                [19167, 24486, 28349, 32768, 0],
+                [31400, 31825, 32250, 32768, 0],
+            ],
+            [
+                [24779, 26955, 28576, 30282, 32768, 0],
+                [8669, 20364, 24073, 28093, 32768, 0],
+                [4255, 27565, 29377, 31067, 32768, 0],
+                [19864, 23674, 26716, 29530, 32768, 0],
+                [31646, 31893, 32147, 32426, 32768, 0],
+            ],
+            [
+                [23132, 25407, 26970, 28435, 30073, 32768, 0],
+                [7443, 17242, 20717, 24762, 27982, 32768, 0],
+                [6300, 24862, 26944, 28784, 30671, 32768, 0],
+                [18916, 22895, 25267, 27435, 29652, 32768, 0],
+                [31270, 31550, 31808, 32059, 32353, 32768, 0],
+            ],
+            [
+                [23105, 25199, 26464, 27684, 28931, 30318, 32768, 0],
+                [6950, 15447, 18952, 22681, 25567, 28563, 32768, 0],
+                [7560, 23474, 25490, 27203, 28921, 30708, 32768, 0],
+                [18544, 22373, 24457, 26195, 28119, 30045, 32768, 0],
+                [31198, 31451, 31670, 31882, 32123, 32391, 32768, 0],
+            ],
+            [
+                [21689, 23883, 25163, 26352, 27506, 28827, 30195, 32768, 0],
+                [6892, 15385, 17840, 21606, 24287, 26753, 29204, 32768, 0],
+                [5651, 23182, 25042, 26518, 27982, 29392, 30900, 32768, 0],
+                [19349, 22578, 24418, 25994, 27524, 29031, 30448, 32768, 0],
+                [31028, 31270, 31504, 31705, 31927, 32153, 32392, 32768, 0],
+            ],
+        ];
+
+    /// <summary>Default_Palette_Uv_Color_Index_Cdf, spec shape (7, 5, variable) [7 palette sizes (2..8) x 5 color-index contexts x CDF_SIZE(paletteSize)].</summary>
+    public static readonly ushort[][][] DefaultPaletteUvColorIndex =
+        [
+            [
+                [29089, 32768, 0],
+                [16384, 32768, 0],
+                [8713, 32768, 0],
+                [29257, 32768, 0],
+                [31610, 32768, 0],
+            ],
+            [
+                [25257, 29145, 32768, 0],
+                [12287, 27293, 32768, 0],
+                [7033, 27960, 32768, 0],
+                [20145, 25405, 32768, 0],
+                [30608, 31639, 32768, 0],
+            ],
+            [
+                [24210, 27175, 29903, 32768, 0],
+                [9888, 22386, 27214, 32768, 0],
+                [5901, 26053, 29293, 32768, 0],
+                [18318, 22152, 28333, 32768, 0],
+                [30459, 31136, 31926, 32768, 0],
+            ],
+            [
+                [22980, 25479, 27781, 29986, 32768, 0],
+                [8413, 21408, 24859, 28874, 32768, 0],
+                [2257, 29449, 30594, 31598, 32768, 0],
+                [19189, 21202, 25915, 28620, 32768, 0],
+                [31844, 32044, 32281, 32518, 32768, 0],
+            ],
+            [
+                [22217, 24567, 26637, 28683, 30548, 32768, 0],
+                [7307, 16406, 19636, 24632, 28424, 32768, 0],
+                [4441, 25064, 26879, 28942, 30919, 32768, 0],
+                [17210, 20528, 23319, 26750, 29582, 32768, 0],
+                [30674, 30953, 31396, 31735, 32207, 32768, 0],
+            ],
+            [
+                [21239, 23168, 25044, 26962, 28705, 30506, 32768, 0],
+                [6545, 15012, 18004, 21817, 25503, 28701, 32768, 0],
+                [3448, 26295, 27437, 28704, 30126, 31442, 32768, 0],
+                [15889, 18323, 21704, 24698, 26976, 29690, 32768, 0],
+                [30988, 31204, 31479, 31734, 31983, 32325, 32768, 0],
+            ],
+            [
+                [21442, 23288, 24758, 26246, 27649, 28980, 30563, 32768, 0],
+                [5863, 14933, 17552, 20668, 23683, 26411, 29273, 32768, 0],
+                [3415, 25810, 26877, 27990, 29223, 30394, 31618, 32768, 0],
+                [17965, 20084, 22232, 23974, 26274, 28402, 30390, 32768, 0],
+                [31190, 31329, 31516, 31679, 31825, 32026, 32322, 32768, 0],
+            ],
+        ];
+
     /// <summary>Default_Txb_Skip_Cdf, spec shape (4, 5, 13, 3).</summary>
     public static readonly ushort[][][][] DefaultTxbSkip =
         [
@@ -4544,4 +4733,65 @@ internal static class Av1CdfTables
             ],
         ];
 
+    // The MV/IntraBC tables below are transcribed directly from the spec's own listing (section 9.4,
+    // "Default_Mv_*_Cdf" / "Default_Intrabc_Cdf"). The spec shapes several of these with a leading
+    // MV_CONTEXTS=2 dimension (context 0 for real inter prediction, context 1 = MV_INTRABC_CONTEXT for
+    // IntraBC) -- that dimension is intentionally omitted here: this decoder never performs real inter
+    // prediction (reduced_still_picture_header forces FrameIsIntra), so read_mv's MvCtx is always
+    // MV_INTRABC_CONTEXT, and the spec's own default values are identical at both context indices anyway.
+    // This mirrors the existing IsAboveInter/IsLeftInter=false simplification in Av1TileDecoder.
+
+    /// <summary>Default_Intrabc_Cdf, spec shape (3) -- single global CDF, no context.</summary>
+    public static readonly ushort[] DefaultIntrabc = [30531, 32768, 0];
+
+    /// <summary>Default_Mv_Joint_Cdf, spec shape (5) -- comp-independent (one CDF covers both row/col).</summary>
+    public static readonly ushort[] DefaultMvJoint = [4096, 11264, 19328, 32768, 0];
+
+    /// <summary>Default_Mv_Class_Cdf, spec shape (2, 12) [comp x CDF_SIZE(MV_CLASSES=11)].</summary>
+    public static readonly ushort[][] DefaultMvClass =
+        [
+            [28672, 30976, 31858, 32320, 32551, 32656, 32740, 32757, 32762, 32767, 32768, 0],
+            [28672, 30976, 31858, 32320, 32551, 32656, 32740, 32757, 32762, 32767, 32768, 0],
+        ];
+
+    /// <summary>Default_Mv_Class0_Bit_Cdf, spec shape (3) -- comp-independent default, cloned per comp for independent adaptation.</summary>
+    public static readonly ushort[] DefaultMvClass0Bit = [216 * 128, 32768, 0];
+
+    // Default_Mv_Class0_Fr_Cdf/Default_Mv_Class0_Hp_Cdf/Default_Mv_Fr_Cdf/Default_Mv_Hp_Cdf are
+    // intentionally not transcribed: see Av1CdfContext's MV CDF fields for why mv_class0_fr/mv_class0_hp/
+    // mv_fr/mv_hp can never be read in this decoder (force_integer_mv is unconditionally 1).
+
+    /// <summary>Default_Mv_Sign_Cdf, spec shape (3) -- comp-independent default, cloned per comp for independent adaptation.</summary>
+    public static readonly ushort[] DefaultMvSign = [128 * 128, 32768, 0];
+
+    /// <summary>Default_Inter_Tx_Type_Set1_Cdf, spec shape (2, 17) [Tx_Size_Sqr[txSz] x CDF_SIZE(16)]. Only row 0 (TX_4X4) is ever read by this decoder -- see <see cref="Av1TxSet.Inter1"/>.</summary>
+    public static readonly ushort[][] DefaultInterTxTypeSet1 =
+        [
+            [4458, 5560, 7695, 9709, 13330, 14789, 17537, 20266, 21504, 22848, 23934, 25474, 27727, 28915, 30631, 32768, 0],
+            [1645, 2573, 4778, 5711, 7807, 8622, 10522, 15357, 17674, 20408, 22517, 25010, 27116, 28856, 30749, 32768, 0],
+        ];
+
+    /// <summary>Default_Inter_Tx_Type_Set3_Cdf, spec shape (4, 3) [Tx_Size_Sqr[txSz] x CDF_SIZE(2)]. Only row 0 (TX_4X4) is ever read by this decoder -- see <see cref="Av1TxSet.Inter3"/>.</summary>
+    public static readonly ushort[][] DefaultInterTxTypeSet3 =
+        [
+            [16384, 32768, 0],
+            [4167, 32768, 0],
+            [1998, 32768, 0],
+            [748, 32768, 0],
+        ];
+
+    /// <summary>Default_Mv_Bit_Cdf, spec shape (MV_OFFSET_BITS=10, 3) [bit-position x CDF_SIZE(2)] -- comp-independent, cloned per comp for independent adaptation.</summary>
+    public static readonly ushort[][] DefaultMvBit =
+        [
+            [136 * 128, 32768, 0],
+            [140 * 128, 32768, 0],
+            [148 * 128, 32768, 0],
+            [160 * 128, 32768, 0],
+            [176 * 128, 32768, 0],
+            [192 * 128, 32768, 0],
+            [224 * 128, 32768, 0],
+            [234 * 128, 32768, 0],
+            [234 * 128, 32768, 0],
+            [240 * 128, 32768, 0],
+        ];
 }

@@ -33,6 +33,31 @@ internal static class Av1CoefficientWriter
         public int MaxX4 { get; } = width4;
 
         public int MaxY4 { get; } = height4;
+
+        /// <summary>
+        /// <c>reset_block_context(bw4, bh4)</c> (spec §5.11.5), this plane's slice of it: zeroes
+        /// <see cref="AboveLevel"/>/<see cref="AboveDc"/> over <c>[x4, x4+w4)</c> and
+        /// <see cref="LeftLevel"/>/<see cref="LeftDc"/> over <c>[y4, y4+h4)</c>. Called whenever a leaf is
+        /// written with <c>skip = 1</c> (this encoder: an all-palette leaf) -- <see cref="WriteCoeffs"/>
+        /// never runs for such a leaf (no residual to write), so without this reset these slots would keep
+        /// whatever an earlier, unrelated leaf last left there, feeding a stale neighbor context into the
+        /// next real <c>WriteCoeffs</c> call's <c>all_zero</c>/<c>dc_sign</c> context derivation -- silently
+        /// diverging from what a real decoder (which does perform this reset) computes.
+        /// </summary>
+        public void Reset(int x4, int w4, int y4, int h4)
+        {
+            for (int i = x4; i < x4 + w4; i++)
+            {
+                AboveLevel[i] = 0;
+                AboveDc[i] = 0;
+            }
+
+            for (int i = y4; i < y4 + h4; i++)
+            {
+                LeftLevel[i] = 0;
+                LeftDc[i] = 0;
+            }
+        }
     }
 
     /// <summary>
@@ -46,14 +71,27 @@ internal static class Av1CoefficientWriter
     /// <c>transform_type()</c> after establishing <c>all_zero == 0</c>, so writing it unconditionally
     /// (before this method even determines <c>eob</c>) would emit an extra symbol on every all-zero block a
     /// real decoder never expects, desyncing the entire rest of the tile. Ignored for chroma, whose tx type
-    /// is always derived from <c>uv_mode</c> rather than signalled (see <c>ComputeTxType</c>).</para>
+    /// is always derived from <c>uv_mode</c> rather than signalled (see <c>ComputeTxType</c>). Also pass
+    /// <see langword="null"/> for a lossless luma sub-block: <c>Av1TileDecoder.TransformType</c>'s own
+    /// <c>qindex &lt;= 0</c> short-circuit never reads a tx_type symbol at coded-lossless either.</para>
+    ///
+    /// <para><paramref name="blockSize"/> (luma callers only): the coding block's own pixel width/height
+    /// (this encoder only ever produces square luma coding blocks), when it differs from
+    /// <paramref name="size"/> -- i.e. a lossless luma sub-block, where the coding block is still 8x8 but
+    /// each transform is 4x4. Defaults to <paramref name="size"/> (transform == coding block, this encoder's
+    /// non-lossless case, and always true for chroma), which selects the <c>all_zero</c> context's
+    /// constant-0 shortcut; any other value routes through <see cref="GetLumaAllZeroContext"/> instead,
+    /// mirroring <c>Av1TileDecoder.GetAllZeroContext</c>'s own <c>plane == 0</c> branch exactly (that
+    /// decoder-side method is what proves this formula, not just this one -- it's exercised against every
+    /// real-world AVIF file the decoder's own corpus tests already decode).</para>
     /// </summary>
-    public static int WriteCoeffs(Av1SymbolEncoder s, Av1CdfContext cdf, int[] quantLevels, int size, int ptype, int x4, int y4, PlaneContext planeCtx, Action? writeLumaTxType = null)
+    public static int WriteCoeffs(Av1SymbolEncoder s, Av1CdfContext cdf, int[] quantLevels, int size, int ptype, int x4, int y4, PlaneContext planeCtx, Action? writeLumaTxType = null, int blockSize = 0)
     {
         int txSz = Av1ForwardTransform.SizeToTxSz(size);
         int txSzCtx = (Av1CoeffTables.TxSizeSqr[txSz] + Av1CoeffTables.TxSizeSqrUp[txSz] + 1) >> 1;
         int w4 = size >> 2;
         int h4 = size >> 2;
+        int effectiveBlockSize = blockSize > 0 ? blockSize : size;
 
         int[] scan = Av1ScanTables.GetScan(txSz, Av1TxType.DctDct);
 
@@ -66,11 +104,19 @@ internal static class Av1CoefficientWriter
             }
         }
 
-        // ptype == 0 (luma): tx_mode == TX_MODE_LARGEST means the transform block always exactly equals
-        // the coding block, so Coeffs()'s "bw == w && bh == h" check is always true here -> context 0.
+        // ptype == 0 (luma): when the transform equals the coding block (this encoder's non-lossless case,
+        // tx_mode == TX_MODE_LARGEST) Coeffs()'s "bw == w && bh == h" check is always true -> context 0.
+        // Otherwise (a lossless luma sub-block, where the coding block stays 8x8 but the transform is 4x4)
+        // that shortcut doesn't apply -- see GetLumaAllZeroContext's remarks.
         // ptype == 1 (chroma): the OR-accumulated above/left context always applies (Coeffs() never takes
-        // the luma-only size-match shortcut for chroma).
-        int allZeroCtx = ptype == 0 ? 0 : GetChromaAllZeroContext(x4, y4, w4, h4, planeCtx);
+        // the luma-only size-match shortcut for chroma), but Coeffs() still adds +3 to it whenever the
+        // chroma coding block is larger than the transform (bw*bh > w*h) -- true for a 4:4:4 lossless chroma
+        // sub-block (coding block 8x8, transform 4x4), same as it's true for a lossless luma sub-block, even
+        // though this encoder's 4:2:0 chroma transform always already equals its coding block (so the +3
+        // never applies there) -- see GetChromaAllZeroContext's remarks.
+        int allZeroCtx = ptype == 0
+            ? (effectiveBlockSize == size ? 0 : GetLumaAllZeroContext(x4, y4, w4, h4, planeCtx))
+            : GetChromaAllZeroContext(x4, y4, w4, h4, planeCtx, effectiveBlockSize, size);
         bool allZero = eob == 0;
         s.WriteSymbol(cdf.TxbSkip[txSzCtx][allZeroCtx], allZero ? 1 : 0);
 
@@ -373,8 +419,20 @@ internal static class Av1CoefficientWriter
         return dcSign > 0 ? 2 : 0;
     }
 
-    /// <summary><c>all_zero</c>'s CDF context derivation for chroma (spec §8.3.2) -- luma always uses context 0 under this encoder's fixed TX_MODE_LARGEST configuration (see <see cref="WriteCoeffs"/>'s remarks).</summary>
-    private static int GetChromaAllZeroContext(int x4, int y4, int w4, int h4, PlaneContext ctx)
+    /// <summary>
+    /// <c>all_zero</c>'s CDF context derivation for chroma (spec §8.3.2) -- luma uses context 0 whenever its
+    /// transform equals its coding block (this encoder's non-lossless case), and
+    /// <see cref="GetLumaAllZeroContext"/> otherwise (see <see cref="WriteCoeffs"/>'s remarks).
+    /// <paramref name="blockSize"/> and <paramref name="size"/> mirror luma's own coding-block-vs-transform
+    /// comparison: <c>Coeffs()</c> adds +3 to this context whenever the chroma coding block is larger than
+    /// the transform (<c>bw*bh &gt; w*h</c>) -- at this encoder's 4:2:0 subsampling the chroma transform
+    /// always already equals its coding block (both 4x4, lossy or lossless), so the +3 never applies there,
+    /// but a 4:4:4 lossless chroma sub-block has an 8x8 coding block coded as a 4x4 transform, exactly like
+    /// a lossless luma sub-block -- getting this +3 wrong (previously always omitted) doesn't just compress
+    /// worse, it picks the wrong adaptive CDF and can misread <c>all_zero</c> itself, silently discarding a
+    /// real (non-zero) residual on the decode side.
+    /// </summary>
+    private static int GetChromaAllZeroContext(int x4, int y4, int w4, int h4, PlaneContext ctx, int blockSize, int size)
     {
         int above = 0;
         int leftAcc = 0;
@@ -396,9 +454,69 @@ internal static class Av1CoefficientWriter
             }
         }
 
-        // bw*bh == w*h always here too (chroma tx == chroma coding-block size under TX_MODE_LARGEST), so
-        // Coeffs()'s "+= 3 when bw*bh > w*h" never applies.
-        return (above != 0 ? 1 : 0) + (leftAcc != 0 ? 1 : 0) + 7;
+        int result = (above != 0 ? 1 : 0) + (leftAcc != 0 ? 1 : 0) + 7;
+        int effectiveBlockSize = blockSize > 0 ? blockSize : size;
+        if (effectiveBlockSize * effectiveBlockSize > size * size)
+        {
+            result += 3;
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// <c>all_zero</c>'s CDF context derivation for luma when the transform is smaller than the coding block
+    /// (spec §8.3.2) -- only reachable for a lossless luma sub-block in this encoder (see
+    /// <see cref="WriteCoeffs"/>'s <c>blockSize</c> remarks). Uses <c>Max</c> (not chroma's OR) over
+    /// <see cref="PlaneContext.AboveLevel"/>/<see cref="PlaneContext.LeftLevel"/> only -- unlike chroma, the
+    /// DC-sign arrays play no part here -- exactly mirroring <c>Av1TileDecoder.GetAllZeroContext</c>'s own
+    /// <c>plane == 0</c> branch, which this repo's decoder corpus tests already exercise against real-world
+    /// AVIF files containing genuine sub-block-transform partitions.
+    /// </summary>
+    private static int GetLumaAllZeroContext(int x4, int y4, int w4, int h4, PlaneContext ctx)
+    {
+        int top = 0;
+        int left = 0;
+        for (int k = 0; k < w4; k++)
+        {
+            if (x4 + k < ctx.MaxX4)
+            {
+                top = Math.Max(top, ctx.AboveLevel[x4 + k]);
+            }
+        }
+
+        for (int k = 0; k < h4; k++)
+        {
+            if (y4 + k < ctx.MaxY4)
+            {
+                left = Math.Max(left, ctx.LeftLevel[y4 + k]);
+            }
+        }
+
+        top = Math.Min(top, 255);
+        left = Math.Min(left, 255);
+
+        if (top == 0 && left == 0)
+        {
+            return 1;
+        }
+
+        if (top == 0 || left == 0)
+        {
+            return 2 + (Math.Max(top, left) > 3 ? 1 : 0);
+        }
+
+        if (Math.Max(top, left) <= 3)
+        {
+            return 4;
+        }
+
+        if (Math.Min(top, left) <= 3)
+        {
+            return 5;
+        }
+
+        return 6;
     }
 
     /// <summary>Write-side of <c>Coeffs()</c>'s Exp-Golomb tail (spec §5.11.39) for levels beyond <c>NumBaseLevels + CoeffBaseRange</c>.</summary>

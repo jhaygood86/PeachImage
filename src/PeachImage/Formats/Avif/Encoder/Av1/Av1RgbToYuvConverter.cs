@@ -1,12 +1,16 @@
+using PeachImage.Formats.Avif.Encoder.Av1.ColorConversion;
+
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
 /// <summary>
 /// Converts packed 8-bit RGB24 (or Gray8, for the monochrome path) pixels into planar Y(+U/V) samples for
-/// AV1 encoding -- the forward-direction mirror of <see cref="Decoding.Av1.Av1YuvToRgbConverter"/>. Always
-/// uses full-range BT.601 (<c>matrix_coefficients = 6</c>, matching <see cref="Av1SequenceHeaderWriter.MatrixCoefficients"/>)
-/// since that's the only matrix/range combination this encoder ever signals in the sequence header, and
-/// always chroma-subsamples 4:2:0 by box-filter-averaging the full-resolution Cb/Cr samples in 2x2 groups
-/// (edge-replicating the last row/column on odd dimensions) -- algebraically the same operation
+/// AV1 encoding -- the forward-direction mirror of <see cref="Decoding.Av1.Av1YuvToRgbConverter"/>. This is
+/// the 4:2:0/BT.601 path <see cref="Av1FrameEncoder.Encode"/> always uses for non-lossless encodes (full-range
+/// BT.601, <c>matrix_coefficients = 6</c>, matching <see cref="Av1SequenceHeaderWriter.MatrixCoefficients"/>);
+/// see <see cref="Av1RgbToYuvIdentityConverter"/> for the 4:4:4/identity-matrix path lossless encoding uses
+/// instead, which needs no chroma subsampling and is exactly invertible (unlike BT.601). This converter's own
+/// 4:2:0 chroma subsampling -- box-filter-averaging the full-resolution Cb/Cr samples in 2x2 groups
+/// (edge-replicating the last row/column on odd dimensions) -- is algebraically the same operation
 /// <see cref="Decoding.Av1.Av1YuvToRgbConverter"/> inverts, so encoding then decoding through PeachImage's
 /// own AV1 decoder reproduces the source up to ordinary 8-bit rounding and the inherent loss of 4:2:0
 /// chroma subsampling, before any quantization is even applied.
@@ -15,29 +19,21 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// <c>ceil(width/2)</c> x <c>ceil(height/2)</c> (chroma) -- unpadded. Superblock/tile-boundary padding is
 /// the tile encoder's concern (it already needs edge-replication for prediction at frame edges), not this
 /// converter's.</para>
+///
+/// <para>The per-pixel BT.601 math (this is the single hottest per-pixel loop in the encoder, O(width x
+/// height)) is delegated to <see cref="Av1RgbToYuvKernelSelector.Instance"/> -- a tiered SIMD kernel
+/// following the same <c>IXxxKernel</c>/<c>XxxKernelSelector</c> shape as JPEG's
+/// <see cref="Jpeg.ColorConversion.ColorConverterSelector"/>. Only the 4:2:0 box-filter chroma downsample
+/// below stays a plain scalar loop: it runs over the much smaller chroma-resolution grid (1/4 the pixel
+/// count), so it was not worth the extra kernel-tier surface area for the win available.</para>
 /// </summary>
 internal static class Av1RgbToYuvConverter
 {
-    private const double Kr = 0.299;
-    private const double Kb = 0.114;
-    private const double Kg = 1.0 - Kr - Kb;
-
-    // Full-range 8-bit constants, matching Av1YuvToRgbConverter's own yLo/yRange/cLo/cRange for
-    // colorRangeFull == true, bitDepth == 8 (see that class's cRange remark: full-range chroma spans the
-    // entire 0..255 sample range, the same as full-range luma, not half of it).
-    private const double YRange = 255.0;
-    private const double CLo = 128.0;
-    private const double CRange = 255.0;
-
     /// <summary>Converts a monochrome (Gray8) source into a single Y plane -- exactly the source samples, since a true gray sample's Y projection is itself (Kr + Kg + Kb == 1).</summary>
     public static int[] ConvertMonoChrome(ReadOnlySpan<byte> gray, int width, int height)
     {
         var y = new int[width * height];
-        for (int i = 0; i < y.Length; i++)
-        {
-            y[i] = gray[i];
-        }
-
+        Av1RgbToYuvKernelSelector.Instance.ConvertMonoChrome(gray, y, y.Length);
         return y;
     }
 
@@ -45,30 +41,10 @@ internal static class Av1RgbToYuvConverter
     public static (int[] Y, int[] U, int[] V, int ChromaWidth, int ChromaHeight) Convert(ReadOnlySpan<byte> rgb, int width, int height)
     {
         var y = new int[width * height];
-        var cbFull = new double[width * height];
-        var crFull = new double[width * height];
+        var cbFull = new float[width * height];
+        var crFull = new float[width * height];
 
-        for (int row = 0; row < height; row++)
-        {
-            int rowBase = row * width;
-            int srcRowBase = rowBase * 3;
-            for (int col = 0; col < width; col++)
-            {
-                int srcIdx = srcRowBase + (col * 3);
-                double rn = rgb[srcIdx] / 255.0;
-                double gn = rgb[srcIdx + 1] / 255.0;
-                double bn = rgb[srcIdx + 2] / 255.0;
-
-                double yn = (Kr * rn) + (Kg * gn) + (Kb * bn);
-                double crn = (rn - yn) / (2 * (1 - Kr));
-                double cbn = (bn - yn) / (2 * (1 - Kb));
-
-                int idx = rowBase + col;
-                y[idx] = ClampToByte(yn * YRange);
-                cbFull[idx] = (cbn * CRange) + CLo;
-                crFull[idx] = (crn * CRange) + CLo;
-            }
-        }
+        Av1RgbToYuvKernelSelector.Instance.RgbToYuvFullRes(rgb, y, cbFull, crFull, width * height);
 
         int chromaWidth = (width + 1) / 2;
         int chromaHeight = (height + 1) / 2;
