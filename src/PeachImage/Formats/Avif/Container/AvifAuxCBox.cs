@@ -20,4 +20,13 @@ internal static class AvifAuxCBox
         string auxType = AvifBinaryReader.ReadCString(data, ref offset, end);
         return auxType is AlphaUrn or AlphaUrnLegacy;
     }
+
+    /// <summary>Writes an <c>auxC</c> box tagging an item as the alpha auxiliary image, using <see cref="AlphaUrn"/> -- the write-side inverse of <see cref="IsAlpha"/>.</summary>
+    public static byte[] Build()
+    {
+        byte[] urn = System.Text.Encoding.ASCII.GetBytes(AlphaUrn);
+        var payload = new byte[urn.Length + 1]; // aux_type cstring: URN bytes + null terminator (already 0)
+        Array.Copy(urn, payload, urn.Length);
+        return AvifBoxWriter.FullBox("auxC", version: 0, flags: 0, payload);
+    }
 }

@@ -60,6 +60,29 @@ internal sealed class Av1SymbolEncoder
     }
 
     /// <summary>
+    /// <c>NS(n)</c>'s write-side counterpart (spec §4.10.7, the non-symmetric/truncated-binary unsigned
+    /// code) -- the algebraic inverse of <c>Av1TileDecoder.ReadNs</c>/<c>Av1SymbolDecoder</c>'s own copy:
+    /// given <c>w = FloorLog2(n) + 1</c> and <c>m = (1 &lt;&lt; w) - n</c>, a decoded <paramref name="value"/>
+    /// below <c>m</c> was encoded directly in <c>w - 1</c> bits; a decoded value at or above <c>m</c> was
+    /// split into a <c>w - 1</c>-bit prefix and one extra bit, recovered here by solving
+    /// <c>value = (prefix &lt;&lt; 1) - m + extraBit</c> for the unique <c>(prefix, extraBit)</c> pair.
+    /// </summary>
+    public void WriteNs(int value, int n)
+    {
+        int w = Av1CdfAdaptation.FloorLog2((uint)n) + 1;
+        int m = (1 << w) - n;
+        if (value < m)
+        {
+            WriteLiteral((uint)value, w - 1);
+            return;
+        }
+
+        int t = value + m;
+        WriteLiteral((uint)(t >> 1), w - 1);
+        WriteLiteral((uint)(t & 1), 1);
+    }
+
+    /// <summary>
     /// <c>read_symbol(cdf)</c>'s write-side counterpart: encodes <paramref name="symbol"/> against
     /// <paramref name="cdf"/> and adapts it in place (unless <c>disable_cdf_update</c>), exactly mirroring
     /// <see cref="Av1SymbolDecoder.ReadSymbol"/>'s own adaptation so a real decoder's CDF state stays in

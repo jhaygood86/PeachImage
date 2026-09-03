@@ -217,24 +217,10 @@ internal sealed class Av1FrameHeader
         }
 
         bool allowIntrabc = allowScreenContentTools && upscaledWidth == frameWidth && reader.ReadFlag();
-        if (allowIntrabc)
-        {
-            // Palette/IntraBC is explicitly out of scope for this pass (see the project plan) -- reject
-            // here, the earliest point the bitstream itself (not just av1C, which doesn't carry this flag)
-            // confirms it's in use.
-            throw new AvifUnsupportedFeatureException("AV1 IntraBC (allow_intrabc) is not supported.");
-        }
 
-        if (allowScreenContentTools)
-        {
-            // Palette mode is gated entirely behind allow_screen_content_tools (palette_mode_info() is
-            // only ever invoked when it's set) -- rejecting it here, in addition to allow_intrabc above,
-            // means the mode-info decoder never needs to parse (or correctly skip) any palette syntax at
-            // all. Screen-content tools target synthetic/screen-capture material, essentially never used
-            // by photographic encoders producing typical AVIF files, so this is a narrow, deliberate scope
-            // boundary rather than a real compatibility gap for the baseline-still-image target.
-            throw new AvifUnsupportedFeatureException("AV1 screen content tools (allow_screen_content_tools) are not supported.");
-        }
+        // Neither allow_screen_content_tools nor allow_intrabc is rejected here anymore:
+        // palette_mode_info()/palette_tokens() and IntraBC's DV decode/prediction are both implemented (see
+        // Av1TileDecoder's IntraFrameModeInfo/Residual and its ReadMv/FindMvStack/PredictIntrabc).
 
         // reduced_still_picture_header -> disable_frame_end_update_cdf=1, no bit read.
         // primary_ref_frame==PRIMARY_REF_NONE -> init_non_coeff_cdfs()+setup_past_independence(), no bits;

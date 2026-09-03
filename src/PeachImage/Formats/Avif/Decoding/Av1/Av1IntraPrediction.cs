@@ -570,6 +570,7 @@ internal static class Av1IntraPrediction
         }
         else if (pAngle > 180)
         {
+            int maxBaseY = (w + h - 1) << upsampleLeft;
             for (int i = 0; i < h; i++)
             {
                 for (int j = 0; j < w; j++)
@@ -577,7 +578,9 @@ internal static class Av1IntraPrediction
                     int idx = (j + 1) * dy;
                     int baseIdx = (idx >> (6 - upsampleLeft)) + (i << upsampleLeft);
                     int shift = (idx << upsampleLeft) >> 1 & 0x1F;
-                    pred[(i * w) + j] = Round2((long)(leftCol[baseIdx] * (32 - shift)) + (leftCol[baseIdx + 1] * shift), 5);
+                    pred[(i * w) + j] = baseIdx < maxBaseY
+                        ? Round2((long)(leftCol[baseIdx] * (32 - shift)) + (leftCol[baseIdx + 1] * shift), 5)
+                        : leftCol[maxBaseY];
                 }
             }
         }

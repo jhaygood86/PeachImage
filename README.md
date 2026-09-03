@@ -40,12 +40,18 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   chain (deblocking, CDEF, loop restoration), HEIF `grid` composite images, alpha via the auxiliary-item
   mechanism, and both 8-bit and 10-bit depth. Animated AVIF, film grain synthesis, gain maps, 12-bit
   depth, and palette/IntraBC mode remain unimplemented and throw a clear
-  `AvifUnsupportedFeatureException` rather than a silently wrong result. Encode is implemented for lossy,
-  8-bit, 4:2:0, opaque still images only (a single `av01` item; no HEIF `grid`/`avis` animation on the
-  output side even though decode supports reading them, and no partition-tree size search yet — every
-  block is a fixed 8x8 with a real intra-mode decision among DC/vertical/horizontal/smooth/Paeth
-  candidates). Alpha-bearing sources and higher bit depths are rejected with a clear exception rather than
-  silently dropped or downsampled.
+  `AvifUnsupportedFeatureException` rather than a silently wrong result. Encode is implemented for 8-bit,
+  4:2:0 still images (a single `av01` item, or two — color plus an `iref auxl`-referenced monochrome
+  alpha item — for a source with real transparency; no HEIF `grid`/`avis` animation on the output side
+  even though decode supports reading them, and no partition-tree size search yet — every luma block is a
+  fixed 8x8 with a real intra-mode decision among DC/vertical/horizontal/smooth/Paeth candidates). Both a
+  lossy path (`Quality`, DCT_DCT) and a lossless path (`Lossless`, AV1's Walsh-Hadamard coded-lossless
+  mode, forcing 4x4 transforms) are supported; note lossless still passes through this encoder's fixed
+  4:2:0 chroma subsampling, so only Gray8 sources, alpha, and solid colors round-trip pixel-exactly end to
+  end — see `AvifEncoderOptions.Lossless`'s remarks. Higher bit depths are rejected with a clear exception
+  rather than silently dropped or downsampled. The forward RGB→YUV conversion, forward transform, and
+  quantizer all use SIMD-tiered kernels (scalar/`Vector128`/`Vector256`, matching the JPEG/WebP encoders'
+  own dispatch pattern) and pool their per-block working buffers rather than allocating per block.
 - **TIFF**: decode only (no encode). Covers both byte orders (`II`/`MM`), uncompressed/LZW/PackBits
   compression, 1/2/4/8/16-bit depth, and grayscale (WhiteIsZero/BlackIsZero), RGB (with optional straight or
   premultiplied alpha), palette, and CMYK color, including the Predictor=2 horizontal-differencing variant

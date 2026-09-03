@@ -1,4 +1,5 @@
 using PeachImage.Formats.Avif.Decoding.Av1;
+using PeachImage.Formats.Avif.Encoder.Av1.Quantization;
 
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
@@ -24,16 +25,12 @@ internal static class Av1ForwardQuantizer
         int acQ = Av1Dequantizer.AcQ(baseQIdx, 8);
         int dqDenom = txSz == Av1TxSize.Tx32x32 ? 2 : 1;
 
-        for (int i = 0; i < size; i++)
-        {
-            for (int j = 0; j < size; j++)
-            {
-                int q = i == 0 && j == 0 ? dcQ : acQ;
-                int idx = (i * size) + j;
-                double level = coeff[idx] * dqDenom / (double)q;
-                levelsOut[idx] = (int)Math.Round(level, MidpointRounding.AwayFromZero);
-            }
-        }
+        // Precomputed once per block (like effectiveQuant in JPEG's FrameEncoder.QuantizeComponent) rather
+        // than divided per-coefficient: turns every coefficient's division into a multiplication.
+        double dcReciprocal = dqDenom / (double)dcQ;
+        double acReciprocal = dqDenom / (double)acQ;
+
+        Av1QuantizeKernelSelector.Instance.Quantize(coeff, levelsOut, size, dcReciprocal, acReciprocal);
     }
 
     /// <summary>

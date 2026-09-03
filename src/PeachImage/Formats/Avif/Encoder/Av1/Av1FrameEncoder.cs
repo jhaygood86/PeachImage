@@ -12,11 +12,23 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// </summary>
 internal static class Av1FrameEncoder
 {
-    /// <summary>Encodes an opaque 8-bit RGB24 (or, if <paramref name="monoChrome"/>, Gray8) source into a full AV1 OBU byte stream.</summary>
-    public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality)
+    /// <summary>
+    /// Encodes an opaque 8-bit RGB24 (or, if <paramref name="monoChrome"/>, Gray8) source into a full AV1
+    /// OBU byte stream. When <paramref name="lossless"/> is <see langword="true"/>, <paramref name="quality"/>
+    /// is ignored entirely and every block is coded via AV1's lossless Walsh-Hadamard path instead of DCT_DCT
+    /// quantization (<c>base_q_idx</c> forced to 0, AV1's coded-lossless trigger, rather than derived from
+    /// <paramref name="quality"/>).
+    /// </summary>
+    public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality, bool lossless = false)
     {
         int paddedWidth = ((width + 63) / 64) * 64;
         int paddedHeight = ((height + 63) / 64) * 64;
+
+        // The one gate for genuinely lossless RGB: lossless + real chroma planes means 4:4:4 with an
+        // identity color matrix (Av1RgbToYuvIdentityConverter) instead of 4:2:0 BT.601 -- see that class's
+        // remarks for why only the identity matrix is exactly invertible. Always false for monoChrome (no
+        // chroma planes to subsample either way), so this can never change monoChrome/alpha item output.
+        bool chroma444 = lossless && !monoChrome;
 
         int[] yPlane;
         int[]? uPlane = null;
@@ -31,6 +43,18 @@ internal static class Av1FrameEncoder
             int[] y = Av1RgbToYuvConverter.ConvertMonoChrome(pixels, width, height);
             yPlane = PadPlane(y, width, height, paddedWidth, paddedHeight);
         }
+        else if (chroma444)
+        {
+            var (y, u, v) = Av1RgbToYuvIdentityConverter.Convert(pixels, width, height);
+            chromaWidth = width;
+            chromaHeight = height;
+            paddedChromaWidth = paddedWidth;
+            paddedChromaHeight = paddedHeight;
+
+            yPlane = PadPlane(y, width, height, paddedWidth, paddedHeight);
+            uPlane = PadPlane(u, chromaWidth, chromaHeight, paddedChromaWidth, paddedChromaHeight);
+            vPlane = PadPlane(v, chromaWidth, chromaHeight, paddedChromaWidth, paddedChromaHeight);
+        }
         else
         {
             var (y, u, v, cw, ch) = Av1RgbToYuvConverter.Convert(pixels, width, height);
@@ -44,7 +68,7 @@ internal static class Av1FrameEncoder
             vPlane = PadPlane(v, chromaWidth, chromaHeight, paddedChromaWidth, paddedChromaHeight);
         }
 
-        int baseQIdx = Av1ForwardQuantizer.QualityToBaseQIdx(quality);
+        int baseQIdx = lossless ? 0 : Av1ForwardQuantizer.QualityToBaseQIdx(quality);
 
         var reconY = new int[paddedWidth * paddedHeight];
         int[]? reconU = monoChrome ? null : new int[paddedChromaWidth * paddedChromaHeight];
@@ -54,12 +78,12 @@ internal static class Av1FrameEncoder
             yPlane, paddedWidth, paddedHeight,
             uPlane, vPlane, paddedChromaWidth, paddedChromaHeight,
             reconY, reconU, reconV,
-            monoChrome, baseQIdx);
+            monoChrome, baseQIdx, lossless, chroma444);
 
-        byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(paddedWidth, paddedHeight, monoChrome);
+        byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(paddedWidth, paddedHeight, monoChrome, chroma444);
 
         var frameHeaderWriter = new Av1BitWriter();
-        Av1FrameHeaderWriter.Write(frameHeaderWriter, paddedWidth, paddedHeight, monoChrome, baseQIdx);
+        Av1FrameHeaderWriter.Write(frameHeaderWriter, paddedWidth, paddedHeight, monoChrome, baseQIdx, lossless);
         byte[] frameHeaderPayload = frameHeaderWriter.ToArray();
 
         var output = new List<byte>();
@@ -68,7 +92,7 @@ internal static class Av1FrameEncoder
         Av1ObuWriter.WriteObu(output, Decoding.Av1.Av1ObuType.FrameHeader, frameHeaderPayload);
         Av1ObuWriter.WriteObu(output, Decoding.Av1.Av1ObuType.TileGroup, tileBytes);
 
-        return new Av1EncodedFrame(output.ToArray(), width, height, monoChrome);
+        return new Av1EncodedFrame(output.ToArray(), width, height, monoChrome, chroma444);
     }
 
     /// <summary>Pads a <paramref name="srcWidth"/> x <paramref name="srcHeight"/> plane up to <paramref name="paddedWidth"/> x <paramref name="paddedHeight"/> by replicating the last real row/column into the padding region.</summary>

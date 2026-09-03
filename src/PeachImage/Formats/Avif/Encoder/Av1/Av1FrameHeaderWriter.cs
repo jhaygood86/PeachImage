@@ -9,8 +9,11 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// restoration (see <see cref="Av1SequenceHeaderWriter"/>), the parser's own short-circuit logic
 /// (<c>seq.EnableCdef &amp;&amp; ...</c>-style conditions) means several whole per-frame syntax elements
 /// are never read at all -- this writer mirrors that by simply never writing them, rather than writing
-/// "off" values for fields that don't exist in the bitstream. In-loop filters are always signalled off via
-/// zero-valued (not absent) fields where the syntax does still require them (loop filter levels).
+/// "off" values for fields that don't exist in the bitstream. In-loop filters are signalled off via
+/// zero-valued (not absent) fields where the non-lossless syntax still requires them (loop filter levels);
+/// at coded-lossless (see <see cref="Write"/>'s <c>lossless</c> parameter) those same fields become entirely
+/// absent from the bitstream instead, per AV1's own <c>codedLossless</c> short-circuit -- writing zero bits
+/// there would desync a real decoder rather than merely being redundant.
 /// </summary>
 internal static class Av1FrameHeaderWriter
 {
@@ -22,26 +25,73 @@ internal static class Av1FrameHeaderWriter
     /// <param name="width">Frame width in pixels.</param>
     /// <param name="height">Frame height in pixels.</param>
     /// <param name="monoChrome">Whether this frame is monochrome (matches the sequence header's <c>mono_chrome</c>).</param>
-    /// <param name="baseQIdx">The base quantizer index, 1-255. Must be non-zero -- 0 would trigger AV1's
-    /// coded-lossless path (forces 4x4-only transforms and skips in-loop-filter signalling entirely), which
-    /// this v1 encoder does not implement; the quality-to-quantizer mapping (added alongside the forward
-    /// transform/quantization layer) is responsible for keeping this true.</param>
-    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx)
+    /// <param name="baseQIdx">
+    /// The base quantizer index, 0-255. Must be exactly 0 when <paramref name="lossless"/> is
+    /// <see langword="true"/> (AV1's coded-lossless trigger -- forces 4x4-only transforms and skips
+    /// in-loop-filter/<c>delta_q_present</c> signalling entirely, both mirrored below) and 1-255 otherwise
+    /// (0 would silently trigger coded-lossless without <paramref name="lossless"/> also being set, desyncing
+    /// this writer from what it claims to be encoding). The quality-to-quantizer mapping is responsible for
+    /// keeping non-lossless callers in the 1-255 range.
+    /// </param>
+    /// <param name="lossless">
+    /// When <see langword="true"/>, writes AV1's coded-lossless configuration: <paramref name="baseQIdx"/>
+    /// must be 0, <c>tx_mode</c> is implicitly <see cref="Av1FrameHeader.OnlyTx4x4"/> (no <c>tx_mode_select</c>
+    /// bit is written -- the decoder never reads one either, see <see cref="Av1FrameHeader"/>'s own
+    /// <c>codedLossless</c> branch), and neither <c>delta_q_present</c> nor any <c>loop_filter_params()</c>
+    /// bits are written (both are unconditionally absent from the bitstream at coded-lossless, not merely
+    /// zero-valued, again mirroring the decoder's short-circuit).
+    /// </param>
+    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false)
     {
-        if (baseQIdx is <= 0 or > 255)
+        if (lossless)
         {
-            throw new ArgumentOutOfRangeException(nameof(baseQIdx), baseQIdx, "base_q_idx must be in [1, 255] -- 0 would trigger AV1's coded-lossless path, which this encoder does not implement.");
+            if (baseQIdx != 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(baseQIdx), baseQIdx, "base_q_idx must be exactly 0 when lossless is true.");
+            }
+        }
+        else if (baseQIdx is <= 0 or > 255)
+        {
+            throw new ArgumentOutOfRangeException(nameof(baseQIdx), baseQIdx, "base_q_idx must be in [1, 255] when lossless is false -- 0 would silently trigger AV1's coded-lossless path.");
         }
 
+        // allow_screen_content_tools is set whenever (and only whenever) this frame is lossless -- palette
+        // mode (Av1TileEncoder.TryEncodePalette) is only ever attempted in lossless leaves, and this is the
+        // single frame-level gate that lets a decoder's palette_mode_info() read anything at all. Tying it
+        // to lossless rather than running a real two-pass "did any leaf actually use palette" check costs
+        // at most one wasted header bit (and, per leaf, one always-false has_palette_y/has_palette_uv
+        // symbol) on a lossless frame that ends up not using palette anywhere -- negligible next to the
+        // savings on the frames this is actually for.
+        bool allowScreenContentTools = lossless;
+
         writer.WriteFlag(false); // disable_cdf_update -- CDF adaptation is active during encode
-        writer.WriteFlag(false); // allow_screen_content_tools -- seq_force_integer_mv bit short-circuited off
+        writer.WriteFlag(allowScreenContentTools); // allow_screen_content_tools
+
+        if (allowScreenContentTools)
+        {
+            // force_integer_mv's value is irrelevant: FrameIsIntra (always true for AVIF) unconditionally
+            // forces it to 1 afterward regardless of what's read here (see Av1FrameHeader.Parse's own
+            // remarks) -- written true for clarity, but the decoder never actually branches on it.
+            writer.WriteFlag(true); // force_integer_mv
+        }
 
         int miCols = 2 * ((width + 7) >> 3);
         int miRows = 2 * ((height + 7) >> 3);
 
         // superres_params(): seq.EnableSuperres == false short-circuits use_superres -- no bit read/written.
         writer.WriteFlag(false); // render_and_frame_size_different -- render size == frame size
-        // allow_intrabc: allow_screen_content_tools == false short-circuits it -- no bit read/written.
+
+        if (allowScreenContentTools)
+        {
+            // allow_intrabc is only read when allowScreenContentTools && upscaledWidth == frameWidth (always
+            // true here -- this encoder never uses superres). Tied to lossless the same "always on, let
+            // per-leaf RDO decide" way allowScreenContentTools itself is (see its own remarks above) --
+            // Av1TileEncoder.EncodeLeaf only ever actually uses IntraBC when it finds an exact-pixel-match
+            // copy source (see FindIntrabcMatch), so a lossless frame with no such match anywhere just pays
+            // the same one-header-bit-plus-per-leaf-use_intrabc-bit cost allowScreenContentTools already
+            // does for palette.
+            writer.WriteFlag(true); // allow_intrabc
+        }
 
         var tileInfo = Av1TileInfoWriter.Write(writer, miCols, miRows);
 
@@ -59,17 +109,47 @@ internal static class Av1FrameHeaderWriter
         writer.WriteFlag(false); // using_qmatrix
         writer.WriteFlag(false); // segmentation_enabled
 
-        // codedLossless is always false here since baseQIdx > 0 and no delta-q/segmentation is ever signalled.
-        writer.WriteFlag(false); // delta_q_present (baseQIdx > 0, so this bit IS read/written)
-        // delta_lf_present is only read when delta_q_present -- not reached here.
+        // delta_q_present is read as `baseQIdx > 0 && reader.ReadFlag()` -- at baseQIdx == 0 (lossless) the
+        // bit is short-circuited away entirely, not merely defaulted to false, so it must not be written.
+        // codedLossless is otherwise always false here since no segmentation is ever signalled either.
+        if (!lossless)
+        {
+            writer.WriteFlag(false); // delta_q_present
+        }
 
-        WriteLoopFilterParams(writer);
+        // delta_lf_present is only read when delta_q_present -- not reached here either way.
+
+        // loop_filter_params() is entirely absent from the bitstream when codedLossless (see
+        // Av1FrameHeader.ParseLoopFilterParams's `codedLossless || allowIntrabc` short-circuit) -- not just
+        // zero-valued, so these bits must be skipped, not merely written as zero, when lossless.
+        if (!lossless)
+        {
+            WriteLoopFilterParams(writer);
+        }
+
         // cdef_params()/lr_params(): seq.EnableCdef == false / seq.EnableRestoration == false short-circuit
-        // both entirely -- no bits read/written for either.
+        // both entirely regardless of losslessness -- no bits read/written for either.
 
-        writer.WriteFlag(false); // tx_mode_select -> TX_MODE_LARGEST
+        // tx_mode_select is only read when !codedLossless (tx_mode is otherwise implicitly OnlyTx4x4) --
+        // see Av1FrameHeader's own codedLossless branch.
+        if (!lossless)
+        {
+            writer.WriteFlag(false); // tx_mode_select -> TX_MODE_LARGEST
+        }
+
         writer.WriteFlag(true); // reduced_tx_set
         // film_grain_params_present == false short-circuits the apply_grain bit -- no bit read/written.
+
+        // trailing_bits() -- mandatory OBU padding (a stop bit, then zero bits out to the byte boundary),
+        // matching Av1SequenceHeaderWriter.Write's own call and its remarks on why this is required even
+        // when the preceding content already lands on a byte boundary: trailing_bits() always writes at
+        // least one bit, so skipping it isn't just "redundant padding" whenever there happens to be zero
+        // bits' worth of slack left -- it desyncs a real decoder by exactly the bits this OBU's declared
+        // size then falls short of. This previously went unnoticed because every prior configuration
+        // (lossy, or any frame with chroma) always had a few bits of incidental padding entropy to absorb
+        // the gap; a monochrome lossless frame header is short enough to land exactly byte-aligned with
+        // none, which is what exposed the missing call (real decoders overran the OBU trying to read it).
+        writer.WriteTrailingBits();
 
         return new Av1FrameHeader
         {
@@ -80,8 +160,8 @@ internal static class Av1FrameHeaderWriter
             RenderHeight = height,
             MiCols = miCols,
             MiRows = miRows,
-            AllowScreenContentTools = false,
-            AllowIntrabc = false,
+            AllowScreenContentTools = allowScreenContentTools,
+            AllowIntrabc = allowScreenContentTools,
             BaseQIdx = baseQIdx,
             DeltaQYDc = 0,
             DeltaQUDc = 0,
@@ -105,8 +185,11 @@ internal static class Av1FrameHeaderWriter
             DeltaLfPresent = false,
             DeltaLfRes = 0,
             DeltaLfMulti = false,
-            CodedLossless = false,
-            AllLossless = false,
+            CodedLossless = lossless,
+
+            // AllLossless additionally requires frameWidth == upscaledWidth -- always true here, since this
+            // encoder never uses superres (see the sequence header's enable_superres == false).
+            AllLossless = lossless,
             LoopFilter = new Av1LoopFilterParams
             {
                 Level = [0, 0, 0, 0],
@@ -130,7 +213,7 @@ internal static class Av1FrameHeaderWriter
                 UsesLr = false,
                 UnitSize = [0, 0, 0],
             },
-            TxMode = Av1FrameHeader.TxModeLargest,
+            TxMode = lossless ? Av1FrameHeader.OnlyTx4x4 : Av1FrameHeader.TxModeLargest,
             ReducedTxSet = true,
             TileInfo = tileInfo,
             DisableCdfUpdate = false,
