@@ -38,20 +38,24 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   carries a fully composited frame.
 - **AVIF**: decode is implemented for baseline still images — intra-frame AV1, the full in-loop filter
   chain (deblocking, CDEF, loop restoration), HEIF `grid` composite images, alpha via the auxiliary-item
-  mechanism, and both 8-bit and 10-bit depth. Animated AVIF, film grain synthesis, gain maps, 12-bit
-  depth, and palette/IntraBC mode remain unimplemented and throw a clear
-  `AvifUnsupportedFeatureException` rather than a silently wrong result. Encode is implemented for 8-bit,
-  4:2:0 still images (a single `av01` item, or two — color plus an `iref auxl`-referenced monochrome
-  alpha item — for a source with real transparency; no HEIF `grid`/`avis` animation on the output side
-  even though decode supports reading them, and no partition-tree size search yet — every luma block is a
-  fixed 8x8 with a real intra-mode decision among DC/vertical/horizontal/smooth/Paeth candidates). Both a
-  lossy path (`Quality`, DCT_DCT) and a lossless path (`Lossless`, AV1's Walsh-Hadamard coded-lossless
-  mode, forcing 4x4 transforms) are supported; note lossless still passes through this encoder's fixed
-  4:2:0 chroma subsampling, so only Gray8 sources, alpha, and solid colors round-trip pixel-exactly end to
-  end — see `AvifEncoderOptions.Lossless`'s remarks. Higher bit depths are rejected with a clear exception
-  rather than silently dropped or downsampled. The forward RGB→YUV conversion, forward transform, and
-  quantizer all use SIMD-tiered kernels (scalar/`Vector128`/`Vector256`, matching the JPEG/WebP encoders'
-  own dispatch pattern) and pool their per-block working buffers rather than allocating per block.
+  mechanism, both 8-bit and 10-bit depth, and screen-content tools (palette mode, IntraBC). Animated AVIF,
+  film grain synthesis, gain maps, and 12-bit depth remain unimplemented and throw a clear
+  `AvifUnsupportedFeatureException` rather than a silently wrong result. Encode is implemented for 8-bit
+  still images (a single `av01` item, or two — color plus an `iref auxl`-referenced monochrome alpha item
+  — for a source with real transparency; no HEIF `grid`/`avis` animation on the output side even though
+  decode supports reading them). Both a lossy path (`Quality`, DCT_DCT, fixed 4:2:0 chroma, every luma
+  block a fixed 8x8 leaf) and a lossless path (`Lossless`, AV1's Walsh-Hadamard coded-lossless mode,
+  forcing 4x4 transforms, full-resolution 4:4:4 chroma via an identity RGB→YUV matrix, a real cost-based
+  partition-tree size search up to 64x64, and screen-content tools) are supported; lossless round-trips
+  every pixel format exactly — see `AvifEncoderOptions.Lossless`'s remarks. Every leaf gets a real,
+  cost-based intra-mode search (all 13 AV1 intra modes plus `angle_delta` for the 8 directional ones, plus
+  FILTER_INTRA) for luma; lossless chroma gets the same real mode search (non-lossless chroma stays
+  DC_PRED, since its transform type is mode-dependent and this encoder's non-lossless chroma path doesn't
+  yet implement the non-DCT transforms that searching a real mode there would need). Higher bit depths are
+  rejected with a clear exception rather than silently dropped or downsampled. The forward RGB→YUV
+  conversion, forward transform, and quantizer all use SIMD-tiered kernels (scalar/`Vector128`/`Vector256`,
+  matching the JPEG/WebP encoders' own dispatch pattern) and pool their per-block working buffers rather
+  than allocating per block.
 - **TIFF**: decode only (no encode). Covers both byte orders (`II`/`MM`), uncompressed/LZW/PackBits
   compression, 1/2/4/8/16-bit depth, and grayscale (WhiteIsZero/BlackIsZero), RGB (with optional straight or
   premultiplied alpha), palette, and CMYK color, including the Predictor=2 horizontal-differencing variant
