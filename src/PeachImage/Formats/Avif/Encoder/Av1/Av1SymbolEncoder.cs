@@ -27,7 +27,41 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// encoded sequence is decoded back through the real, unmodified <see cref="Av1SymbolDecoder"/> and both
 /// the symbols and the final CDF state are compared.</para>
 /// </summary>
-internal sealed class Av1SymbolEncoder
+/// <summary>
+/// The symbol-writing surface <see cref="Av1CoefficientWriter.WriteCoeffs"/> (and other real per-symbol
+/// call sites) writes through -- <see cref="Av1SymbolEncoder"/> implements it for real bitstream output;
+/// <see cref="Av1TrialSymbolSink"/> implements it for RD-search cost estimation (see <see cref="Av1RdCost"/>),
+/// letting both share the exact same context-derivation code in <see cref="Av1CoefficientWriter"/> instead of
+/// a hand-duplicated (and driftable) second copy.
+/// </summary>
+internal interface IAv1SymbolSink
+{
+    void WriteSymbol(Span<ushort> cdf, int symbol);
+
+    void WriteLiteral(uint value, int n);
+}
+
+/// <summary>
+/// An <see cref="IAv1SymbolSink"/> that never writes or adapts anything -- it only accumulates the bit cost
+/// <see cref="Av1SymbolEncoder.WriteSymbol"/> would have spent, via <see cref="Av1SymbolEncoder.EstimateSymbolCost"/>,
+/// for RD-search candidate costing (see <see cref="Av1RdCost"/>). A literal bit always costs exactly 1 bit
+/// (see <see cref="Av1SymbolEncoder.EstimateSymbolCost"/>'s remarks on <see cref="Av1SymbolEncoder.WriteBool"/>'s
+/// fixed 50/50 CDF), so <see cref="WriteLiteral"/> adds <c>n</c> directly rather than calling the general
+/// estimator <c>n</c> times.
+/// </summary>
+internal sealed class Av1TrialSymbolSink : IAv1SymbolSink
+{
+    public long Bits { get; private set; }
+
+    public void WriteSymbol(Span<ushort> cdf, int symbol) => Bits += Av1SymbolEncoder.EstimateSymbolCost(cdf, symbol);
+
+    public void WriteLiteral(uint value, int n) => Bits += n;
+
+    /// <summary>Zeroes <see cref="Bits"/> so this one shared instance (see <c>Av1TileEncoder.TileState.TrialSink</c>) can be reused for the next RD candidate instead of allocating a fresh sink per candidate.</summary>
+    public void Reset() => Bits = 0;
+}
+
+internal sealed class Av1SymbolEncoder : IAv1SymbolSink
 {
     private const int EcProbShift = 6;
     private const int EcMinProb = 4;
@@ -112,6 +146,39 @@ internal sealed class Av1SymbolEncoder
         {
             Av1CdfAdaptation.AdaptCdf(cdf, n, symbol);
         }
+    }
+
+    /// <summary>
+    /// Estimates the bits <see cref="WriteSymbol"/> would spend encoding <paramref name="symbol"/> against
+    /// <paramref name="cdf"/>, without writing anything or adapting <paramref name="cdf"/> -- the core
+    /// primitive behind <see cref="Av1RdCost"/>'s candidate costing. Reuses <see cref="WriteSymbolCore"/>'s
+    /// exact renormalization-bit formula (<c>15 - FloorLog2(newRange)</c>), evaluated against the canonical
+    /// range every tile starts with (<c>1 &lt;&lt; 15</c>) rather than the instantaneous <see cref="_symbolRange"/>
+    /// at whichever point in the real bitstream this symbol will actually land. This is exact, not
+    /// approximate, at that starting point, and <see cref="WriteSymbolCore"/>'s own renormalization always
+    /// restores <see cref="_symbolRange"/> to <c>[1 &lt;&lt; 15, 1 &lt;&lt; 16)</c> after every single symbol (the
+    /// same invariant a real range coder relies on) -- so this differs from the bit count a symbol at any
+    /// other point in the tile would really cost by at most a fraction of a bit, the same
+    /// canonical-range-instead-of-instantaneous-range approximation real AV1/libaom encoders themselves use
+    /// to precompute static per-symbol cost tables for RD search (they don't re-derive cost from the actual
+    /// running coder state either). Good enough to rank RD candidates against each other; not a substitute
+    /// for <see cref="Flush"/>'s real bit-exact output.
+    ///
+    /// <para>A literal bit (<see cref="WriteBool"/>'s fixed, non-adapting 50/50 CDF <c>[1 &lt;&lt; 14, 1 &lt;&lt; 15, 0]</c>)
+    /// always costs exactly 1 bit under this same formula regardless of which of its two symbol values is
+    /// written -- <see cref="Av1TrialSymbolSink.WriteLiteral"/> relies on this to add <c>n</c> directly rather
+    /// than calling this method <c>n</c> times.</para>
+    /// </summary>
+    internal static int EstimateSymbolCost(ReadOnlySpan<ushort> cdf, int symbol)
+    {
+        const uint canonicalRange = 1u << 15;
+        int n = cdf.Length - 1;
+
+        uint prev = symbol == 0 ? canonicalRange : CurValue(canonicalRange, cdf, symbol - 1, n);
+        uint cur = CurValue(canonicalRange, cdf, symbol, n);
+
+        uint newRange = prev - cur;
+        return 15 - Av1CdfAdaptation.FloorLog2(newRange);
     }
 
     /// <summary><c>cur(idx)</c> exactly as <see cref="Av1SymbolDecoder.ReadSymbolCore"/> computes it for a candidate symbol index.</summary>

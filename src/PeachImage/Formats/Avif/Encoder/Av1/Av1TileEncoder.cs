@@ -145,6 +145,14 @@ internal static class Av1TileEncoder
             UCoeffCtx = monoChrome ? null : new Av1CoefficientWriter.PlaneContext(chroma444 ? miCols : miCols / 2, chroma444 ? miRows : miRows / 2),
             VCoeffCtx = monoChrome ? null : new Av1CoefficientWriter.PlaneContext(chroma444 ? miCols : miCols / 2, chroma444 ? miRows : miRows / 2),
 
+            // Sized like YCoeffCtx (the largest of Y/U/V, since chroma's x4/y4 range is always a subset of
+            // luma's numeric range -- true even at 4:4:4, where they're equal) so one shared, reused scratch
+            // buffer safely backs ComputeCandidateCost's trial costing for every plane -- see
+            // Av1CoefficientWriter.PlaneContext.SeedFrom's remarks.
+            ScratchCoeffCtx = new Av1CoefficientWriter.PlaneContext(miCols, miRows),
+            TrialSink = new Av1TrialSymbolSink(),
+            Lambda = Av1RdCost.QIndexToLambda(baseQIdx),
+
             // Rented once for the whole tile and reused/overwritten across every block below, rather than
             // allocated fresh per block. Pred/BestPred must be sized for the largest leaf this encoder can
             // now produce (64x64 = 4096 elements, lossless only -- see EncodePartitionForced): the whole-leaf
@@ -254,6 +262,17 @@ internal static class Av1TileEncoder
         public required Av1CoefficientWriter.PlaneContext YCoeffCtx;
         public required Av1CoefficientWriter.PlaneContext? UCoeffCtx;
         public required Av1CoefficientWriter.PlaneContext? VCoeffCtx;
+
+        // RD cost search scratch (Av1RdCost / ComputeCandidateCost): ScratchCoeffCtx is reseeded from the
+        // real Y/U/V context before every candidate's trial cost, then freely mutated (never written back)
+        // by that one candidate's own WriteCoeffs trial calls -- see PlaneContext.SeedFrom's remarks. TrialSink
+        // is the one reused Av1TrialSymbolSink every trial WriteCoeffs call accumulates into (Reset() between
+        // candidates), avoiding a fresh allocation on every one of a leaf's ~100+ candidate evaluations.
+        // Lambda is this frame's qindex-derived RD weight (Av1RdCost.QIndexToLambda), computed once here
+        // rather than per candidate.
+        public required Av1CoefficientWriter.PlaneContext ScratchCoeffCtx;
+        public required Av1TrialSymbolSink TrialSink;
+        public required double Lambda;
 
         // Palette mode state (spec §5.11.46/§5.11.47) -- PaletteSizesY/UV and the two color grids are
         // frame-shared neighbor context (mirroring Av1TileDecoder's own identically-named fields exactly,
@@ -366,17 +385,18 @@ internal static class Av1TileEncoder
         EncodePartitionForced(s, r + half, c + half, half);
     }
 
-    // Fixed bit-cost stand-ins (in ComputeCandidateCost's WHT-magnitude units, not real bits -- there is no
-    // exact conversion between the two, since ComputeCandidateCost never simulates the actual entropy coder;
-    // these are tuned as relative weights, not calibrated bit counts) for the leaf/split-only signaling
-    // overhead DecidePartition's cost comparison can't get from ComputeCandidateCost alone: a leaf pays one
-    // skip bit, one yMode symbol, (sometimes) an angle_delta, a uv_mode, and palette/filter-intra
-    // eligibility bits; a split pays one partition symbol per split point instead. Both are deliberately
-    // small relative to typical WHT-magnitude costs (residual cost dominates for anything but the flattest
-    // content) -- their job is only to stop the search from splitting purely-flat regions into needlessly
-    // many same-cost-zero leaves, the same role FlatnessVarianceThreshold played before this replaced it.
-    private const long LeafSignalingCost = 24;
-    private const long SplitSignalingCost = 6;
+    // A split node's own signaling is now priced exactly (the real partition symbol's bit cost, computed in
+    // DecidePartition itself via Av1SymbolEncoder.EstimateSymbolCost against the real, context-selected
+    // partition CDF -- see PartitionContext) rather than this flat stand-in. A leaf's *partition* symbol is
+    // priced the same exact way, but a leaf also pays signaling this cost function can't know yet at
+    // DecidePartition time, before EncodeLeaf's own mode search has run: one skip bit, one yMode symbol,
+    // (sometimes) an angle_delta, a uv_mode, and palette/filter-intra eligibility bits. This remaining
+    // constant stands in for just that piece now (smaller than the old LeafSignalingCost/SplitSignalingCost
+    // pair's combined 24, since the partition symbol itself no longer needs to be approximated inside it) --
+    // tuned as a relative weight, not a calibrated bit count, same as before; pricing this piece for real too
+    // (e.g. by running a cheap mode-search pass before the partition decision) is a candidate for a later RD
+    // phase, not this one.
+    private const long LeafOtherSignalingCost = 16;
 
     /// <summary>
     /// Real (if approximate) rate-distortion partition decision, replacing the old pure-variance flatness
@@ -414,19 +434,45 @@ internal static class Av1TileEncoder
             return cached;
         }
 
-        long costLeaf = EstimateLumaCost(s, r, c, sizeMi) + LeafSignalingCost;
+        long otherLeafBits = EstimateLumaCost(s, r, c, sizeMi) + LeafOtherSignalingCost;
 
         (bool KeepAsLeaf, long Cost) result;
         if (sizeMi == 1)
         {
             // Spec's true 4x4 partition floor (see EncodePartitionForced's sizeMi == 1 case) -- nothing
-            // smaller to compare against, so a 4x4 node is always kept as a leaf.
-            result = (true, costLeaf);
+            // smaller to compare against, so a 4x4 node is always kept as a leaf, and (like
+            // EncodePartitionForced's own sizeMi == 1 case) no partition symbol is read/written at this size
+            // at all (spec §5.11.4 gates the read on bSize >= BLOCK_8X8), so unlike the sizeMi > 1 case below,
+            // no partition-symbol bit cost applies here either.
+            result = (true, otherLeafBits);
         }
         else
         {
+            // Real partition-symbol bit costs (Av1SymbolEncoder.EstimateSymbolCost), replacing the old flat
+            // LeafSignalingCost/SplitSignalingCost stand-ins for this component specifically -- computed
+            // against the same context-selected CDF EncodePartitionForced's real write uses for this same
+            // (r, c, sizeMi) node (see PartitionContext), so unlike those old flat constants this actually
+            // reflects how skewed this position's real, already-adapted partition CDF is (a region whose
+            // neighbors were mostly split costs more to signal PARTITION_NONE here than one whose neighbors
+            // mostly weren't, and vice versa for PARTITION_SPLIT) instead of charging every node the same
+            // amount regardless of context.
+            int bSize = BlockSizeFromSizeMi(sizeMi);
+            int ctx = PartitionContext(s, r, c, bSize, out int bsl);
+            var partitionCdf = bsl switch
+            {
+                1 => s.Cdf.PartitionW8[ctx],
+                2 => s.Cdf.PartitionW16[ctx],
+                3 => s.Cdf.PartitionW32[ctx],
+                _ => s.Cdf.PartitionW64[ctx],
+            };
+
+            long noneBits = Av1SymbolEncoder.EstimateSymbolCost(partitionCdf, Av1PartitionType.None);
+            long splitBits = Av1SymbolEncoder.EstimateSymbolCost(partitionCdf, Av1PartitionType.Split);
+
+            long costLeaf = otherLeafBits + noneBits;
+
             int half = sizeMi / 2;
-            long costSplit = SplitSignalingCost
+            long costSplit = splitBits
                 + DecidePartition(s, r, c, half).Cost
                 + DecidePartition(s, r, c + half, half).Cost
                 + DecidePartition(s, r + half, c, half).Cost
@@ -494,7 +540,7 @@ internal static class Av1TileEncoder
                 Av1IntraPrediction.BuildEdges(above, left, s.SourceY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
                 Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.YWidth - 1, s.YHeight - 1, x, y, bitDepth: 8);
 
-                long cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels);
+                long cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
                 if (cost < bestCost)
                 {
                     bestCost = cost;
@@ -644,32 +690,67 @@ internal static class Av1TileEncoder
     };
 
     /// <summary>
-    /// Phase D technique 4: a rate proxy for candidate mode/angle/filter-intra comparison, replacing raw SSE
-    /// for lossless leaves. SSE only approximates entropy-coded bit cost -- for a lossless coder specifically
-    /// (where distortion is always exactly zero once the real residual is added; the only real objective is
-    /// minimizing bits), a proxy computed in the *transform domain* the entropy coder actually sees is a
-    /// closer stand-in than raw spatial-domain squared error: this sums a per-coefficient rate estimate
-    /// (<see cref="CoefficientCost"/>) over every 4x4 Walsh-Hadamard coefficient (<see cref="Av1ForwardWht"/>,
-    /// the real lossless transform -- see <see cref="EncodeLosslessLumaResidual"/>'s identical per-sub-block
-    /// transform) the candidate's residual would actually produce, not a full entropy-cost simulation (no
-    /// CDF/context modeling), but materially closer to true bit cost than SSE: AV1's coefficient entropy
-    /// coding costs near-zero for exact zeros and grows roughly linearly for small magnitudes but only
-    /// logarithmically for large ones (base-range + br-loop + Exp-Golomb tail, see
-    /// <see cref="CoefficientCost"/>'s remarks), neither of which SSE (quadratic, and blind to whether a
-    /// candidate's errors cluster into few zero-heavy 4x4 blocks or spread evenly) captures. Only used for
-    /// lossless -- non-lossless leaves use DCT, not WHT, so this proxy wouldn't match what they actually
-    /// entropy-code; SSE remains the (already-established, still-correct) proxy there.
+    /// Real <c>D + lambda*R</c> Lagrangian RD cost (<see cref="Av1RdCost"/>) for one mode/angle/filter-intra
+    /// candidate, replacing two previous proxies: non-lossless candidates used raw SSE with no rate term at
+    /// all, and lossless candidates a hand-tuned WHT-coefficient-magnitude/log2 proxy that only approximated
+    /// real bit cost (no CDF/context modeling). Both now share one real bit count instead: this actually
+    /// forward-transforms, quantizes, and trial-costs (<see cref="Av1TrialSymbolSink"/>, via
+    /// <see cref="Av1CoefficientWriter.WriteCoeffs"/> -- the exact same context-derivation code the real
+    /// bitstream writer uses, so this is a real bit count, not an approximation of one) the residual this
+    /// candidate's prediction would actually produce.
     ///
-    /// <para>Takes an explicit <paramref name="source"/>/<paramref name="planeWidth"/> rather than always
-    /// reading <see cref="TileState.SourceY"/>/<see cref="TileState.YWidth"/>, so the same proxy can score
-    /// chroma (<see cref="TileState.SourceU"/>/<see cref="TileState.SourceV"/>) candidates during the UV mode
-    /// search (see <see cref="SearchUvMode"/>) -- the cost math itself doesn't care which plane it's fed.</para>
+    /// <para>Non-lossless: forward DCT (<see cref="Av1ForwardTransform"/>) + quantize at
+    /// <see cref="TileState.BaseQIdx"/>, cost = <c>sse + lambda*bits</c> (<see cref="Av1RdCost.CombineCost"/>).
+    /// One caveat for chroma: this always transforms as DCT_DCT regardless of which <paramref name="ptype"/>
+    /// 1 candidate <c>mode</c> is being scored, even though <c>EncodeChromaRegion</c>'s real (non-lossless)
+    /// write later forward-transforms with a mode-dependent DCT/ADST-mixed type once a <c>uv_mode</c> is
+    /// actually chosen (<c>Av1TxTypeTables.ModeToTxfm</c>, added for the real write path by PR #64) -- luma's
+    /// tx_type is always DCT_DCT regardless of mode already (see <c>EncodeLeaf</c>'s <c>WriteLumaTxType</c>
+    /// remarks), so this only approximates chroma. Real per-candidate transform-*type* search (this
+    /// encoder's next RD-search phase, see the project plan) will let this also select the type each
+    /// candidate's own mode would actually use; until then, a uniform DCT_DCT rate estimate still ranks
+    /// candidates by real residual-energy-driven bit cost, just not necessarily the exact type each will
+    /// finally use -- good enough for relative ranking, not for predicting the exact final byte count.</para>
+    ///
+    /// <para>Lossless: forward WHT (<see cref="Av1ForwardWht"/>, the real lossless transform -- see
+    /// <see cref="EncodeLosslessLumaResidual"/>'s identical per-4x4-sub-block transform) + quantize at
+    /// <c>baseQIdx == 0</c> (an exact identity, not a source of loss or extra bits), summing real bits across
+    /// every 4x4 sub-block. Distortion is always exactly zero once a lossless candidate is really committed
+    /// (every sub-block reconstructs bit-exactly), so the cost is bits alone (<see cref="Av1RdCost.CombineCost"/>
+    /// called with <c>sse: 0, lambda: 1.0</c> -- not <see cref="TileState.Lambda"/>, which is 0 for lossless,
+    /// meaning "don't weigh a meaningless zero-distortion term", the opposite of what's needed here).</para>
+    ///
+    /// <para>Both branches reseed <see cref="TileState.ScratchCoeffCtx"/> from the real, already-committed
+    /// neighbor context (<paramref name="realCtx"/>) before trial-costing, mutate only the scratch copy
+    /// (<c>updateContext: true</c> against scratch, matching real <c>WriteCoeffs</c> so a multi-sub-block
+    /// lossless candidate's own later sub-blocks see its own earlier sub-blocks' context, exactly like a real
+    /// encode would), and never write back to <paramref name="realCtx"/> itself -- a candidate that might not
+    /// even be chosen must never leave a trace a later, real leaf's context lookup could read (see
+    /// <see cref="Av1CoefficientWriter.PlaneContext.SeedFrom"/>'s remarks). This is the same "estimate from
+    /// real, already-committed neighbors; not-yet-encoded siblings use safe defaults" posture
+    /// <see cref="DecidePartition"/>'s own remarks already document for the pixel data (<see cref="TileState.SourceY"/>
+    /// vs <see cref="TileState.ReconY"/>) -- context estimation inherits the identical approximation for the
+    /// identical reason.</para>
+    ///
+    /// <para>Takes an explicit <paramref name="source"/>/<paramref name="planeWidth"/> (rather than always
+    /// reading <see cref="TileState.SourceY"/>/<see cref="TileState.YWidth"/>) and <paramref name="ptype"/>/<paramref name="realCtx"/>,
+    /// so the same cost function scores luma (<c>ptype: 0</c>, <see cref="TileState.YCoeffCtx"/>) and chroma
+    /// (<c>ptype: 1</c>, <see cref="TileState.UCoeffCtx"/>/<see cref="TileState.VCoeffCtx"/>) candidates alike
+    /// during the UV mode search (see <see cref="SearchUvMode"/>).</para>
     /// </summary>
-    private static long ComputeCandidateCost(TileState s, int[] source, int planeWidth, int[] pred, int x, int y, int sizePixels)
+    private static long ComputeCandidateCost(TileState s, int[] source, int planeWidth, int[] pred, int x, int y, int sizePixels, int ptype, Av1CoefficientWriter.PlaneContext realCtx)
     {
+        int x4 = x >> 2;
+        int y4 = y >> 2;
+        var scratch = s.ScratchCoeffCtx;
+        var trial = s.TrialSink;
+        int[] coeff = s.Coeff;
+        int[] levels = s.Levels;
+
         if (!s.Lossless)
         {
             long sse = 0;
+            int[] residual = s.Residual;
             for (int i = 0; i < sizePixels; i++)
             {
                 int rowBase = ((y + i) * planeWidth) + x;
@@ -678,15 +759,26 @@ internal static class Av1TileEncoder
                 {
                     int diff = source[rowBase + j] - pred[predRowBase + j];
                     sse += (long)diff * diff;
+                    residual[(i * sizePixels) + j] = diff;
                 }
             }
 
-            return sse;
+            Av1ForwardTransform.Forward2D(residual, coeff, sizePixels);
+            Av1ForwardQuantizer.Quantize(coeff, levels, sizePixels, s.BaseQIdx);
+
+            int w4 = sizePixels >> 2;
+            scratch.SeedFrom(realCtx, x4, w4, y4, w4);
+            trial.Reset();
+            Av1CoefficientWriter.WriteCoeffs(trial, s.Cdf, levels, sizePixels, ptype, x4, y4, scratch, writeLumaTxType: null, updateContext: true);
+
+            return Av1RdCost.CombineCost(sse, trial.Bits, s.Lambda);
         }
 
-        long cost = 0;
-        Span<int> residual = stackalloc int[16];
-        Span<int> coeff = stackalloc int[16];
+        int leafW4 = sizePixels >> 2;
+        scratch.SeedFrom(realCtx, x4, leafW4, y4, leafW4);
+        trial.Reset();
+        int[] subResidual = s.Residual;
+
         for (int by = 0; by < sizePixels; by += 4)
         {
             for (int bx = 0; bx < sizePixels; bx += 4)
@@ -697,73 +789,20 @@ internal static class Av1TileEncoder
                     int predRowBase = ((by + i) * sizePixels) + bx;
                     for (int j = 0; j < 4; j++)
                     {
-                        residual[(i * 4) + j] = source[rowBase + j] - pred[predRowBase + j];
+                        subResidual[(i * 4) + j] = source[rowBase + j] - pred[predRowBase + j];
                     }
                 }
 
-                Av1ForwardWht.Forward4x4(residual, coeff);
-                for (int k = 0; k < 16; k++)
-                {
-                    cost += CoefficientCost(coeff[k]);
-                }
+                Av1ForwardWht.Forward4x4(subResidual.AsSpan(0, 16), coeff.AsSpan(0, 16));
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+
+                int subX4 = (x + bx) >> 2;
+                int subY4 = (y + by) >> 2;
+                Av1CoefficientWriter.WriteCoeffs(trial, s.Cdf, levels, 4, ptype, subX4, subY4, scratch, writeLumaTxType: null, blockSize: sizePixels, updateContext: true);
             }
         }
 
-        return cost;
-    }
-
-    // Below this magnitude, AV1's real coeff_base symbol (spec §5.11.39, NUM_BASE_LEVELS levels 0..2 plus a
-    // "3-or-more" escape) costs roughly one unit of rate per unit of magnitude -- keeping this proxy's units
-    // identical to a plain L1 sum (its behavior before this constant existed) for every coefficient in this
-    // range preserves this proxy's existing calibration against LeafSignalingCost/SplitSignalingCost/
-    // ApproxDvSignalingMargin for exactly the content (photographic/noisy) those were tuned against, where
-    // per-coefficient magnitudes overwhelmingly stay small. See CoefficientCost's remarks for what changes
-    // above this cap.
-    private const int CoefficientLinearCap = 14;
-
-    /// <summary>
-    /// Rate estimate for one Walsh-Hadamard coefficient, standing in for what its real coeff_base/coeff_br/
-    /// golomb bit cost (spec §5.11.39's <c>coeffs()</c>) would actually be. A plain L1 sum of magnitudes (this
-    /// proxy's original form) implicitly assumes cost grows *linearly* with magnitude forever, but AV1's real
-    /// coefficient coding only grows linearly-ish up to a small base range (<c>NUM_BASE_LEVELS</c> plus the
-    /// <c>COEFF_BASE_RANGE</c> br-loop, roughly <see cref="CoefficientLinearCap"/> here) and then switches to
-    /// an Exp-Golomb tail, whose cost grows only logarithmically with the remaining magnitude -- so a single
-    /// large-magnitude coefficient (the WHT's response to a hard edge crossing the block, e.g. a
-    /// gradient-to-solid-color boundary in screen-content-style graphics) was systematically over-costed
-    /// relative to several small ones summing to the same total magnitude (spread noise, e.g. photographic
-    /// content), even though real AV1 spends far fewer bits on that one large coefficient than on that many
-    /// separately-coded small ones. That mismatch measurably distorted both this leaf's own mode/angle_delta
-    /// search and (via <see cref="EstimateLumaCost"/>) <see cref="DecidePartition"/>'s merge-vs-split
-    /// comparison: a merged leaf whose single global prediction produces one sharp-edge coefficient looked
-    /// artificially expensive next to splitting into quadrants that each avoid it, even when the merge was
-    /// really cheaper once real (sub-linear) entropy cost is accounted for -- see this project's AVIF lossless
-    /// screen-content-size issue for the measured 6-10x-larger-than-PNG regression this under/over-costing
-    /// caused on graphic/screen-content-style images.
-    ///
-    /// <para>Deliberately identity (<c>cost == |coefficient|</c>) below <see cref="CoefficientLinearCap"/>, not
-    /// just "smaller slope everywhere": a from-scratch log-everywhere formula was tried and measurably
-    /// regressed photographic content (where most coefficients are already small and a linear proxy is a
-    /// reasonable stand-in), because it discounted exactly the small-magnitude coefficients that dominate that
-    /// content's real cost too. Keeping the common small-magnitude case exactly as before and only flattening
-    /// growth past the point where AV1's own coding scheme itself flattens targets the graphic-content
-    /// regression without disturbing the already-correct photographic-content behavior.</para>
-    /// </summary>
-    private static long CoefficientCost(int coefficient)
-    {
-        int magnitude = Math.Abs(coefficient);
-        if (magnitude <= CoefficientLinearCap)
-        {
-            return magnitude;
-        }
-
-        // Exp-Golomb-shaped tail: spec's golomb_length_bit_count for a remaining value roughly doubles in
-        // cost every time it doubles in magnitude, i.e. cost grows with floor(log2(.)) -- BitOperations.Log2
-        // is that exact integer floor, avoiding floating point in a value that only ever influences RDO
-        // comparisons (never bitstream correctness) but should still stay bit-for-bit deterministic across
-        // platforms. Scaled by a small integer factor (rather than 1:1) so the tail's per-doubling cost
-        // increment stays comparable in scale to a few units of this proxy's linear region, not sub-1 noise.
-        int tail = magnitude - CoefficientLinearCap;
-        return CoefficientLinearCap + (4 * (long)System.Numerics.BitOperations.Log2((uint)tail + 1));
+        return Av1RdCost.CombineCost(0, trial.Bits, 1.0);
     }
 
     /// <summary>
@@ -823,11 +862,11 @@ internal static class Av1TileEncoder
             {
                 Av1IntraPrediction.BuildEdges(above, left, s.ReconU!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
                 Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaWidth - 1, s.ChromaHeight - 1, cx, cy, bitDepth: 8);
-                long cost = ComputeCandidateCost(s, s.SourceU!, s.ChromaWidth, pred, cx, cy, chromaSizePixels);
+                long cost = ComputeCandidateCost(s, s.SourceU!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.UCoeffCtx!);
 
                 Av1IntraPrediction.BuildEdges(above, left, s.ReconV!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
                 Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaWidth - 1, s.ChromaHeight - 1, cx, cy, bitDepth: 8);
-                cost += ComputeCandidateCost(s, s.SourceV!, s.ChromaWidth, pred, cx, cy, chromaSizePixels);
+                cost += ComputeCandidateCost(s, s.SourceV!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.VCoeffCtx!);
 
                 if (cost < bestCost)
                 {
@@ -922,7 +961,7 @@ internal static class Av1TileEncoder
                 Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
                 Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.YWidth - 1, s.YHeight - 1, x, y, bitDepth: 8);
 
-                long cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels);
+                long cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
 
                 if (cost < bestCost)
                 {
@@ -950,7 +989,7 @@ internal static class Av1TileEncoder
                 Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
                 Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, Av1IntraMode.DcPred, availL, availU, useFilterIntra: true, filterIntraMode: filterMode, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth, s.YWidth - 1, s.YHeight - 1, x, y, bitDepth: 8);
 
-                long cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels);
+                long cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
 
                 if (cost < bestCost)
                 {
@@ -1636,7 +1675,7 @@ internal static class Av1TileEncoder
     {
         var pred = s.BestPred;
         Av1InterPrediction.PredictIntrabc(pred, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, mvRow, mvCol, subX: 0, subY: 0, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
-        return ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels);
+        return ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
     }
 
     /// <summary>
