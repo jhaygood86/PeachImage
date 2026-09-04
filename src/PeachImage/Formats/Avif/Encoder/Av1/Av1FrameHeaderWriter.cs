@@ -41,7 +41,18 @@ internal static class Av1FrameHeaderWriter
     /// bits are written (both are unconditionally absent from the bitstream at coded-lossless, not merely
     /// zero-valued, again mirroring the decoder's short-circuit).
     /// </param>
-    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false)
+    /// <param name="loopFilterLevel">
+    /// The deblocking filter level (spec's <c>loop_filter_level[0]</c>/<c>[1]</c>, and, when this frame has
+    /// chroma, also <c>[2]</c>/<c>[3]</c> -- this encoder searches and signals one shared level across all
+    /// four rather than tuning luma/chroma independently, a v1 simplification real encoders typically refine
+    /// further) chosen by <see cref="Av1InLoopFilterSearch"/>'s RD search over the encoder's own local
+    /// reconstruction. 0 (the default) reproduces this method's previous always-off behavior exactly --
+    /// <paramref name="loopFilterLevel"/> is silently ignored (never written) when <paramref name="lossless"/>
+    /// is <see langword="true"/>, since <c>loop_filter_params()</c> is entirely absent from the bitstream at
+    /// coded-lossless regardless of what value would otherwise have been chosen (see <see cref="Write"/>'s own
+    /// <paramref name="lossless"/> remarks).
+    /// </param>
+    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false, int loopFilterLevel = 0)
     {
         if (lossless)
         {
@@ -122,9 +133,10 @@ internal static class Av1FrameHeaderWriter
         // loop_filter_params() is entirely absent from the bitstream when codedLossless (see
         // Av1FrameHeader.ParseLoopFilterParams's `codedLossless || allowIntrabc` short-circuit) -- not just
         // zero-valued, so these bits must be skipped, not merely written as zero, when lossless.
+        int writtenLevel0 = 0, writtenLevel1 = 0, writtenLevel2 = 0, writtenLevel3 = 0;
         if (!lossless)
         {
-            WriteLoopFilterParams(writer);
+            (writtenLevel0, writtenLevel1, writtenLevel2, writtenLevel3) = WriteLoopFilterParams(writer, loopFilterLevel, numPlanes);
         }
 
         // cdef_params()/lr_params(): seq.EnableCdef == false / seq.EnableRestoration == false short-circuit
@@ -192,7 +204,7 @@ internal static class Av1FrameHeaderWriter
             AllLossless = lossless,
             LoopFilter = new Av1LoopFilterParams
             {
-                Level = [0, 0, 0, 0],
+                Level = [writtenLevel0, writtenLevel1, writtenLevel2, writtenLevel3],
                 Sharpness = 0,
                 DeltaEnabled = false,
                 RefDeltas = [1, 0, 0, 0, -1, 0, -1, -1],
@@ -220,13 +232,35 @@ internal static class Av1FrameHeaderWriter
         };
     }
 
-    /// <summary><c>loop_filter_params()</c> (spec §5.9.11) write-side, always signalling every filter level off.</summary>
-    private static void WriteLoopFilterParams(Av1BitWriter writer)
+    /// <summary>
+    /// <c>loop_filter_params()</c> (spec §5.9.11) write-side. <paramref name="level"/> is written identically
+    /// into all four <c>loop_filter_level</c> slots (Y-vertical, Y-horizontal, U, V) -- this encoder's RD
+    /// search (<see cref="Av1InLoopFilterSearch"/>) picks one shared level rather than tuning luma/chroma
+    /// independently, a v1 simplification. <c>loop_filter_delta_enabled</c> is always written
+    /// <see langword="false"/>: this encoder's <c>RefDeltas</c>/<c>ModeDeltas</c> never deviate from the spec
+    /// defaults <see cref="Write"/> always returns, so there's nothing for delta signaling to express.
+    /// Returns the four written levels for <see cref="Write"/>'s returned <see cref="Av1FrameHeader"/> to
+    /// mirror exactly (level[2]/level[3] are 0, matching what's actually on the wire, whenever
+    /// <paramref name="numPlanes"/> == 1 or <paramref name="level"/> == 0 -- the same
+    /// <c>numPlanes &gt; 1 &amp;&amp; (level0 != 0 || level1 != 0)</c> condition <c>Av1FrameHeader.ParseLoopFilterParams</c>
+    /// gates that read on).
+    /// </summary>
+    private static (int Level0, int Level1, int Level2, int Level3) WriteLoopFilterParams(Av1BitWriter writer, int level, int numPlanes)
     {
-        writer.WriteBits(0, 6); // loop_filter_level[0]
-        writer.WriteBits(0, 6); // loop_filter_level[1]
-        // Both levels are 0, so the level[2]/level[3] read is never reached regardless of plane count.
+        writer.WriteBits((uint)level, 6); // loop_filter_level[0]
+        writer.WriteBits((uint)level, 6); // loop_filter_level[1]
+
+        int level2 = 0, level3 = 0;
+        if (numPlanes > 1 && level != 0)
+        {
+            writer.WriteBits((uint)level, 6); // loop_filter_level[2]
+            writer.WriteBits((uint)level, 6); // loop_filter_level[3]
+            level2 = level;
+            level3 = level;
+        }
+
         writer.WriteBits(0, 3); // loop_filter_sharpness
         writer.WriteFlag(false); // loop_filter_delta_enabled
+        return (level, level, level2, level3);
     }
 }
