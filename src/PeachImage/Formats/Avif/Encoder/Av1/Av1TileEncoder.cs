@@ -21,12 +21,12 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// search (13 candidate modes x 7 angle_delta values for the 8 directional ones -- forced to just angle_delta
 /// 0 for a 4x4 leaf, spec's own floor for signaling angle_delta at all, see <see cref="EncodeLeaf"/>'s
 /// <c>angleDeltaAllowed</c> remarks -- plus 5 FILTER_INTRA candidates when DC_PRED wins -- see
-/// <see cref="EncodeLeaf"/>). Lossless chroma gets the same
-/// real directional/angle search (<see cref="SearchUvMode"/>); non-lossless chroma still always uses DC_PRED,
-/// since non-lossless chroma's transform type is mode-dependent (<c>Av1TxTypeTables.ModeToTxfm</c>) and this
-/// encoder's non-lossless chroma residual path only ever forward-transforms with DCT -- see
-/// <see cref="EncodeLeaf"/>'s <c>SearchUvMode</c> call site remarks. CFL is never used for either (spec-illegal
-/// for this encoder's lossless-always-4:4:4 RGB output, and simply unimplemented for non-lossless).
+/// <see cref="EncodeLeaf"/>). Chroma gets the same real directional/angle search too
+/// (<see cref="SearchUvMode"/>), for both lossless and non-lossless: non-lossless chroma's transform type is
+/// mode-dependent (<c>Av1TxTypeTables.ModeToTxfm</c>), so <see cref="EncodeChromaRegion"/> forward-transforms
+/// with the matching DCT/ADST-mixed <c>Av1ForwardTransform</c> operator for whatever <c>uv_mode</c> the search
+/// picks, rather than always DCT -- see that method's remarks. CFL is never used (spec-illegal for this
+/// encoder's lossless-always-4:4:4 RGB output, and simply unimplemented for non-lossless).
 ///
 /// <para>Requires the luma plane's width/height to already be padded to a multiple
 /// of 64 (the caller's job -- see <c>Av1FrameEncoder</c>) so every superblock is a full, in-bounds 64x64
@@ -340,17 +340,16 @@ internal static class Av1TileEncoder
         // DecidePartition/EstimateLumaCost (a real WHT-cost-based RD partition search, Phase D technique 6)
         // is live for lossless, now all the way down to spec's true 4x4 partition floor (sizeMi == 1, see
         // above) rather than stopping at 8x8 -- see DecidePartition's own remarks for why going smaller
-        // matters for hard-edged/screen-content-style graphics. Building the original (8x8-floor) version of
-        // this search surfaced a real bitstream-desync bug, root-caused to IntraBC's *approximate*-match
-        // residual path (EncodeIntrabcResidual) specifically for a merged (>8x8) coding block: that path
-        // predicts the whole coding block in one Av1InterPrediction.PredictIntrabc call and then slices it
-        // per 4x4 sub-block, whereas a real AV1 decoder's transform_block() calls PredictIntrabc fresh per
-        // sub-block (spec §5.11.35) -- for a multi-sub-block IntraBC block those two are not always
-        // equivalent. IntraBC's *exact*-match path (skip = 1, no residual, verified byte-identical to source
-        // before use) has no such per-sub-block prediction step and is unaffected; the approximate path
-        // stays restricted to single-sub-block (sizeMi <= 2, i.e. now including the new 4x4 leaf, which is
-        // trivially safe: n == 1, there is no second sub-block for the one-shot prediction to disagree with)
-        // leaves -- see FindApproximateIntrabcMatch's own sizeMi <= 2 gate for where this is enforced.
+        // matters for hard-edged/screen-content-style graphics. This includes leaves that end up using
+        // IntraBC's approximate-match residual path (EncodeIntrabcResidual), which predicts every plane fresh
+        // per 4x4 sub-block from progressively-reconstructed state, matching Av1TileDecoder.TransformBlock's
+        // own per-sub-block PredictIntrabc call (spec §5.11.35) for any leaf size -- see
+        // EncodeIntrabcResidual's remarks. That path used to be gated to single-sub-block (sizeMi <= 2)
+        // leaves specifically because it predicted a merged coding block in one whole-block PredictIntrabc
+        // call instead, which could desync from a real decoder's per-sub-block prediction for a genuinely
+        // multi-sub-block IntraBC block; IntraBC's *exact*-match path (skip = 1, no residual, verified
+        // byte-identical to source before use) never had this problem, since it carries no per-sub-block
+        // prediction step at all.
         if (s.Lossless && DecidePartition(s, r, c, sizeMi).KeepAsLeaf)
         {
             s.Symbols.WriteSymbol(partitionCdf, Av1PartitionType.None);
@@ -998,20 +997,16 @@ internal static class Av1TileEncoder
         // FindApproximateIntrabcMatch's remarks). Only tried when it wasn't already an exact match and the
         // real intra search above found something to beat.
         //
-        // sizeMi <= 2: root-caused bitstream-desync bug -- EncodeIntrabcResidual predicts this leaf's whole
-        // region in one Av1InterPrediction.PredictIntrabc call and then slices the result per 4x4 sub-block,
-        // but a real AV1 decoder's transform_block() (spec §5.11.35) calls PredictIntrabc fresh for every
-        // sub-block. The two are equivalent for a single-sub-block (8x8-floor, sizeMi <= 2) leaf, which is
-        // the only shape this encoder ever produced before the partition-tree RDO search (DecidePartition)
-        // could merge leaves bigger than 8x8 -- confirmed by isolating this exact leaf (found via a per-leaf
-        // encode/decode symbol-count comparison) and bisecting which of its writes was responsible: disabling
-        // this path alone (leaving intrabcExact -- which has no per-sub-block prediction step -- enabled)
-        // resolved the SmoothedNoise_Lossless_RoundTripsExactly regression. Re-enabling this for sizeMi > 2
-        // needs EncodeIntrabcResidual to predict per-sub-block from progressively updated ReconY/U/V, the
-        // same way EncodeLosslessLumaResidual/EncodeChromaRegion already do for the real-intra case.
+        // This used to be gated to sizeMi <= 2 (single-sub-block leaves only): EncodeIntrabcResidual
+        // predicted a merged coding block's whole region in one Av1InterPrediction.PredictIntrabc call and
+        // then sliced the result per 4x4 sub-block, which could desync from a real decoder's transform_block()
+        // (spec §5.11.35, which calls PredictIntrabc fresh per sub-block from progressively-reconstructed
+        // state) for a genuinely multi-sub-block IntraBC block. EncodeIntrabcResidual now predicts per
+        // sub-block the same way -- see its remarks for detail. IntraBC's *exact*-match path (intrabcExact
+        // above) never had this problem, since it has no per-sub-block prediction step at all.
         int approxMvRow = 0;
         int approxMvCol = 0;
-        bool intrabcApprox = !intrabcExact && intrabcStructurallyPresent && sizeMi <= 2
+        bool intrabcApprox = !intrabcExact && intrabcStructurallyPresent
             && FindApproximateIntrabcMatch(s, r, c, sizeMi, bestCost, out approxMvRow, out approxMvCol);
         if (intrabcApprox)
         {
@@ -1022,20 +1017,19 @@ internal static class Av1TileEncoder
         bool usedIntrabc = intrabcExact || intrabcApprox;
 
         // Real cost-based uv_mode/uv_angle_delta search (see SearchUvMode's remarks) -- replaces the old
-        // hardcoded DC_PRED now that lossless chroma is full-resolution 4:4:4, carrying as much real
-        // edge/texture content as luma. Restricted to lossless: non-lossless chroma's transform type is
-        // mode-dependent (spec's Mode_To_Txfm, Av1TxTypeTables.ModeToTxfm -- Av1TileDecoder.ComputeTxType
-        // derives ADST/mixed transforms for every uv_mode except DC_PRED, which is the only one this
-        // encoder's non-lossless chroma forward path -- always a plain DCT, EncodeChromaRegion's non-lossless
-        // branch -- actually implements), so signaling any other uv_mode there would desync the decoder's
-        // inverse transform choice from what was really forward-transformed; DC_PRED's ModeToTxfm entry is
-        // DctDct, which is exactly why hardcoding it was safe before. Lossless never hits this: AV1 forces
-        // TX_4X4/WHT unconditionally at coded-lossless regardless of prediction mode (ComputeTxType's own
-        // lossless short-circuit), so uv_mode has no bearing on transform choice there. Implementing real
-        // per-mode chroma transforms for non-lossless is a larger, separate change (see the project's AVIF
-        // encode intra-mode-search issue) -- out of scope here, which targets lossless size specifically.
+        // hardcoded DC_PRED, for both lossless and non-lossless chroma. Non-lossless chroma's transform type
+        // is mode-dependent (spec's Mode_To_Txfm, Av1TxTypeTables.ModeToTxfm -- Av1TileDecoder.ComputeTxType
+        // derives ADST/mixed transforms for every uv_mode except DC_PRED), which used to make a real search
+        // unsafe here: EncodeChromaRegion's non-lossless forward path only ever forward-transformed with
+        // plain DCT, so signaling any other uv_mode would have desynced the decoder's inverse transform
+        // choice from what was really forward-transformed. EncodeChromaRegion now forward-transforms with
+        // Av1ForwardTransform's mode-dependent AdstDct/DctAdst/AdstAdst operators (matching ModeToTxfm) for
+        // any non-DC_PRED uvMode, so that's no longer a correctness constraint -- see EncodeChromaRegion's
+        // own remarks. Lossless never had this constraint: AV1 forces TX_4X4/WHT unconditionally at
+        // coded-lossless regardless of prediction mode (ComputeTxType's own lossless short-circuit), so
+        // uv_mode has no bearing on transform choice there.
         //
-        // Also skipped when neither neighbor is available (the frame's very first leaf) or !hasChroma/
+        // Still skipped when neither neighbor is available (the frame's very first leaf) or !hasChroma/
         // usedIntrabc (spec's use_intrabc branch replaces yMode/uv_mode signaling entirely -- see the
         // intrabc branch below, which leaves uv_mode at its DC_PRED default instead). With no real edge
         // data on either side, every candidate predicts from the same synthetic default fill, so a
@@ -1045,7 +1039,7 @@ internal static class Av1TileEncoder
         // to base a directional choice on.
         int bestUvMode = Av1IntraMode.DcPred;
         int bestUvAngleDelta = 0;
-        if (s.Lossless && hasChroma && !usedIntrabc && (availU || availL))
+        if (hasChroma && !usedIntrabc && (availU || availL))
         {
             (bestUvMode, bestUvAngleDelta) = SearchUvMode(s, r, c, x, y, sizeMi, availU, availL);
         }
@@ -1390,7 +1384,15 @@ internal static class Av1TileEncoder
                 s.YModes[idx] = leafYMode;
                 s.UvModes[idx] = leafUvMode;
                 s.MiSizes[idx] = bSize;
-                s.Skips[idx] = usedPalette || usedIntrabc;
+                // Must mirror the actual written skip bit (usedPalette || intrabcExact, see above -- not
+                // usedIntrabc), which is 0 for an approximate-match IntraBC leaf (it carries a real residual).
+                // Av1TileDecoder stores its own Skips-equivalent grid from the literally decoded skip bit
+                // (_skips[idx] = _skip), so using usedIntrabc here diverges from the decoder's neighbor-skip
+                // context for any later leaf bordering this one whenever intrabcApprox (not intrabcExact) is
+                // what made usedIntrabc true -- silently latent while approximate-match IntraBC leaves were
+                // rare (this encoder's original 8x8-floor rarely picked one), but common enough once
+                // partition-tree RDO's larger leaves increase how often it's chosen to desync real content.
+                s.Skips[idx] = usedPalette || intrabcExact;
                 s.PaletteSizesY[idx] = usedPalette ? paletteSizeY : 0;
                 s.PaletteSizesUV[idx] = usedPalette ? paletteSizeUV : 0;
                 int colorBase = idx * 8;
@@ -1647,14 +1649,18 @@ internal static class Av1TileEncoder
     /// <c>qindex &lt;= 0</c> short-circuit in <c>TransformType</c> means no <c>tx_type</c> symbol is ever
     /// read either way (matching <c>writeLumaTxType: null</c> below) -- this leaf looks, to the decoder, like
     /// any other lossless coding block with a nonzero residual, just with a different prediction source.
-    /// Unlike intra prediction, IntraBC's predictor doesn't depend on progressively-reconstructed neighbor
-    /// pixels within this leaf (it reads from an entirely different, already-fully-encoded region), so the
-    /// whole leaf's prediction is produced in one call per plane rather than rebuilt per 4x4 sub-block.
+    /// Unlike whole-leaf intra prediction's own *search/estimate* step (which legitimately approximates by
+    /// reading <see cref="TileState.SourceY"/> up front -- see <see cref="DecidePartition"/>'s remarks),
+    /// this real residual encode predicts every plane fresh per 4x4 sub-block from the progressively-updated
+    /// <see cref="TileState.ReconY"/>/<see cref="TileState.ReconU"/>/<see cref="TileState.ReconV"/>, exactly
+    /// mirroring <c>Av1TileDecoder.TransformBlock</c>'s own per-sub-block <c>PredictIntrabc</c> call (spec
+    /// §5.11.35) -- this is what makes the path correct for a merged (&gt;8x8) leaf, not just a
+    /// single-sub-block one (see the now-removed <c>sizeMi &lt;= 2</c> gate's history at the call site below
+    /// for why this mattered).
     /// </summary>
     private static void EncodeIntrabcResidual(TileState s, int r, int c, int x, int y, int mvRow, int mvCol, bool hasChroma, int sizePixels)
     {
         var pred = s.Pred;
-        Av1InterPrediction.PredictIntrabc(pred, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, mvRow, mvCol, subX: 0, subY: 0, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
 
         int n = sizePixels / 4;
         for (int dr = 0; dr < n; dr++)
@@ -1666,11 +1672,21 @@ internal static class Av1TileEncoder
                 int subR = r + dr;
                 int subC = c + dc;
 
+                // Predicted fresh per 4x4 sub-block from s.ReconY, which by now already carries this same
+                // leaf's own earlier (raster-order) sub-blocks' reconstructed pixels -- matching
+                // Av1TileDecoder.TransformBlock's per-sub-block PredictIntrabc call exactly (spec §5.11.35),
+                // not a stale whole-leaf snapshot taken before any of this leaf's own pixels existed.
+                // mvRow/mvCol are unchanged per call (the coding block's one DV); only startX/startY move.
+                // The trailing 0, 0 are PredictIntrabc's own chroma-subsampling-shift parameters (always 0
+                // for luma) -- passed positionally here, not as subX:/subY:, since this loop already has
+                // locals named subX/subY for the sub-block's pixel position.
+                Av1InterPrediction.PredictIntrabc(pred, s.ReconY, s.YWidth, subX, subY, 4, 4, mvRow, mvCol, 0, 0, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
+
                 var residual = s.Residual;
                 for (int i = 0; i < 4; i++)
                 {
                     int rowBase = ((subY + i) * s.YWidth) + subX;
-                    int predRowBase = ((dr * 4) + i) * sizePixels + (dc * 4);
+                    int predRowBase = i * 4;
                     for (int j = 0; j < 4; j++)
                     {
                         residual[(i * 4) + j] = s.SourceY[rowBase + j] - pred[predRowBase + j];
@@ -1684,7 +1700,7 @@ internal static class Av1TileEncoder
 
                 for (int i = 0; i < 4; i++)
                 {
-                    Array.Copy(pred, (((dr * 4) + i) * sizePixels) + (dc * 4), s.ReconY, ((subY + i) * s.YWidth) + subX, 4);
+                    Array.Copy(pred, i * 4, s.ReconY, ((subY + i) * s.YWidth) + subX, 4);
                 }
 
                 Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: sizePixels);
@@ -1712,7 +1728,6 @@ internal static class Av1TileEncoder
         })
         {
             var cpred = s.BestPred;
-            Av1InterPrediction.PredictIntrabc(cpred, recon, s.ChromaWidth, cx, cy, chromaSize, chromaSize, mvRow, mvCol, subXc, subXc, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
 
             for (int dr = 0; dr < chromaN; dr++)
             {
@@ -1723,11 +1738,16 @@ internal static class Av1TileEncoder
                     int chromaR4 = (s.Chroma444 ? r : r / 2) + dr;
                     int chromaC4 = (s.Chroma444 ? c : c / 2) + dc;
 
+                    // Same fix as the luma loop above: predicted fresh per 4x4 sub-block from recon
+                    // (progressively updated by this same leaf's own earlier sub-blocks), not once for the
+                    // whole chroma region.
+                    Av1InterPrediction.PredictIntrabc(cpred, recon, s.ChromaWidth, subCx, subCy, 4, 4, mvRow, mvCol, subXc, subXc, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
+
                     var residual = s.Residual;
                     for (int i = 0; i < 4; i++)
                     {
                         int rowBase = ((subCy + i) * s.ChromaWidth) + subCx;
-                        int predRowBase = (((dr * 4) + i) * chromaSize) + (dc * 4);
+                        int predRowBase = i * 4;
                         for (int j = 0; j < 4; j++)
                         {
                             residual[(i * 4) + j] = source[rowBase + j] - cpred[predRowBase + j];
@@ -1741,7 +1761,7 @@ internal static class Av1TileEncoder
 
                     for (int i = 0; i < 4; i++)
                     {
-                        Array.Copy(cpred, (((dr * 4) + i) * chromaSize) + (dc * 4), recon, ((subCy + i) * s.ChromaWidth) + subCx, 4);
+                        Array.Copy(cpred, i * 4, recon, ((subCy + i) * s.ChromaWidth) + subCx, 4);
                     }
 
                     int chromaBlockSizeArg = chromaN > 1 ? chromaSize : 0;
@@ -2566,8 +2586,20 @@ internal static class Av1TileEncoder
     /// a <c>sizeMi</c>-square grid at luma-identical (unhalved) coordinates. Uses <paramref name="uvMode"/>/
     /// <paramref name="uvAngleDelta"/> (real cost-searched, see <see cref="SearchUvMode"/> -- CFL isn't
     /// implemented, so <paramref name="uvMode"/> is never <see cref="Av1IntraMode.UvCflPred"/>), and follows
-    /// <see cref="TileState.Lossless"/> per sub-block for WHT vs. DCT_DCT exactly like the single-sub-block
+    /// <see cref="TileState.Lossless"/> per sub-block for WHT vs. DCT/ADST exactly like the single-sub-block
     /// case this generalizes did.
+    ///
+    /// <para>Non-lossless forward-transforms with <c>Av1TxTypeTables.ModeToTxfm[uvMode]</c> -- DCT_DCT for
+    /// DC_PRED, one of Av1ForwardTransform's AdstDct/DctAdst/AdstAdst operators for every other mode -- the
+    /// exact same table <c>Av1TileDecoder.ComputeTxType</c> uses to pick its inverse transform for a chroma
+    /// block from <c>_uvMode</c> alone (chroma's <c>tx_type</c> is never itself bitstream-signalled, unlike
+    /// luma's; see <c>writeLumaTxType: null</c> below). Getting this wrong -- forward-transforming with a
+    /// different type than <c>ModeToTxfm[uvMode]</c> implies -- wouldn't just compress worse, it would
+    /// silently desync the decoder's reconstruction from this leaf onward, since the decoder derives its
+    /// inverse transform from the signalled <c>uv_mode</c> with no way to learn otherwise. Lossless instead
+    /// always uses WHT (<see cref="Av1ForwardWht"/>), matching <c>ComputeTxType</c>'s own <c>_lossless</c>
+    /// short-circuit to DCT_DCT/WHT regardless of <c>uv_mode</c> -- see <see cref="TileState.Lossless"/>'s
+    /// remarks.</para>
     ///
     /// <para>Plane must be the outer loop and sub-block position the inner loop -- not the reverse -- to
     /// match spec §5.11.34 <c>residual()</c>'s own <c>for (plane ...) { for (y...) for (x...)
@@ -2578,6 +2610,7 @@ internal static class Av1TileEncoder
     /// </summary>
     private static void EncodeChromaRegion(TileState s, int r, int c, int x, int y, int sizeMi, int uvMode, int uvAngleDelta)
     {
+        int uvTxType = Av1TxTypeTables.ModeToTxfm[uvMode];
         int chromaN = s.Chroma444 ? sizeMi : sizeMi / 2;
         int chromaR4Base = s.Chroma444 ? r : r / 2;
         int chromaC4Base = s.Chroma444 ? c : c / 2;
@@ -2650,7 +2683,7 @@ internal static class Av1TileEncoder
                     }
                     else
                     {
-                        Av1ForwardTransform.Forward2D(residual.AsSpan(0, 16), coeff.AsSpan(0, 16), 4);
+                        Av1ForwardTransform.Forward2D(residual.AsSpan(0, 16), coeff.AsSpan(0, 16), 4, uvTxType);
                     }
 
                     var levels = s.Levels;
@@ -2665,7 +2698,7 @@ internal static class Av1TileEncoder
                     // site for why the argument order matters here (x4 = column, y4 = row) even though it's
                     // unobservable on any square/single-superblock chroma grid.
                     Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null, blockSize: blockSizeArg);
-                    Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, s.Lossless);
+                    Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, s.Lossless, uvTxType);
                     SetBlockDecoded(s, planeIndex, subBlockChromaRow, subBlockChromaCol, true);
                 }
             }

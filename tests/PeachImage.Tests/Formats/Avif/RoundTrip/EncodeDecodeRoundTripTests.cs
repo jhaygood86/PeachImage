@@ -44,6 +44,32 @@ public class EncodeDecodeRoundTripTests
     }
 
     /// <summary>
+    /// Round-trip coverage for issue #60: non-lossless chroma's real directional <c>uv_mode</c> search
+    /// (<c>Av1TileEncoder.SearchUvMode</c>) forward-transforms with a mode-dependent
+    /// <c>Av1ForwardTransform</c> operator (AdstDct/DctAdst/AdstAdst, matching <c>Av1TxTypeTables.ModeToTxfm</c>)
+    /// instead of always DCT_DCT -- getting that wrong desyncs <c>Av1TileDecoder.ComputeTxType</c>'s inverse
+    /// transform choice from what was actually forward-transformed, corrupting every pixel decoded after the
+    /// first affected leaf. <see cref="CreateDiagonalChromaEdgeImage"/> gives U/V real per-plane directional
+    /// detail (diagonal ramps that wrap into hard edges, offset between R and G so chroma isn't just a scaled
+    /// copy of luma's own structure) -- unlike a solid color or an axis-aligned gradient, this is exactly the
+    /// content a directional (non-DC_PRED) <c>uv_mode</c> should win on, so it reliably exercises the new
+    /// forward-transform path rather than leaving every leaf on DC_PRED by chance. A desync would show up
+    /// here as severe, cascading corruption (not just quantization loss), so the PSNR floor is set well above
+    /// what quantization noise alone would ever produce at these quality levels.
+    /// </summary>
+    [Theory]
+    [InlineData(64, 64, 90)]
+    [InlineData(96, 80, 60)] // non-multiple-of-64 + lower quality (coarser quantization stresses the search harder)
+    public void DiagonalChromaEdges_RoundTrips_ViaPublicApi(int width, int height, int quality)
+    {
+        var source = CreateDiagonalChromaEdgeImage(width, height);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = quality });
+
+        AssertPsnrAtLeast(source, decoded, minPsnrDb: 18.0);
+    }
+
+    /// <summary>
     /// Regression test for a coefficient-context bug where <c>Av1CoefficientWriter.WriteCoeffs</c>'s
     /// (x4, y4) arguments were passed as (row, column) instead of (column, row) at the luma and chroma call
     /// sites in <c>Av1TileEncoder</c>. This is silently unobservable whenever the padded coding-block grid
@@ -238,6 +264,92 @@ public class EncodeDecodeRoundTripTests
                     pixels[idx + 1] = (byte)(255 - (col * 255 / (width - 1)));
                     pixels[idx + 2] = (byte)((col * 37) % 256);
                 }
+            }
+        }
+
+        return image;
+    }
+
+    /// <summary>
+    /// Regression test for issue #61: <c>EncodeIntrabcResidual</c> previously predicted a whole merged
+    /// (&gt;8x8) coding block in one <c>Av1InterPrediction.PredictIntrabc</c> call and sliced it per 4x4
+    /// sub-block, diverging from a real decoder's per-sub-block prediction (spec §5.11.35) whenever more than
+    /// one sub-block shared a leaf -- silently masked before the fix by gating
+    /// <c>Av1TileEncoder</c>'s <c>intrabcApprox</c> to single-sub-block (<c>sizeMi &lt;= 2</c>) leaves only.
+    /// Unlike <see cref="RepeatedVerticalStripePattern_Lossless_IntrabcRoundTripsExactlyAndStaysSmall"/>,
+    /// which forces IntraBC's *exact*-match path via a byte-identical repeat (unaffected by this bug, since
+    /// it has no per-sub-block prediction step), this needs the *approximate*-match path
+    /// (<c>Av1TileEncoder.FindApproximateIntrabcMatch</c>) specifically, for a leaf that also merges above
+    /// 8x8. It reuses <see cref="SmoothedNoise_Lossless_RoundTripsExactly"/>'s own two-incommensurate-periods
+    /// content shape (tuned jaggier here so the RD-cost search prefers a merged approximate-match IntraBC
+    /// leaf over splitting further -- confirmed by instrumenting <c>Av1TileEncoder.EncodeLeaf</c> to log
+    /// every <c>intrabcApprox</c> use and observing several fire at <c>sizeMi &gt; 2</c> for this exact image)
+    /// for both a "source" and a "repeat" band, with the repeat band's jitter deliberately offset from the
+    /// source band's so the two are close but never pixel-identical, guaranteeing the byte-exact hash lookup
+    /// (<c>FindIntrabcMatch</c>) can never match it: any IntraBC use for that leaf can only come from the
+    /// approximate search.
+    /// </summary>
+    [Fact]
+    public void SmoothedNoiseRepeat_Lossless_MergedLeafIntrabcApproximateMatchRoundTripsExactly()
+    {
+        var image = CreateSmoothedNoiseWithApproximateIntrabcRepeatImage(width: 384);
+
+        var decoded = EncodeThenDecode(image, new AvifEncoderOptions { Lossless = true });
+
+        Assert.Equal(image.GetPixelSpan().ToArray(), decoded.GetPixelSpan().ToArray());
+    }
+
+    /// <summary>
+    /// 64-row filler (horizontal-stripe, structurally unrelated -- see <see cref="CreateFillerPlusStripePatternImage"/>),
+    /// followed by a 64-row "source" band and a 64-row "repeat" band both built from a jaggier variant of
+    /// <see cref="SmoothedNoise_Lossless_RoundTripsExactly"/>'s own two-incommensurate-periods formula, with
+    /// the repeat band's per-pixel jitter deterministically offset from the source band's so the two are
+    /// close but never pixel-identical.
+    /// </summary>
+    private static Image CreateSmoothedNoiseWithApproximateIntrabcRepeatImage(int width)
+    {
+        const int bandHeight = 64;
+        const int height = bandHeight * 3;
+        var image = Image.Create(width, height, PixelFormat.Rgb24);
+        var pixels = image.GetPixelSpan();
+
+        for (int row = 0; row < height; row++)
+        {
+            int band = row / bandHeight;
+            int patternRow = row % bandHeight;
+            for (int col = 0; col < width; col++)
+            {
+                int idx = ((row * width) + col) * 3;
+                if (band == 0)
+                {
+                    // Filler: same horizontal-stripe shape as CreateFillerPlusStripePatternImage's filler --
+                    // structurally different from the source/repeat bands' formula below.
+                    pixels[idx + 0] = (byte)(patternRow * 255 / (bandHeight - 1));
+                    pixels[idx + 1] = (byte)(patternRow * 91 % 256);
+                    pixels[idx + 2] = (byte)(200 - (patternRow * 2));
+                    continue;
+                }
+
+                // band == 1 (source) or band == 2 (repeat): identical two-incommensurate-periods base shape
+                // (a jaggier variant of SmoothedNoise's own (row/9, col/7) formula -- shorter /5, /3 periods
+                // defeat directional intra prediction even more, which is what makes a merged leaf's WHT-cost
+                // comparison prefer IntraBC's block-copy over further splitting) -- so both bands
+                // independently tend to merge into >8x8 leaves, and a block-copy from one to the other needs
+                // to correct only the small jitter difference below, not the whole shape.
+                int baseVal = (((patternRow / 5) * 37) + ((col / 3) * 53)) % 256;
+
+                // Jitter differs by a fixed, deterministic shift between source (band 1) and repeat (band 2)
+                // -- guarantees pixel(band=2) != pixel(band=1) at the large majority of positions (only
+                // 1-in-3 coincide, given the mod-3 range below), so this pattern can never satisfy
+                // BlockPixelsEqual and FindIntrabcMatch's exact-match search can never fire for the repeat
+                // band. The small amplitude relative to baseVal's own up-to-255 swings keeps a block-copy
+                // from the source band plus this small residual cheaper than re-deriving the whole jagged
+                // shape via intra prediction alone.
+                int jitter = (((patternRow * 13) + (col * 7) + band) % 3) - 1;
+                byte value = (byte)((baseVal + jitter + 256) % 256);
+                pixels[idx + 0] = value;
+                pixels[idx + 1] = value;
+                pixels[idx + 2] = value;
             }
         }
 
@@ -533,6 +645,33 @@ public class EncodeDecodeRoundTripTests
                 pixels[idx + 0] = (byte)(width <= 1 ? 0 : col * 255 / (width - 1));
                 pixels[idx + 1] = (byte)(height <= 1 ? 0 : row * 255 / (height - 1));
                 pixels[idx + 2] = 128;
+            }
+        }
+
+        return image;
+    }
+
+    /// <summary>
+    /// Diagonal ramps per channel, deliberately wrapped with <c>% 256</c> rather than scaled to the image's
+    /// extent (unlike <see cref="CreateGradientImage"/>'s smooth col-/row-scaled ramps): this produces hard
+    /// repeating diagonal edges every ~32-64 pixels, real directional structure at the scale a single leaf
+    /// actually sees, rather than one smooth ramp too gradual for any one 8x8 block to read as "directional."
+    /// R ramps along the main diagonal and G along the anti-diagonal (opposite slopes, different periods) so
+    /// the derived chroma planes carry real directional detail of their own rather than a scaled copy of
+    /// luma's -- see <see cref="DiagonalChromaEdges_RoundTrips_ViaPublicApi"/>.
+    /// </summary>
+    private static Image CreateDiagonalChromaEdgeImage(int width, int height)
+    {
+        var image = Image.Create(width, height, PixelFormat.Rgb24);
+        var pixels = image.GetPixelSpan();
+        for (int row = 0; row < height; row++)
+        {
+            for (int col = 0; col < width; col++)
+            {
+                int idx = ((row * width) + col) * 3;
+                pixels[idx + 0] = (byte)(((col * 5) + (row * 3)) % 256);
+                pixels[idx + 1] = (byte)(((col * 3) - (row * 5)) % 256);
+                pixels[idx + 2] = (byte)((col + row) % 128);
             }
         }
 

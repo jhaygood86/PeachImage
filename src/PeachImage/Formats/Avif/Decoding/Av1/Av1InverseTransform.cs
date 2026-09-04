@@ -577,8 +577,13 @@ internal static class Av1InverseTransform
         AdstOutputPermute(t, 4);
     }
 
-    /// <summary><c>Inverse ADST process</c> (spec §7.13.2.9): dispatches by size.</summary>
-    private static void InverseAdst(int[] t, int n, int r)
+    /// <summary>
+    /// <c>Inverse ADST process</c> (spec §7.13.2.9): dispatches by size. Internal (not private) for the same
+    /// reason as <see cref="InverseDct"/>: <c>Av1ForwardTransform</c> numerically derives its forward ADST4
+    /// operator by probing this exact function with impulse vectors, so a chroma leaf's mode-dependent
+    /// forward transform round-trips through this decoder's own, already-correct inverse.
+    /// </summary>
+    internal static void InverseAdst(int[] t, int n, int r)
     {
         switch (n)
         {
