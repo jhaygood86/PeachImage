@@ -88,6 +88,7 @@ internal static class Av1FrameEncoder
         // finished producing every pixel these buffers will ever hold, so nothing about the tile's own
         // (already-flushed) bitstream depends on this running afterward.
         int loopFilterLevel = 0;
+        var cdefChoice = Av1CdefChoice.Off;
         if (!lossless)
         {
             loopFilterLevel = Av1InLoopFilterSearch.SearchAndApply(
@@ -95,12 +96,24 @@ internal static class Av1FrameEncoder
                 yPlane, uPlane, vPlane,
                 paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
                 monoChrome, baseQIdx);
+
+            // CDEF (spec §7.15) runs after deblocking, per spec's own filter ordering (Av1FrameDecoder.
+            // DecodeTileGroup applies them in exactly this order) -- reconY/U/V already reflect the chosen
+            // deblocking level at this point, so Av1CdefSearch starts from that, not the pre-deblock
+            // reconstruction. Updates reconY/U/V in place with the winning candidate's content (see
+            // Av1CdefSearch.SearchAndApply's own buffer-ownership remarks for why it copies rather than
+            // reassigning these arrays).
+            cdefChoice = Av1CdefSearch.SearchAndApply(
+                reconY, reconU, reconV,
+                yPlane, uPlane, vPlane,
+                paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
+                monoChrome, baseQIdx, loopFilterLevel);
         }
 
-        byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(paddedWidth, paddedHeight, monoChrome, chroma444);
+        byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(paddedWidth, paddedHeight, monoChrome, chroma444, enableCdef: !lossless);
 
         var frameHeaderWriter = new Av1BitWriter();
-        Av1FrameHeaderWriter.Write(frameHeaderWriter, paddedWidth, paddedHeight, monoChrome, baseQIdx, lossless, loopFilterLevel);
+        Av1FrameHeaderWriter.Write(frameHeaderWriter, paddedWidth, paddedHeight, monoChrome, baseQIdx, lossless, loopFilterLevel, enableCdef: !lossless, cdefChoice);
         byte[] frameHeaderPayload = frameHeaderWriter.ToArray();
 
         var output = new List<byte>();
