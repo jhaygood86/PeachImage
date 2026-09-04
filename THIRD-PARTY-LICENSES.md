@@ -50,4 +50,53 @@ The IJG License also requires reproducing its notice in full where source is ref
 > undesirable consequences; the authors accept NO LIABILITY for damages of any kind.
 
 This notice applies only to the AAN DCT/IDCT wiring described above. It does not apply to any other part of
-PeachImage, which remains covered solely by the [MIT license](LICENSE) in the repository root.
+PeachImage.
+
+## Alliance for Open Media (AOM) / libaom — AV1 trellis quantization rate-distortion calibration
+
+`src/PeachImage/Formats/Avif/Encoder/Av1/Av1TileEncoder.cs`'s `OptimizeCoeffTrellis` method (PeachImage's
+post-quantization AV1 coefficient refinement, part of the AVIF encoder's rate-distortion optimization) uses
+two specific numeric values sourced from libaom's own trellis implementation, `av1_optimize_txb` in
+`av1/encoder/encodetxb.c` at <https://aomedia.googlesource.com/aom> (also mirrored on GitHub, e.g.
+<https://github.com/GoogleChromeLabs/wasm-av1/blob/master/third_party/aom/av1/encoder/encodetxb.c>): the
+per-plane trellis rd-multiplier table's intra row (`plane_rd_mult[0] = {17, 13}`, luma and chroma
+respectively) and the `>> 2` divisor it's combined with. These were needed because a first attempt at this
+method, using the same rate-distortion lambda this encoder's mode/tx_type/partition search already uses
+(unscaled), measurably over-corrected — smaller output but disproportionately worse quality than simply
+picking a different quantizer at the same size, on this project's own benchmark comparison. libaom's own
+trellis pass deliberately uses a separate, smaller-granularity-calibrated multiplier rather than its
+mode-decision rdmult directly; PeachImage's implementation adopted that same two real constants (17, 13, and
+the shift-by-2) for the identical reason, rather than guessing a replacement scale factor with no reference
+basis.
+
+No source code from libaom/AOM was copied into PeachImage — `OptimizeCoeffTrellis` is original C#, using this
+codebase's own existing quantization/entropy-coding types (`Av1Dequantizer`, `Av1CoefficientWriter`,
+`Av1RdCost`) and its own coefficient-domain distortion formulation, verified against this project's own
+benchmark image (real, non-interpolated same-size comparison points, not just this encoder's own internal
+cost metric) rather than against libaom's output. What was referenced is the numeric calibration described
+above, not literal code.
+
+libaom is distributed under the following license (Alliance for Open Media, `LICENSE` file):
+
+> Copyright (c) 2016, Alliance for Open Media. All rights reserved.
+>
+> Redistribution and use in source and binary forms, with or without modification, are permitted provided
+> that the following conditions are met:
+>
+> 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the
+>    following disclaimer.
+>
+> 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and
+>    the following disclaimer in the documentation and/or other materials provided with the distribution.
+>
+> THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+> WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+> PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY
+> DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+> PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+> HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+> NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+> POSSIBILITY OF SUCH DAMAGE.
+
+This notice applies only to the trellis rate-distortion calibration described above. It does not apply to any
+other part of PeachImage, which remains covered solely by the [MIT license](LICENSE) in the repository root.
