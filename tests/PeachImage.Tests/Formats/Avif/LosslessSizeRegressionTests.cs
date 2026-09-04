@@ -108,18 +108,31 @@ public class LosslessSizeRegressionTests
     /// <para>Unlike <see cref="FractalNoiseImage_LosslessAvif_IsSmallerThanSourcePng"/>, this doesn't assert
     /// AVIF beats PNG -- even ffmpeg's own reference lossless AV1 encoder loses to PNG on this content type
     /// (confirmed during the original investigation), so that assertion would be a false positive here, not a
-    /// real regression guard. Instead this bounds AVIF to a fixed multiple of the source PNG's size, per size,
-    /// using this exact fixture/seed's measured before-fix and after-fix ratios (128x128: 3.96x before / 3.70x
-    /// after; 256x256: 4.73x before / 4.41x after; 512x512: 4.32x before / 4.07x after) as reference points --
-    /// biased toward the after-fix side (not a plain midpoint) so the bound stays meaningfully below the
-    /// pre-fix ratio (catching a real regression back toward it) while leaving more headroom above the
-    /// post-fix measurement than a tight midpoint would, since a single-run measurement on one platform isn't
-    /// assumed to be the tightest legitimate value every environment will ever produce.</para>
+    /// real regression guard. Instead this bounds AVIF to a fixed multiple of the source PNG's size, per size.</para>
+    ///
+    /// <para>The AVIF byte count is fully deterministic for this fixture (integer-only pixel generation and
+    /// encoder math -- confirmed identical across net8.0/net10.0 and Linux/macOS/Windows in CI), but this
+    /// project's own PNG encoder's compressed output for the *same* pixels is not: net10.0 was confirmed (via
+    /// a CI failure across all three OSes with identical byte counts on each, ruling out an OS-specific cause)
+    /// to produce a ~5.5% smaller PNG than net8.0 for this fixture at 256x256 (8,206 vs 8,685 bytes), which
+    /// alone was enough to cross a threshold calibrated only against a single net8.0 measurement. Thresholds
+    /// below account for that by extrapolating the same ~5.5% factor to 128x128/512x512 (not independently
+    /// confirmed at those sizes, but the same PNG encoder/mechanism applies) and picking a value between the
+    /// worst-case (net10.0-scaled) before-fix and after-fix ratios at each size: 128x128 (net8.0 3.70 after /
+    /// 3.96 before -> est. net10.0 3.91 after / 4.19 before, threshold 4.05); 256x256 (4.41 after / 4.73
+    /// before -> confirmed net10.0 4.67 after / 5.00 before, threshold 4.85); 512x512 (4.07 after / 4.32
+    /// before -> est. net10.0 4.31 after / 4.58 before, threshold 4.45) -- biased toward the after-fix side
+    /// for headroom against further legitimate runtime-specific PNG-compression drift, while staying
+    /// meaningfully below the before-fix (net10.0) ratio at every size so a real regression is still caught
+    /// on at least the net10.0 leg of this multi-targeted test suite (net8.0's own before-fix ratios, being
+    /// lower to start with, no longer independently exceed these net10.0-calibrated thresholds -- a real
+    /// regression would still fail CI overall via net10.0, just not be independently visible on net8.0
+    /// alone).</para>
     /// </summary>
     [Theory]
-    [InlineData(128, 128, 3.9)]
-    [InlineData(256, 256, 4.65)]
-    [InlineData(512, 512, 4.25)]
+    [InlineData(128, 128, 4.05)]
+    [InlineData(256, 256, 4.85)]
+    [InlineData(512, 512, 4.45)]
     public void GraphicContentImage_LosslessAvif_DoesNotBlowUpRelativeToSourcePng(int width, int height, double maxRatio)
     {
         using var image = CreateGraphicContentImage(width, height, seed: 42);
