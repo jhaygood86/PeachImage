@@ -58,6 +58,31 @@ internal static class Av1CoefficientWriter
                 LeftDc[i] = 0;
             }
         }
+
+        /// <summary>
+        /// Copies <paramref name="real"/>'s above/left state over <c>[x4, x4+w4)</c>/<c>[y4, y4+h4)</c> into
+        /// this instance -- used by <see cref="Av1RdCost"/> to seed a reusable scratch <see cref="PlaneContext"/>
+        /// with the real, already-committed neighbor state before trial-costing one RD candidate (a leaf may
+        /// span several <see cref="WriteCoeffs"/> calls, e.g. a lossless leaf's 4x4 sub-blocks, which need to
+        /// see each other's trial results even though none of them may write back to <paramref name="real"/>
+        /// itself -- see <see cref="WriteCoeffs"/>'s <c>updateContext</c> remarks). Only ever reads from
+        /// <paramref name="real"/> and writes to <see langword="this"/>, so it's always safe to call against
+        /// the live, currently-in-use context.
+        /// </summary>
+        public void SeedFrom(PlaneContext real, int x4, int w4, int y4, int h4)
+        {
+            for (int i = x4; i < x4 + w4 && i < MaxX4; i++)
+            {
+                AboveLevel[i] = real.AboveLevel[i];
+                AboveDc[i] = real.AboveDc[i];
+            }
+
+            for (int i = y4; i < y4 + h4 && i < MaxY4; i++)
+            {
+                LeftLevel[i] = real.LeftLevel[i];
+                LeftDc[i] = real.LeftDc[i];
+            }
+        }
     }
 
     /// <summary>
@@ -84,8 +109,17 @@ internal static class Av1CoefficientWriter
     /// mirroring <c>Av1TileDecoder.GetAllZeroContext</c>'s own <c>plane == 0</c> branch exactly (that
     /// decoder-side method is what proves this formula, not just this one -- it's exercised against every
     /// real-world AVIF file the decoder's own corpus tests already decode).</para>
+    ///
+    /// <para><paramref name="s"/> is an <see cref="IAv1SymbolSink"/>, not a concrete <see cref="Av1SymbolEncoder"/>,
+    /// so <see cref="Av1RdCost"/>'s RD-search candidate costing can reuse this exact context-derivation logic
+    /// (via <see cref="Av1TrialSymbolSink"/>) instead of a second, driftable copy of it -- real encoding
+    /// passes an <see cref="Av1SymbolEncoder"/> (which also implements the interface) unchanged.
+    /// <paramref name="updateContext"/> (default <see langword="true"/>, real encoding's only need) gates the
+    /// above/left <paramref name="planeCtx"/> write-back at the end of this method: a trial cost-only call
+    /// passes <see langword="false"/> so a candidate that might not even be chosen never leaves a trace in
+    /// context state a later, real leaf could read.</para>
     /// </summary>
-    public static int WriteCoeffs(Av1SymbolEncoder s, Av1CdfContext cdf, int[] quantLevels, int size, int ptype, int x4, int y4, PlaneContext planeCtx, Action? writeLumaTxType = null, int blockSize = 0)
+    public static int WriteCoeffs(IAv1SymbolSink s, Av1CdfContext cdf, int[] quantLevels, int size, int ptype, int x4, int y4, PlaneContext planeCtx, Action? writeLumaTxType = null, int blockSize = 0, bool updateContext = true)
     {
         int txSz = Av1ForwardTransform.SizeToTxSz(size);
         int txSzCtx = (Av1CoeffTables.TxSizeSqr[txSz] + Av1CoeffTables.TxSizeSqrUp[txSz] + 1) >> 1;
@@ -212,21 +246,24 @@ internal static class Av1CoefficientWriter
             culLevel = Math.Min(63, culLevel);
         }
 
-        for (int i = 0; i < w4; i++)
+        if (updateContext)
         {
-            if (x4 + i < planeCtx.MaxX4)
+            for (int i = 0; i < w4; i++)
             {
-                planeCtx.AboveLevel[x4 + i] = culLevel;
-                planeCtx.AboveDc[x4 + i] = dcCategory;
+                if (x4 + i < planeCtx.MaxX4)
+                {
+                    planeCtx.AboveLevel[x4 + i] = culLevel;
+                    planeCtx.AboveDc[x4 + i] = dcCategory;
+                }
             }
-        }
 
-        for (int i = 0; i < h4; i++)
-        {
-            if (y4 + i < planeCtx.MaxY4)
+            for (int i = 0; i < h4; i++)
             {
-                planeCtx.LeftLevel[y4 + i] = culLevel;
-                planeCtx.LeftDc[y4 + i] = dcCategory;
+                if (y4 + i < planeCtx.MaxY4)
+                {
+                    planeCtx.LeftLevel[y4 + i] = culLevel;
+                    planeCtx.LeftDc[y4 + i] = dcCategory;
+                }
             }
         }
 
@@ -234,7 +271,7 @@ internal static class Av1CoefficientWriter
     }
 
     /// <summary>Write-side of <c>Coeffs()</c>'s <c>eob_pt</c>/<c>eob_extra</c>/literal encoding: given the target <paramref name="eob"/>, determines and writes the bucket symbol plus refinement bits.</summary>
-    private static void WriteEobPt(Av1SymbolEncoder s, Av1CdfContext cdf, int txSz, int txSzCtx, int ptype, int eob)
+    private static void WriteEobPt(IAv1SymbolSink s, Av1CdfContext cdf, int txSz, int txSzCtx, int ptype, int eob)
     {
         _ = txSzCtx;
         int eobMultisize = Math.Min(Av1TxDimensions.WidthLog2[txSz], 5) + Math.Min(Av1TxDimensions.HeightLog2[txSz], 5) - 4;
@@ -520,7 +557,7 @@ internal static class Av1CoefficientWriter
     }
 
     /// <summary>Write-side of <c>Coeffs()</c>'s Exp-Golomb tail (spec §5.11.39) for levels beyond <c>NumBaseLevels + CoeffBaseRange</c>.</summary>
-    private static void WriteGolomb(Av1SymbolEncoder s, int value)
+    private static void WriteGolomb(IAv1SymbolSink s, int value)
     {
         // Decode: reads `length` "continue" bits (0 = continue, 1 = stop) via ReadLiteral(1), then
         // `length - 1` data bits (MSB first, excluding the implicit leading 1), reconstructing
