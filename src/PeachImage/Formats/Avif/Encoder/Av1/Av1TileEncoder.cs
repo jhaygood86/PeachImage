@@ -593,15 +593,20 @@ internal static class Av1TileEncoder
     /// never needs this: its chroma always gets a real, unrestricted <see cref="SearchUvMode"/> search
     /// regardless of leaf size, so merging never costs it anything chroma-side.
     ///
-    /// <para>At <paramref name="sizeMi"/> &gt; 2 (chromaN &gt; 1 -- matches the region <see cref="EncodeChromaRegion"/>'s
-    /// own non-lossless-large-region branch would really code), this mirrors <see cref="EncodeLeaf"/>'s
-    /// forced DC_PRED with a single candidate, no search. At <paramref name="sizeMi"/> == 2 (chromaN == 1,
-    /// this encoder's non-lossless floor -- the only size at which a real chroma mode search actually
-    /// happens, see <see cref="EncodeLeaf"/>'s own <c>sizeMi &lt;= 2</c> gate), this runs the same real,
-    /// unrestricted mode/angle_delta sweep <see cref="SearchUvMode"/> does -- necessary, not optional: a
-    /// parent node's own leaf-vs-split comparison sums this value across 4 children, so understating what a
-    /// real search would achieve here would just move the bias into overstating how much splitting costs,
-    /// not remove it.</para>
+    /// <para>Deliberately still just a single DC_PRED candidate whenever chromaN &gt; 1, even though
+    /// <see cref="EncodeLeaf"/>'s own real chroma search (<see cref="SearchUvMode"/>) is no longer forced to
+    /// DC_PRED there (now that <see cref="Av1ForwardTransform"/>'s forward ADST operators cover every chroma
+    /// region size this encoder produces). Measured empirically: making this estimate run the same
+    /// unrestricted mode/angle_delta sweep <see cref="SearchUvMode"/> does made the partition search
+    /// systematically too optimistic about what merging into a bigger leaf would cost chroma-side --
+    /// <see cref="SearchUvMode"/>'s real search picks whichever candidate wins by SSE-plus-rate against this
+    /// leaf's own source pixels, but a mode that looks cheap in isolation here can still lose to what the
+    /// actual encode achieves once real (not <see langword="false"/>-approximated) haveAboveRight/haveBelowLeft
+    /// and real reconstructed neighbor context are available -- the mismatch measurably biased the search
+    /// toward worse partitions (this project's benchmark image lost ~3 dB of PSNR at Quality=90 for no size
+    /// win before this was reverted back to DC_PRED-only). A parent's leaf-vs-split comparison only needs this
+    /// term to not systematically overstate what merging costs; DC_PRED is already a safe upper bound on that,
+    /// since <see cref="SearchUvMode"/>'s real search can only ever do at least as well.</para>
     ///
     /// <para>Reads <see cref="TileState.SourceU"/>/<see cref="TileState.SourceV"/> for edge context, not
     /// <see cref="TileState.ReconU"/>/<see cref="TileState.ReconV"/> the way <see cref="SearchUvMode"/>'s real
@@ -1200,17 +1205,21 @@ internal static class Av1TileEncoder
         bool usedIntrabc = intrabcExact || intrabcApprox;
 
         // Real cost-based uv_mode/uv_angle_delta search (see SearchUvMode's remarks) -- replaces the old
-        // hardcoded DC_PRED, for both lossless and non-lossless chroma. Non-lossless chroma's transform type
-        // is mode-dependent (spec's Mode_To_Txfm, Av1TxTypeTables.ModeToTxfm -- Av1TileDecoder.ComputeTxType
-        // derives ADST/mixed transforms for every uv_mode except DC_PRED), which used to make a real search
-        // unsafe here: EncodeChromaRegion's non-lossless forward path only ever forward-transformed with
-        // plain DCT, so signaling any other uv_mode would have desynced the decoder's inverse transform
-        // choice from what was really forward-transformed. EncodeChromaRegion now forward-transforms with
-        // Av1ForwardTransform's mode-dependent AdstDct/DctAdst/AdstAdst operators (matching ModeToTxfm) for
-        // any non-DC_PRED uvMode *at the one chroma transform size those operators are built for (4x4)* --
-        // see the sizeMi > 2 gate just below for the case that's no longer true at. Lossless never had this
-        // constraint: AV1 forces TX_4X4/WHT unconditionally at coded-lossless regardless of prediction mode
-        // (ComputeTxType's own lossless short-circuit), so uv_mode has no bearing on transform choice there.
+        // hardcoded DC_PRED, for both lossless and non-lossless chroma, at every leaf size. Non-lossless
+        // chroma's transform type is mode-dependent (spec's Mode_To_Txfm, Av1TxTypeTables.ModeToTxfm --
+        // Av1TileDecoder.ComputeTxType derives ADST/mixed transforms for every uv_mode except DC_PRED), which
+        // used to make a real search unsafe here whenever the chroma region grew past one 4x4 transform
+        // (sizeMi > 2 -- a 16x16/32x32 luma leaf's 4:2:0 chroma region, 8x8/16x16): Av1ForwardTransform's
+        // forward ADST operators only existed at size 4 until this encoder's tx_type search phase generalized
+        // them to 4/8/16 (every chroma region size this encoder ever produces -- 4:2:0's largest, from a
+        // 32x32 luma leaf, is 16x16), so any uv_mode whose ModeToTxfm entry wasn't DCT_DCT would have had
+        // nothing to forward-transform with at those larger sizes. Every ModeToTxfm entry is one of
+        // DCT_DCT/AdstDct/DctAdst/AdstAdst (never IDTX or a 1D-only type), so once those operators covered
+        // every real chroma size, nothing about the search itself needed to change to become safe at every
+        // size -- see EncodeChromaRegion's own remarks for the write-side half of this. Lossless never had
+        // this constraint: AV1 forces TX_4X4/WHT unconditionally at coded-lossless regardless of prediction
+        // mode (ComputeTxType's own lossless short-circuit), so uv_mode has no bearing on transform choice
+        // there.
         //
         // Still skipped when neither neighbor is available (the frame's very first leaf) or !hasChroma/
         // usedIntrabc (spec's use_intrabc branch replaces yMode/uv_mode signaling entirely -- see the
@@ -1220,19 +1229,9 @@ internal static class Av1TileEncoder
         // still reconstructs bit-exactly regardless (residual always corrects the rest of the way), but
         // choosing DC_PRED avoids gambling extra angle_delta signaling bits on a block with no real content
         // to base a directional choice on.
-        //
-        // Non-lossless with sizeMi > 2 (a 16x16/32x32 leaf, see the project plan's partition/TX-size RDO
-        // phase) additionally skips the search and forces DC_PRED: at 4:2:0 that leaf's chroma region is
-        // bigger than one 4x4 transform (EncodeChromaRegion codes it as a single larger transform instead of
-        // a 4x4 sub-block grid -- see its own remarks), but this encoder's forward ADST operators
-        // (Av1ForwardTransform.SelectRowOperator/SelectColOperator) only exist at size 4, so any uv_mode
-        // whose ModeToTxfm entry isn't DCT_DCT would have nothing to forward-transform with. DC_PRED's
-        // ModeToTxfm entry is always DCT_DCT, so forcing it here is what keeps that transform choice safe --
-        // real per-mode chroma search for these larger regions is a follow-up once forward ADST8/ADST16
-        // operators exist, not this phase's scope.
         int bestUvMode = Av1IntraMode.DcPred;
         int bestUvAngleDelta = 0;
-        if (hasChroma && !usedIntrabc && (availU || availL) && (s.Lossless || sizeMi <= 2))
+        if (hasChroma && !usedIntrabc && (availU || availL))
         {
             (bestUvMode, bestUvAngleDelta) = SearchUvMode(s, r, c, x, y, sizeMi, availU, availL);
         }
@@ -2877,19 +2876,16 @@ internal static class Av1TileEncoder
         // always derives chroma's transform as the single largest size that fits the residual region outside
         // lossless's own spec-forced TX_4X4, so looping 4x4 sub-blocks here (as the lossless path below
         // still correctly does -- WHT is genuinely forced to 4x4 regardless of leaf size) would write the
-        // wrong number of symbols against the wrong scan table for anything a real decoder expects. EncodeLeaf
-        // forces uvMode to DC_PRED before calling this whenever sizeMi > 2 (see its own remarks), so
-        // uvTxType here is always DctDct -- verified below rather than assumed, since silently forward-
-        // transforming with the wrong type would desync the decoder's reconstruction from this leaf onward
-        // with no way for it to learn otherwise (chroma's tx_type is never itself bitstream-signalled).
+        // wrong number of symbols against the wrong scan table for anything a real decoder expects.
+        // uvTxType (already resolved above from the real, searched uvMode -- see EncodeLeaf's remarks on why
+        // that search is safe at every size now) is passed straight through to the one larger transform this
+        // codes: every Av1TxTypeTables.ModeToTxfm entry is one of DCT_DCT/AdstDct/DctAdst/AdstAdst, and
+        // Av1ForwardTransform supports all four at every size this branch ever sees (4:2:0's largest chroma
+        // region, from a 32x32 luma leaf, is 16x16), so there's no size/type combination left here that
+        // forward-transforming can't handle.
         if (!s.Lossless && chromaN > 1)
         {
-            if (uvTxType != Av1TxType.DctDct)
-            {
-                throw new InvalidOperationException("Non-lossless chroma regions larger than 4x4 only support DCT_DCT -- EncodeLeaf must force uvMode to DcPred whenever sizeMi > 2.");
-            }
-
-            EncodeNonLosslessLargeChromaRegion(s, r, c, chromaR4Base, chromaC4Base, cxBase, cyBase, chromaBlockSizePixels, subX, filterTypeSmooth);
+            EncodeNonLosslessLargeChromaRegion(s, r, c, chromaR4Base, chromaC4Base, cxBase, cyBase, chromaBlockSizePixels, subX, filterTypeSmooth, uvMode, uvAngleDelta, uvTxType);
             return;
         }
 
@@ -2969,15 +2965,19 @@ internal static class Av1TileEncoder
     /// <c>residual()</c> order -- see <see cref="EncodeChromaRegion"/>'s own remarks on why that nesting
     /// matters) instead of a grid of 4x4 sub-blocks -- structurally the same single-whole-block predict/
     /// transform/quantize/write/reconstruct sequence <see cref="EncodeLeaf"/>'s own (now size-generic)
-    /// non-lossless luma path uses, just applied to one chroma plane at a time. Always DC_PRED (the caller
-    /// already verified <c>uvTxType == DctDct</c> before calling this), so unlike <see cref="EncodeLeaf"/>'s
-    /// luma path there's no tx_type symbol to conditionally write here at all -- chroma's tx_type is never
-    /// itself bitstream-signalled (always derived from <c>uv_mode</c>, see <see cref="EncodeChromaRegion"/>'s
-    /// remarks) -- and no <c>blockSize</c> override for <see cref="Av1CoefficientWriter.WriteCoeffs"/> either,
-    /// since the transform now always exactly equals the chroma coding block (the same "transform == coding
-    /// block" shortcut <see cref="EncodeLeaf"/>'s own non-lossless call already relies on).
+    /// non-lossless luma path uses, just applied to one chroma plane at a time. <paramref name="uvMode"/>/
+    /// <paramref name="uvAngleDelta"/> come from the same real mode/angle search <see cref="EncodeLeaf"/> now
+    /// always runs for chroma (Phase 4's generalized <see cref="Av1ForwardTransform"/> made real ADST-mixed
+    /// search safe at every chroma size this encoder produces, removing the old forced-DC_PRED restriction);
+    /// unlike <see cref="EncodeLeaf"/>'s luma path there's still no tx_type symbol to conditionally write here,
+    /// since chroma's tx_type is never itself bitstream-signalled (always derived from <c>uv_mode</c> via
+    /// <c>Av1TxTypeTables.ModeToTxfm</c>, see <see cref="EncodeChromaRegion"/>'s remarks) -- <paramref
+    /// name="uvTxType"/> is passed through purely to drive the actual transform math. No <c>blockSize</c>
+    /// override for <see cref="Av1CoefficientWriter.WriteCoeffs"/> either, since the transform now always
+    /// exactly equals the chroma coding block (the same "transform == coding block" shortcut
+    /// <see cref="EncodeLeaf"/>'s own non-lossless call already relies on).
     /// </summary>
-    private static void EncodeNonLosslessLargeChromaRegion(TileState s, int r, int c, int chromaR4, int chromaC4, int cx, int cy, int chromaBlockSizePixels, int subX, bool filterTypeSmooth)
+    private static void EncodeNonLosslessLargeChromaRegion(TileState s, int r, int c, int chromaR4, int chromaC4, int cx, int cy, int chromaBlockSizePixels, int subX, bool filterTypeSmooth, int uvMode, int uvAngleDelta, int uvTxType)
     {
         bool availU = chromaR4 > 0;
         bool availL = chromaC4 > 0;
@@ -2987,6 +2987,17 @@ internal static class Av1TileEncoder
         // BlockDecoded position is just (r, c)'s own masked-and-shifted position, no per-iteration offset.
         int subBlockChromaRow = (r & 15) >> subX;
         int subBlockChromaCol = (c & 15) >> subX;
+
+        // Scaled by the region's own width/height in chroma 4x4 units (matching SearchUvMode's identical
+        // `chromaCol + chromaN`/`chromaRow + chromaN` computation) -- a fixed +-1 offset only happens to be
+        // correct at chromaN == 1 (4x4 chroma), which never reaches this method (that size takes
+        // EncodeChromaRegion's own 4x4 sub-block loop instead; this method only ever runs for chromaN > 1).
+        // Getting this wrong doesn't matter for DC_PRED (which never reads the above-right/below-left corner
+        // samples these flags gate), so it went unnoticed while uv_mode was forced to DC_PRED here -- but a
+        // real directional/smooth mode reads those corners, and BuildEdges silently clamps/replicates instead
+        // of reading real neighbor pixels whenever told a neighbor isn't available, so a wrong flag corrupts
+        // the whole block's prediction, not just a few edge pixels.
+        int chromaN = chromaBlockSizePixels / 4;
 
         int log2Size = Log2FromPixels(chromaBlockSizePixels);
         var above = new Av1EdgeArray(528);
@@ -3002,11 +3013,11 @@ internal static class Av1TileEncoder
         {
             planeIndex++;
 
-            bool haveAboveRight = GetBlockDecoded(s, planeIndex, subBlockChromaRow - 1, subBlockChromaCol + 1);
-            bool haveBelowLeft = GetBlockDecoded(s, planeIndex, subBlockChromaRow + 1, subBlockChromaCol - 1);
+            bool haveAboveRight = GetBlockDecoded(s, planeIndex, subBlockChromaRow - 1, subBlockChromaCol + chromaN);
+            bool haveBelowLeft = GetBlockDecoded(s, planeIndex, subBlockChromaRow + chromaN, subBlockChromaCol - 1);
 
             Av1IntraPrediction.BuildEdges(above, left, recon, s.ChromaWidth, cx, cy, chromaBlockSizePixels, chromaBlockSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
-            Av1IntraPrediction.Predict(pred, chromaBlockSizePixels, chromaBlockSizePixels, log2Size, log2Size, above, left, Av1IntraMode.DcPred, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaWidth - 1, s.ChromaHeight - 1, cx, cy, bitDepth: 8);
+            Av1IntraPrediction.Predict(pred, chromaBlockSizePixels, chromaBlockSizePixels, log2Size, log2Size, above, left, uvMode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta: uvAngleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaWidth - 1, s.ChromaHeight - 1, cx, cy, bitDepth: 8);
 
             var residual = s.Residual;
             for (int i = 0; i < chromaBlockSizePixels; i++)
@@ -3020,7 +3031,7 @@ internal static class Av1TileEncoder
             }
 
             var coeff = s.Coeff;
-            Av1ForwardTransform.Forward2D(residual, coeff, chromaBlockSizePixels);
+            Av1ForwardTransform.Forward2D(residual, coeff, chromaBlockSizePixels, uvTxType);
             var levels = s.Levels;
             Av1ForwardQuantizer.Quantize(coeff, levels, chromaBlockSizePixels, s.BaseQIdx);
 
@@ -3030,7 +3041,7 @@ internal static class Av1TileEncoder
             }
 
             Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, chromaBlockSizePixels, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null);
-            Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, chromaBlockSizePixels, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual);
+            Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, chromaBlockSizePixels, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: false, uvTxType);
             SetBlockDecoded(s, planeIndex, subBlockChromaRow, subBlockChromaCol, true);
         }
     }
