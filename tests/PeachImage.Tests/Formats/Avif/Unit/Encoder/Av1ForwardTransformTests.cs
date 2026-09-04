@@ -104,54 +104,69 @@ public class Av1ForwardTransformTests
     }
 
     /// <summary>
-    /// Chroma's mode-dependent forward transforms (issue #60): <c>Av1TileEncoder.EncodeChromaRegion</c>
-    /// forward-transforms with one of these three ADST-mixed operators whenever the real <c>uv_mode</c>
-    /// search picks a non-DC_PRED mode, matching <c>Av1TxTypeTables.ModeToTxfm</c> -- only ever at size 4
-    /// (chroma's only transform size in this encoder, see <see cref="Av1ForwardTransform"/>'s class remarks).
-    /// Round-trips the same way <see cref="Forward2D_RandomResidual_RoundTripsThroughInverseWithinTolerance"/>
-    /// does for DCT_DCT, just through <see cref="Av1InverseTransform.Inverse2D"/> with the matching
-    /// <paramref name="txType"/> instead of always <see cref="Av1TxType.DctDct"/>.
+    /// Chroma's mode-dependent forward transforms (issue #60) and, since Phase 4 (real luma tx_type search),
+    /// luma's own real tx_type search too: <c>Av1TileEncoder</c> forward-transforms with one of these
+    /// ADST-mixed operators whenever a non-DC_PRED mode/an RD-chosen non-DCT_DCT type wins, matching
+    /// <c>Av1TxTypeTables.ModeToTxfm</c> (chroma) or the searched <c>tx_type</c> symbol (luma) -- at any of
+    /// sizes 4/8/16 (this encoder's reduced transform set never needs ADST at 32, see
+    /// <see cref="Av1ForwardTransform"/>'s class remarks). Round-trips the same way
+    /// <see cref="Forward2D_RandomResidual_RoundTripsThroughInverseWithinTolerance"/> does for DCT_DCT, just
+    /// through <see cref="Av1InverseTransform.Inverse2D"/> with the matching <paramref name="txType"/>
+    /// instead of always <see cref="Av1TxType.DctDct"/>.
     /// </summary>
     [Theory]
-    [InlineData(Av1TxType.AdstDct)]
-    [InlineData(Av1TxType.DctAdst)]
-    [InlineData(Av1TxType.AdstAdst)]
-    public void Forward2D_MixedAdstTxType_RandomResidual_RoundTripsThroughInverseWithinTolerance(int txType)
+    [InlineData(Av1TxType.AdstDct, 4)]
+    [InlineData(Av1TxType.DctAdst, 4)]
+    [InlineData(Av1TxType.AdstAdst, 4)]
+    [InlineData(Av1TxType.Idtx, 4)]
+    [InlineData(Av1TxType.AdstDct, 8)]
+    [InlineData(Av1TxType.DctAdst, 8)]
+    [InlineData(Av1TxType.AdstAdst, 8)]
+    [InlineData(Av1TxType.Idtx, 8)]
+    [InlineData(Av1TxType.AdstDct, 16)]
+    [InlineData(Av1TxType.DctAdst, 16)]
+    [InlineData(Av1TxType.AdstAdst, 16)]
+    [InlineData(Av1TxType.Idtx, 16)]
+    public void Forward2D_MixedAdstTxType_RandomResidual_RoundTripsThroughInverseWithinTolerance(int txType, int size)
     {
         var random = new Random(54321);
-        int[] residual = new int[16];
+        int[] residual = new int[size * size];
         for (int i = 0; i < residual.Length; i++)
         {
             residual[i] = random.Next(-128, 128);
         }
 
-        AssertRoundTrips(residual, size: 4, tolerance: 3, txType);
+        AssertRoundTrips(residual, size, tolerance: 3, txType);
     }
 
     [Theory]
-    [InlineData(Av1TxType.AdstDct)]
-    [InlineData(Av1TxType.DctAdst)]
-    [InlineData(Av1TxType.AdstAdst)]
-    public void Forward2D_MixedAdstTxType_ZeroResidual_ProducesZeroCoefficients(int txType)
+    [InlineData(Av1TxType.AdstDct, 4)]
+    [InlineData(Av1TxType.DctAdst, 4)]
+    [InlineData(Av1TxType.AdstAdst, 4)]
+    [InlineData(Av1TxType.Idtx, 4)]
+    [InlineData(Av1TxType.AdstDct, 8)]
+    [InlineData(Av1TxType.AdstAdst, 16)]
+    public void Forward2D_MixedAdstTxType_ZeroResidual_ProducesZeroCoefficients(int txType, int size)
     {
-        int[] residual = new int[16];
-        int[] coeff = new int[16];
+        int[] residual = new int[size * size];
+        int[] coeff = new int[size * size];
 
-        Av1ForwardTransform.Forward2D(residual, coeff, 4, txType);
+        Av1ForwardTransform.Forward2D(residual, coeff, size, txType);
 
         Assert.All(coeff, value => Assert.Equal(0, value));
     }
 
-    /// <summary>Mirrors <see cref="Forward2D_RejectsUnsupportedSize"/>: the mixed ADST operators only exist at size 4 (see <see cref="Av1ForwardTransform"/>'s class remarks), so any other size must throw rather than silently fall back to a wrong transform.</summary>
+    /// <summary>AV1 has no ADST32 (and no IDTX at TX_32X32 either, since that size never reads a tx_type symbol at all -- see <see cref="Av1ForwardTransform"/>'s class remarks), so size 32 must still throw for these types rather than silently fall back to a wrong transform.</summary>
     [Theory]
     [InlineData(Av1TxType.AdstDct)]
     [InlineData(Av1TxType.DctAdst)]
     [InlineData(Av1TxType.AdstAdst)]
-    public void Forward2D_MixedAdstTxType_RejectsNonSize4(int txType)
+    [InlineData(Av1TxType.Idtx)]
+    public void Forward2D_MixedAdstTxType_RejectsSize32(int txType)
     {
-        int[] residual = new int[64];
-        int[] coeff = new int[64];
-        Assert.Throws<ArgumentOutOfRangeException>(() => Av1ForwardTransform.Forward2D(residual, coeff, 8, txType));
+        int[] residual = new int[1024];
+        int[] coeff = new int[1024];
+        Assert.Throws<ArgumentOutOfRangeException>(() => Av1ForwardTransform.Forward2D(residual, coeff, 32, txType));
     }
 
     private static void AssertRoundTrips(int[] residual, int size, int tolerance, int txType = Av1TxType.DctDct)

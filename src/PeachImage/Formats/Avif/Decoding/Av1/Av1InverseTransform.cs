@@ -621,8 +621,13 @@ internal static class Av1InverseTransform
         t[3] = d;
     }
 
-    /// <summary><c>Inverse identity transform process</c> (spec §7.13.2.11-§7.13.2.15): dispatches by size, each with its own fixed scale factor.</summary>
-    private static void InverseIdentity(int[] t, int n)
+    /// <summary>
+    /// <c>Inverse identity transform process</c> (spec §7.13.2.11-§7.13.2.15): dispatches by size, each with
+    /// its own fixed scale factor. Internal (not private) for the same reason as <see cref="InverseDct"/>/
+    /// <see cref="InverseAdst"/>: <c>Av1ForwardTransform</c> numerically derives its forward IDTX operator by
+    /// probing this exact function with impulse vectors.
+    /// </summary>
+    internal static void InverseIdentity(int[] t, int n)
     {
         switch (n)
         {

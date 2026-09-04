@@ -920,6 +920,36 @@ internal static class Av1TileEncoder
     }
 
     /// <summary>
+    /// Non-lossless tx_type-only candidate cost (Phase 4 of the project plan): same transform+quantize+
+    /// entropy-trial pipeline <see cref="ComputeCandidateCost"/>'s non-lossless branch uses, but taking an
+    /// already-computed <paramref name="residual"/>/<paramref name="sse"/> (constant across every candidate
+    /// once the leaf's prediction is fixed, see the call site's remarks) and a <paramref name="txType"/> to
+    /// try, instead of re-deriving the residual from a fresh prediction every time -- this is only ever
+    /// called after mode/angle search has already picked a winning prediction, refining just the transform
+    /// choice against it, so re-gathering the (unchanged) residual/SSE for each of the reduced set's 5
+    /// candidates would be pure waste.
+    /// </summary>
+    private static long ComputeTxTypeCost(TileState s, int[] residual, long sse, int sizePixels, int ptype, int x, int y, Av1CoefficientWriter.PlaneContext realCtx, int txType)
+    {
+        int x4 = x >> 2;
+        int y4 = y >> 2;
+        int[] coeff = s.Coeff;
+        int[] levels = s.Levels;
+        var scratch = s.ScratchCoeffCtx;
+        var trial = s.TrialSink;
+
+        Av1ForwardTransform.Forward2D(residual, coeff, sizePixels, txType);
+        Av1ForwardQuantizer.Quantize(coeff, levels, sizePixels, s.BaseQIdx);
+
+        int w4 = sizePixels >> 2;
+        scratch.SeedFrom(realCtx, x4, w4, y4, w4);
+        trial.Reset();
+        Av1CoefficientWriter.WriteCoeffs(trial, s.Cdf, levels, sizePixels, ptype, x4, y4, scratch, writeLumaTxType: null, updateContext: true);
+
+        return Av1RdCost.CombineCost(sse, trial.Bits, s.Lambda);
+    }
+
+    /// <summary>
     /// Real cost-based UV mode + angle_delta search, replacing the previous hardcoded DC_PRED -- mirrors
     /// <see cref="EncodeLeaf"/>'s own whole-leaf luma search (same <see cref="CandidateModes"/>/angle_delta
     /// sweep, same <see cref="ComputeCandidateCost"/> proxy), except a single <c>uv_mode</c> covers both U and
@@ -1497,13 +1527,40 @@ internal static class Av1TileEncoder
                 // own size -- no separate tx_size symbol to write, unlike a TX_MODE_SELECT encoder would need.
                 int[] residual = s.Residual;
                 int leafElementCount = sizePixels * sizePixels;
+                long sse = 0;
                 for (int i = 0; i < leafElementCount; i++)
                 {
-                    residual[i] = s.SourceY[((y + (i / sizePixels)) * s.YWidth) + x + (i % sizePixels)] - bestPred[i];
+                    int diff = s.SourceY[((y + (i / sizePixels)) * s.YWidth) + x + (i % sizePixels)] - bestPred[i];
+                    residual[i] = diff;
+                    sse += (long)diff * diff;
+                }
+
+                // Real tx_type search (Phase 4 of the project plan): this encoder's reduced_tx_set (always
+                // on, see Av1FrameHeaderWriter) means Av1TileDecoder.GetTxSet always resolves to
+                // TX_SET_INTRA_2 at every size that reads a tx_type symbol at all (8x8/16x16 here -- 32x32 is
+                // DCTONLY, no symbol, see below), so Av1TxTypeTables.TxTypeIntraInvSet2's 5 members are the
+                // complete real search space, not an arbitrary subset. Reuses the same residual/SSE already
+                // computed above for every candidate (SSE is a property of the *residual*, fixed once
+                // bestPred is chosen -- only which transform decorrelates that residual, and so how many
+                // bits the result costs, actually varies by tx_type), so this only re-runs the
+                // transform+quantize+entropy-trial per candidate, not the prediction/SSE gather.
+                int bestTxType = Av1TxType.DctDct;
+                if (sizePixels < 32)
+                {
+                    long bestTxTypeCost = long.MaxValue;
+                    foreach (int candidateTxType in Av1TxTypeTables.TxTypeIntraInvSet2)
+                    {
+                        long txTypeCost = ComputeTxTypeCost(s, residual, sse, sizePixels, ptype: 0, x, y, s.YCoeffCtx, candidateTxType);
+                        if (txTypeCost < bestTxTypeCost)
+                        {
+                            bestTxTypeCost = txTypeCost;
+                            bestTxType = candidateTxType;
+                        }
+                    }
                 }
 
                 int[] coeff = s.Coeff;
-                Av1ForwardTransform.Forward2D(residual, coeff, sizePixels);
+                Av1ForwardTransform.Forward2D(residual, coeff, sizePixels, bestTxType);
                 int[] levels = s.Levels;
                 Av1ForwardQuantizer.Quantize(coeff, levels, sizePixels, s.BaseQIdx);
 
@@ -1524,16 +1581,18 @@ internal static class Av1TileEncoder
                 // to DC_PRED).
                 int intraDir = bestUseFilterIntra ? Av1TxTypeTables.FilterIntraModeToIntraDir[bestFilterIntraMode] : bestMode;
 
-                // Y transform type: reduced_tx_set (always on) selects TX_SET_INTRA_2 at 8x8/16x16 -- always
-                // signal DCT_DCT, index 1 in TxTypeIntraInvSet2 = [IDTX, DCT_DCT, ADST_ADST, DCT_ADST,
-                // DCT_ADST] -- but Av1TileDecoder.GetTxSet forces TX_SET_DCTONLY (no tx_type symbol read at
-                // all) whenever txSzSqrUp == TX_32X32, i.e. exactly a 32x32 leaf here (this encoder's leaves
-                // are always square, so txSzSqrUp == txSz). Passing null for writeLumaTxType at that size
-                // (rather than writing a symbol no real decoder expects) is required for correctness, not
-                // just an optimization -- writing it would desync the entropy stream from here on. Only
-                // actually invoked by WriteCoeffs when the block turns out non-all-zero either way -- see its
-                // remarks.
-                void WriteLumaTxType() => s.Symbols.WriteSymbol(s.Cdf.IntraTxTypeSet2[txSzSqr][intraDir], 1);
+                // Y transform type symbol: writes whichever type the search above actually picked (the
+                // CDF-inverse lookup mirrors Av1TileDecoder.TransformType's own TxTypeIntraInvSet2 read,
+                // Av1TileDecoder.cs's TransformType) -- but Av1TileDecoder.GetTxSet forces TX_SET_DCTONLY (no
+                // tx_type symbol read at all) whenever txSzSqrUp == TX_32X32, i.e. exactly a 32x32 leaf here
+                // (this encoder's leaves are always square, so txSzSqrUp == txSz) -- bestTxType is left at
+                // its DctDct default there (the search above never ran) and, correctly, no symbol is written
+                // for it either. Passing null for writeLumaTxType at that size (rather than writing a symbol
+                // no real decoder expects) is required for correctness, not just an optimization -- writing
+                // it would desync the entropy stream from here on. Only actually invoked by WriteCoeffs when
+                // the block turns out non-all-zero either way -- see its remarks.
+                int txTypeSymbol = Array.IndexOf(Av1TxTypeTables.TxTypeIntraInvSet2, bestTxType);
+                void WriteLumaTxType() => s.Symbols.WriteSymbol(s.Cdf.IntraTxTypeSet2[txSzSqr][intraDir], txTypeSymbol);
                 Action? writeLumaTxType = sizePixels < 32 ? WriteLumaTxType : null;
 
                 // WriteCoeffs takes (x4, y4) -- AV1's convention is x4 = column, y4 = row -- so this is
@@ -1544,7 +1603,7 @@ internal static class Av1TileEncoder
                 // stops updating past whichever axis is shorter in mi-units -- desyncing every block's
                 // entropy context (and the whole rest of the tile with it) from exactly that point onward.
                 Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, sizePixels, ptype: 0, c, r, s.YCoeffCtx, writeLumaTxType);
-                Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, x, y, sizePixels, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual);
+                Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, x, y, sizePixels, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: false, bestTxType);
                 MarkLumaBlockDecoded(s, r, c, sizeMi, sizeMi);
             }
         }
