@@ -9,23 +9,24 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// a uniform 8x8 leaf grid (this encoder does not implement non-lossless partition-tree RDO -- see
 /// <see cref="EncodePartitionForced"/>'s remarks for why). Lossless frames instead run a real (if
 /// approximate) rate-distortion partition search (<see cref="DecidePartition"/>, Phase D) at each partition
-/// level, comparing the actual WHT-magnitude cost (<see cref="ComputeCandidateCost"/>) of keeping a
-/// 16x16/32x32/64x64 region as one leaf against the summed cost of its 4 quadrants, rather than a pure
-/// flatness/variance threshold -- this only ever reduces per-leaf mode/skip/partition signaling, never
-/// residual coefficient cost by itself (AV1 forces TX_4X4 for every lossless block regardless of
-/// coding-block size, so the same number of 4x4 Walsh-Hadamard sub-blocks get coded either way), but a real
+/// level down to spec's true 4x4 floor, comparing the actual per-coefficient rate cost (<see cref="ComputeCandidateCost"/>)
+/// of keeping an 8x8/16x16/32x32/64x64 region as one leaf against the summed cost of its 4 quadrants, rather
+/// than a pure flatness/variance threshold -- merging above 4x4 only ever reduces per-leaf mode/skip/partition
+/// signaling, never residual coefficient cost by itself (AV1 forces TX_4X4 for every lossless block regardless
+/// of coding-block size, so the same number of 4x4 Walsh-Hadamard sub-blocks get coded either way), but a real
 /// cost comparison (unlike the pure-flatness heuristic it replaced) can also correctly choose *not* to merge
 /// when a coarser single-mode prediction across the merged region would cost more in residual than it saves
 /// in signaling -- see <see cref="DecidePartition"/>'s remarks for the full reasoning and the project plan's
-/// Phase A/D results for the measurements motivating this. Every leaf gets a real, WHT-magnitude-cost-based
-/// intra mode search (13 candidate modes x 7 angle_delta values for the 8 directional ones, plus 5
-/// FILTER_INTRA candidates when DC_PRED wins -- see <see cref="EncodeLeaf"/>). Chroma gets the same real
-/// directional/angle search too (<see cref="SearchUvMode"/>), for both lossless and non-lossless: non-lossless
-/// chroma's transform type is mode-dependent (<c>Av1TxTypeTables.ModeToTxfm</c>), so <see cref="EncodeChromaRegion"/>
-/// forward-transforms with the matching DCT/ADST-mixed <c>Av1ForwardTransform</c> operator for whatever
-/// <c>uv_mode</c> the search picks, rather than always DCT -- see that method's remarks. CFL is never used
-/// (spec-illegal for this encoder's lossless-always-4:4:4 RGB output, and simply unimplemented for
-/// non-lossless).
+/// Phase A/D results for the measurements motivating this. Every leaf gets a real, rate-cost-based intra mode
+/// search (13 candidate modes x 7 angle_delta values for the 8 directional ones -- forced to just angle_delta
+/// 0 for a 4x4 leaf, spec's own floor for signaling angle_delta at all, see <see cref="EncodeLeaf"/>'s
+/// <c>angleDeltaAllowed</c> remarks -- plus 5 FILTER_INTRA candidates when DC_PRED wins -- see
+/// <see cref="EncodeLeaf"/>). Chroma gets the same real directional/angle search too
+/// (<see cref="SearchUvMode"/>), for both lossless and non-lossless: non-lossless chroma's transform type is
+/// mode-dependent (<c>Av1TxTypeTables.ModeToTxfm</c>), so <see cref="EncodeChromaRegion"/> forward-transforms
+/// with the matching DCT/ADST-mixed <c>Av1ForwardTransform</c> operator for whatever <c>uv_mode</c> the search
+/// picks, rather than always DCT -- see that method's remarks. CFL is never used (spec-illegal for this
+/// encoder's lossless-always-4:4:4 RGB output, and simply unimplemented for non-lossless).
 ///
 /// <para>Requires the luma plane's width/height to already be padded to a multiple
 /// of 64 (the caller's job -- see <c>Av1FrameEncoder</c>) so every superblock is a full, in-bounds 64x64
@@ -283,7 +284,8 @@ internal static class Av1TileEncoder
         16 => Av1BlockSize.Block64x64,
         8 => Av1BlockSize.Block32x32,
         4 => Av1BlockSize.Block16x16,
-        _ => Av1BlockSize.Block8x8,
+        2 => Av1BlockSize.Block8x8,
+        _ => Av1BlockSize.Block4x4,
     };
 
     /// <summary><c>log2</c> of a leaf's pixel width/height, for <see cref="Av1IntraPrediction.Predict"/>'s <c>log2W</c>/<c>log2H</c> parameters -- e.g. sizeMi 16 (64 pixels) -&gt; 6.</summary>
@@ -292,16 +294,26 @@ internal static class Av1TileEncoder
         16 => 6,
         8 => 5,
         4 => 4,
-        _ => 3,
+        2 => 3,
+        _ => 2,
     };
 
     private static void EncodePartitionForced(TileState s, int r, int c, int sizeMi)
     {
+        // decode_partition() never reads a partition symbol below 8x8 (spec §5.11.4: the read is gated on
+        // bSize >= BLOCK_8X8) -- a 4x4 node is always a leaf, unconditionally, with no signaling of its own.
+        // Only reachable at all when lossless (see the sizeMi == 2 case below): non-lossless never recurses
+        // this far since it never calls DecidePartition.
+        if (sizeMi == 1)
+        {
+            EncodeLeaf(s, r, c, sizeMi);
+            return;
+        }
+
         int bSize = BlockSizeFromSizeMi(sizeMi);
 
         // decode_partition() reads a partition symbol at every size down to and including 8x8 (only sizes
-        // *below* 8x8 skip it) -- Block8x8 is not exempt, it just always has PARTITION_NONE forced here
-        // rather than PARTITION_SPLIT, since our leaf floor is 8x8.
+        // *below* 8x8 skip it, see the sizeMi == 1 case above).
         int ctx = PartitionContext(s, r, c, bSize, out int bsl);
         var partitionCdf = bsl switch
         {
@@ -311,29 +323,33 @@ internal static class Av1TileEncoder
             _ => s.Cdf.PartitionW64[ctx],
         };
 
-        if (sizeMi == 2)
+        // Non-lossless keeps this encoder's original behavior of always splitting all the way down to a
+        // fixed 8x8 grid: a non-lossless leaf bigger than 8x8 would need a real TX_16X16/TX_32X32/TX_64X64
+        // forward-transform path (Av1ForwardTransform.Forward2D only handles square 4/8/16/32 today, and even
+        // 32 isn't wired up as a leaf size below), which is out of scope for this pass -- see the project
+        // plan. A non-lossless leaf smaller than 8x8 isn't attempted either (see EncodeLeaf's own non-lossless
+        // remarks on why its one remaining fixed-size DCT_DCT path never runs below 8x8), so 8x8 stays a
+        // forced leaf for it regardless of what DecidePartition -- never even called here -- might have said.
+        if (!s.Lossless && sizeMi == 2)
         {
             s.Symbols.WriteSymbol(partitionCdf, Av1PartitionType.None);
             EncodeLeaf(s, r, c, sizeMi);
             return;
         }
 
-        // Only lossless mode ever keeps a bigger region as one leaf. Non-lossless keeps this encoder's
-        // original behavior of always splitting all the way down to a fixed 8x8 grid: a non-lossless leaf
-        // bigger than 8x8 would need a real TX_16X16/TX_32X32/TX_64X64 forward-transform path
-        // (Av1ForwardTransform.Forward2D only handles square 4/8/16/32 today, and even 32 isn't wired up as
-        // a leaf size below), which is out of scope for this pass -- see the project plan.
-        //
         // DecidePartition/EstimateLumaCost (a real WHT-cost-based RD partition search, Phase D technique 6)
-        // is live for lossless, including for leaves that end up using IntraBC's approximate-match residual
-        // path (EncodeIntrabcResidual), which predicts every plane fresh per 4x4 sub-block from
-        // progressively-reconstructed state, matching Av1TileDecoder.TransformBlock's own per-sub-block
-        // PredictIntrabc call (spec §5.11.35) for any leaf size -- see EncodeIntrabcResidual's remarks. That
-        // path used to be gated to single-sub-block (sizeMi <= 2) leaves specifically because it predicted a
-        // merged coding block in one whole-block PredictIntrabc call instead, which could desync from a real
-        // decoder's per-sub-block prediction for a genuinely multi-sub-block IntraBC block; IntraBC's
-        // *exact*-match path (skip = 1, no residual, verified byte-identical to source before use) never had
-        // this problem, since it carries no per-sub-block prediction step at all.
+        // is live for lossless, now all the way down to spec's true 4x4 partition floor (sizeMi == 1, see
+        // above) rather than stopping at 8x8 -- see DecidePartition's own remarks for why going smaller
+        // matters for hard-edged/screen-content-style graphics. This includes leaves that end up using
+        // IntraBC's approximate-match residual path (EncodeIntrabcResidual), which predicts every plane fresh
+        // per 4x4 sub-block from progressively-reconstructed state, matching Av1TileDecoder.TransformBlock's
+        // own per-sub-block PredictIntrabc call (spec §5.11.35) for any leaf size -- see
+        // EncodeIntrabcResidual's remarks. That path used to be gated to single-sub-block (sizeMi <= 2)
+        // leaves specifically because it predicted a merged coding block in one whole-block PredictIntrabc
+        // call instead, which could desync from a real decoder's per-sub-block prediction for a genuinely
+        // multi-sub-block IntraBC block; IntraBC's *exact*-match path (skip = 1, no residual, verified
+        // byte-identical to source before use) never had this problem, since it carries no per-sub-block
+        // prediction step at all.
         if (s.Lossless && DecidePartition(s, r, c, sizeMi).KeepAsLeaf)
         {
             s.Symbols.WriteSymbol(partitionCdf, Av1PartitionType.None);
@@ -401,8 +417,10 @@ internal static class Av1TileEncoder
         long costLeaf = EstimateLumaCost(s, r, c, sizeMi) + LeafSignalingCost;
 
         (bool KeepAsLeaf, long Cost) result;
-        if (sizeMi == 2)
+        if (sizeMi == 1)
         {
+            // Spec's true 4x4 partition floor (see EncodePartitionForced's sizeMi == 1 case) -- nothing
+            // smaller to compare against, so a 4x4 node is always kept as a leaf.
             result = (true, costLeaf);
         }
         else
@@ -456,9 +474,18 @@ internal static class Av1TileEncoder
         int log2Size = PixelLog2(sizeMi);
         long bestCost = long.MaxValue;
 
+        // Below Block8x8 (sizeMi == 1, the new 4x4 leaf floor), spec's intra_angle_info_y/_uv (§5.11.42/.43)
+        // never reads an angle_delta symbol and always reconstructs with angleDelta == 0 regardless of mode
+        // -- mirroring that here, not just at the write site (see EncodeLeaf's own AngleDelta write-site
+        // remarks), is required for correctness, not just signaling economy: searching a nonzero angle_delta
+        // this proxy or the real search could still "win" with, only to have the real decoder reconstruct
+        // angleDelta == 0 instead, would desync this encoder's own recorded reconstruction from what a real
+        // decoder produces for the same bitstream.
+        bool angleDeltaAllowed = sizeMi >= 2;
+
         foreach (int mode in CandidateModes)
         {
-            bool directional = Av1IntraMode.IsDirectional(mode);
+            bool directional = Av1IntraMode.IsDirectional(mode) && angleDeltaAllowed;
             int minDelta = directional ? -MaxAngleDelta : 0;
             int maxDelta = directional ? MaxAngleDelta : 0;
 
@@ -621,14 +648,16 @@ internal static class Av1TileEncoder
     /// for lossless leaves. SSE only approximates entropy-coded bit cost -- for a lossless coder specifically
     /// (where distortion is always exactly zero once the real residual is added; the only real objective is
     /// minimizing bits), a proxy computed in the *transform domain* the entropy coder actually sees is a
-    /// closer stand-in than raw spatial-domain squared error: this sums the L1 magnitude of every 4x4
-    /// Walsh-Hadamard coefficient (<see cref="Av1ForwardWht"/>, the real lossless transform -- see
-    /// <see cref="EncodeLosslessLumaResidual"/>'s identical per-sub-block transform) the candidate's residual
-    /// would actually produce, not a full entropy-cost simulation (no CDF/context modeling), but materially
-    /// closer to true bit cost than SSE: AV1's coefficient entropy coding costs roughly log-linearly in
-    /// magnitude and near-zero for exact zeros, both of which SSE (quadratic, and blind to whether a
-    /// candidate's errors cluster into few zero-heavy 4x4 blocks or spread evenly) doesn't capture. Only used
-    /// for lossless -- non-lossless leaves use DCT, not WHT, so this proxy wouldn't match what they actually
+    /// closer stand-in than raw spatial-domain squared error: this sums a per-coefficient rate estimate
+    /// (<see cref="CoefficientCost"/>) over every 4x4 Walsh-Hadamard coefficient (<see cref="Av1ForwardWht"/>,
+    /// the real lossless transform -- see <see cref="EncodeLosslessLumaResidual"/>'s identical per-sub-block
+    /// transform) the candidate's residual would actually produce, not a full entropy-cost simulation (no
+    /// CDF/context modeling), but materially closer to true bit cost than SSE: AV1's coefficient entropy
+    /// coding costs near-zero for exact zeros and grows roughly linearly for small magnitudes but only
+    /// logarithmically for large ones (base-range + br-loop + Exp-Golomb tail, see
+    /// <see cref="CoefficientCost"/>'s remarks), neither of which SSE (quadratic, and blind to whether a
+    /// candidate's errors cluster into few zero-heavy 4x4 blocks or spread evenly) captures. Only used for
+    /// lossless -- non-lossless leaves use DCT, not WHT, so this proxy wouldn't match what they actually
     /// entropy-code; SSE remains the (already-established, still-correct) proxy there.
     ///
     /// <para>Takes an explicit <paramref name="source"/>/<paramref name="planeWidth"/> rather than always
@@ -675,12 +704,66 @@ internal static class Av1TileEncoder
                 Av1ForwardWht.Forward4x4(residual, coeff);
                 for (int k = 0; k < 16; k++)
                 {
-                    cost += Math.Abs(coeff[k]);
+                    cost += CoefficientCost(coeff[k]);
                 }
             }
         }
 
         return cost;
+    }
+
+    // Below this magnitude, AV1's real coeff_base symbol (spec §5.11.39, NUM_BASE_LEVELS levels 0..2 plus a
+    // "3-or-more" escape) costs roughly one unit of rate per unit of magnitude -- keeping this proxy's units
+    // identical to a plain L1 sum (its behavior before this constant existed) for every coefficient in this
+    // range preserves this proxy's existing calibration against LeafSignalingCost/SplitSignalingCost/
+    // ApproxDvSignalingMargin for exactly the content (photographic/noisy) those were tuned against, where
+    // per-coefficient magnitudes overwhelmingly stay small. See CoefficientCost's remarks for what changes
+    // above this cap.
+    private const int CoefficientLinearCap = 14;
+
+    /// <summary>
+    /// Rate estimate for one Walsh-Hadamard coefficient, standing in for what its real coeff_base/coeff_br/
+    /// golomb bit cost (spec §5.11.39's <c>coeffs()</c>) would actually be. A plain L1 sum of magnitudes (this
+    /// proxy's original form) implicitly assumes cost grows *linearly* with magnitude forever, but AV1's real
+    /// coefficient coding only grows linearly-ish up to a small base range (<c>NUM_BASE_LEVELS</c> plus the
+    /// <c>COEFF_BASE_RANGE</c> br-loop, roughly <see cref="CoefficientLinearCap"/> here) and then switches to
+    /// an Exp-Golomb tail, whose cost grows only logarithmically with the remaining magnitude -- so a single
+    /// large-magnitude coefficient (the WHT's response to a hard edge crossing the block, e.g. a
+    /// gradient-to-solid-color boundary in screen-content-style graphics) was systematically over-costed
+    /// relative to several small ones summing to the same total magnitude (spread noise, e.g. photographic
+    /// content), even though real AV1 spends far fewer bits on that one large coefficient than on that many
+    /// separately-coded small ones. That mismatch measurably distorted both this leaf's own mode/angle_delta
+    /// search and (via <see cref="EstimateLumaCost"/>) <see cref="DecidePartition"/>'s merge-vs-split
+    /// comparison: a merged leaf whose single global prediction produces one sharp-edge coefficient looked
+    /// artificially expensive next to splitting into quadrants that each avoid it, even when the merge was
+    /// really cheaper once real (sub-linear) entropy cost is accounted for -- see this project's AVIF lossless
+    /// screen-content-size issue for the measured 6-10x-larger-than-PNG regression this under/over-costing
+    /// caused on graphic/screen-content-style images.
+    ///
+    /// <para>Deliberately identity (<c>cost == |coefficient|</c>) below <see cref="CoefficientLinearCap"/>, not
+    /// just "smaller slope everywhere": a from-scratch log-everywhere formula was tried and measurably
+    /// regressed photographic content (where most coefficients are already small and a linear proxy is a
+    /// reasonable stand-in), because it discounted exactly the small-magnitude coefficients that dominate that
+    /// content's real cost too. Keeping the common small-magnitude case exactly as before and only flattening
+    /// growth past the point where AV1's own coding scheme itself flattens targets the graphic-content
+    /// regression without disturbing the already-correct photographic-content behavior.</para>
+    /// </summary>
+    private static long CoefficientCost(int coefficient)
+    {
+        int magnitude = Math.Abs(coefficient);
+        if (magnitude <= CoefficientLinearCap)
+        {
+            return magnitude;
+        }
+
+        // Exp-Golomb-shaped tail: spec's golomb_length_bit_count for a remaining value roughly doubles in
+        // cost every time it doubles in magnitude, i.e. cost grows with floor(log2(.)) -- BitOperations.Log2
+        // is that exact integer floor, avoiding floating point in a value that only ever influences RDO
+        // comparisons (never bitstream correctness) but should still stay bit-for-bit deterministic across
+        // platforms. Scaled by a small integer factor (rather than 1:1) so the tail's per-doubling cost
+        // increment stays comparable in scale to a few units of this proxy's linear region, not sub-1 noise.
+        int tail = magnitude - CoefficientLinearCap;
+        return CoefficientLinearCap + (4 * (long)System.Numerics.BitOperations.Log2((uint)tail + 1));
     }
 
     /// <summary>
@@ -724,9 +807,15 @@ internal static class Av1TileEncoder
         int bestAngleDelta = 0;
         long bestCost = long.MaxValue;
 
+        // Gated on the luma leaf's own sizeMi (matching intra_angle_info_uv()'s _miSize -- the coding
+        // block's size, not the chroma plane's residual size) -- see EstimateLumaCost's identical
+        // angleDeltaAllowed remarks for why this must match the real decoder's angleDelta == 0 default below
+        // Block8x8, not just skip signaling for it.
+        bool angleDeltaAllowed = sizeMi >= 2;
+
         foreach (int mode in CandidateModes)
         {
-            bool directional = Av1IntraMode.IsDirectional(mode);
+            bool directional = Av1IntraMode.IsDirectional(mode) && angleDeltaAllowed;
             int minDelta = directional ? -MaxAngleDelta : 0;
             int maxDelta = directional ? MaxAngleDelta : 0;
 
@@ -809,9 +898,15 @@ internal static class Av1TileEncoder
         int log2Size = PixelLog2(sizeMi);
         int leafElements = sizePixels * sizePixels;
 
+        // Below Block8x8 (sizeMi == 1), spec's intra_angle_info_y() (§5.11.42) never reads an angle_delta
+        // symbol and the decoder always reconstructs with angleDelta == 0 regardless of mode -- see
+        // EstimateLumaCost's identical angleDeltaAllowed remarks for why the search itself, not just the
+        // write site below, has to respect this for real (not just estimated) leaves too.
+        bool angleDeltaAllowed = sizeMi >= 2;
+
         foreach (int mode in CandidateModes)
         {
-            bool directional = Av1IntraMode.IsDirectional(mode);
+            bool directional = Av1IntraMode.IsDirectional(mode) && angleDeltaAllowed;
             int minDelta = directional ? -MaxAngleDelta : 0;
             int maxDelta = directional ? MaxAngleDelta : 0;
 
@@ -871,12 +966,14 @@ internal static class Av1TileEncoder
 
         // Whether screen-content palette mode (spec §5.11.46/§5.11.47) is even structurally present in the
         // bitstream for this leaf -- true whenever the frame declared allow_screen_content_tools (tied to
-        // lossless -- see Av1FrameHeaderWriter) and this leaf's size is palette-eligible, which every leaf
-        // this encoder ever produces is (floor 8x8, ceiling 64x64, always within spec's 64x64 palette size
-        // cap -- see Av1TileDecoder.AllowPalette). This must exactly match the decoder's own gate: getting
-        // it wrong doesn't just miss a compression opportunity, it desyncs every bit after it, since a real
-        // decoder either does or doesn't read palette_mode_info() based on this same condition.
-        bool paletteStructurallyPresent = s.Lossless;
+        // lossless -- see Av1FrameHeaderWriter) and this leaf's size is palette-eligible
+        // (Av1TileDecoder.AllowPalette: bSize >= Block8x8, ceiling 64x64 always satisfied since this
+        // encoder's leaf never exceeds 64x64). Every leaf this encoder produced before the partition floor
+        // reached 4x4 (sizeMi == 1) satisfied that size gate unconditionally (floor was 8x8), but a genuine
+        // 4x4 leaf does not -- this must exactly match the decoder's own gate: getting it wrong doesn't just
+        // miss a compression opportunity, it desyncs every bit after it, since a real decoder either does or
+        // doesn't read palette_mode_info() based on this same condition.
+        bool paletteStructurallyPresent = s.Lossless && sizeMi >= 2;
 
         // Whether IntraBC's own use_intrabc bit is structurally present -- tied to lossless the same way
         // allow_screen_content_tools is (see Av1FrameHeaderWriter), since this encoder never uses IntraBC
@@ -1069,7 +1166,12 @@ internal static class Av1TileEncoder
         {
         s.Symbols.WriteSymbol(s.Cdf.IntraFrameYMode[yModeCtx0][yModeCtx1], bestMode);
 
-        if (Av1IntraMode.IsDirectional(bestMode))
+        // intra_angle_info_y() (spec §5.11.42): structurally present only when this leaf's size is >= 8x8
+        // (Av1TileDecoder.IntraAngleInfoY's own _miSize >= Block8x8 gate) -- no longer always true now that
+        // the partition floor reaches 4x4 (sizeMi == 1), so this has to check for real; the search above
+        // already never picks a nonzero bestAngleDelta for such a leaf (angleDeltaAllowed), so this is a
+        // structural-presence match, not a search-quality change.
+        if (sizeMi >= 2 && Av1IntraMode.IsDirectional(bestMode))
         {
             s.Symbols.WriteSymbol(s.Cdf.AngleDelta[bestMode - Av1IntraMode.VPred], bestAngleDelta + MaxAngleDelta);
         }
@@ -1083,9 +1185,11 @@ internal static class Av1TileEncoder
             // size <= 32). Lossless is size-dependent instead: GetPlaneResidualSize(bSize, plane:1, ...)
             // is Block4x4 at 4:2:0 (chroma always coded as one 4x4 sub-block per luma 4x4, matching luma
             // 1:1 -- see EncodeChromaRegion) for any leaf size, but equals the leaf's own luma block size
-            // at 4:4:4 (chroma matches luma's leaf size 1:1 there too), so cflAllowed flips to false
-            // specifically for lossless + 4:4:4. Getting this CDF wrong doesn't just compress worse -- it
-            // silently desyncs the entropy decoder against any real AV1 decoder, since CFL-allowed-ness
+            // at 4:4:4 (chroma matches luma's leaf size 1:1 there too), so cflAllowed flips to false for
+            // lossless + 4:4:4 -- except at the 4x4 leaf floor itself, where the leaf's own luma block size
+            // already equals Block4x4, so this same condition flips back to true there. Getting this CDF
+            // wrong doesn't just compress worse -- it silently desyncs the entropy decoder against any real
+            // AV1 decoder, since CFL-allowed-ness
             // picks which adaptive probability table the very next symbol is read from. Chroma444 and
             // non-lossless never co-occur in this encoder (see Av1FrameEncoder.Encode's chroma444 gate),
             // so the non-lossless branch never needs to consult it. CFL itself is never selected here (not
@@ -1098,10 +1202,11 @@ internal static class Av1TileEncoder
             s.Symbols.WriteSymbol(uvModeCdf, bestUvMode);
 
             // intra_angle_info_uv() (spec §5.11.43): structurally present whenever this leaf's size is
-            // >= 8x8 (always true here -- the floor is 8x8) and the searched uv_mode is directional,
-            // mirroring Av1TileDecoder.IntraAngleInfoUv exactly, including its shared AngleDelta CDF table
-            // (indexed by mode class, not by plane).
-            if (Av1IntraMode.IsDirectional(bestUvMode))
+            // >= 8x8 (no longer always true now that the partition floor reaches 4x4, sizeMi == 1) and the
+            // searched uv_mode is directional, mirroring Av1TileDecoder.IntraAngleInfoUv exactly, including
+            // its shared AngleDelta CDF table (indexed by mode class, not by plane). SearchUvMode's own
+            // angleDeltaAllowed gate already never picks a nonzero bestUvAngleDelta for such a leaf.
+            if (sizeMi >= 2 && Av1IntraMode.IsDirectional(bestUvMode))
             {
                 s.Symbols.WriteSymbol(s.Cdf.AngleDelta[bestUvMode - Av1IntraMode.VPred], bestUvAngleDelta + MaxAngleDelta);
             }
@@ -2660,9 +2765,11 @@ internal static class Av1TileEncoder
                     Array.Copy(pred, i * 4, s.ReconY, ((subY + i) * s.YWidth) + subX, 4);
                 }
 
-                // blockSize: the coding block's real pixel size -- always > 4 for every leaf this encoder
-                // produces (the floor is 8x8), so the all_zero context can't take the transform-equals-block
-                // shortcut (see WriteCoeffs's remarks).
+                // blockSize: the coding block's real pixel size -- >= 8 for every leaf bigger than the 4x4
+                // floor (n > 1 sub-blocks, so the all_zero context can't take the transform-equals-block
+                // shortcut, see WriteCoeffs's remarks), but exactly 4 for a genuine 4x4 leaf (n == 1), where
+                // it deliberately *does* take that shortcut -- WriteCoeffs's own blockSize == size check
+                // handles both correctly without this call site needing to special-case n == 1 itself.
                 Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: blockSize);
                 Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
                 SetBlockDecoded(s, 0, subBlockMiRow, subBlockMiCol, true);
