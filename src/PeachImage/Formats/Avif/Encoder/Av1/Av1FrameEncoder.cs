@@ -80,10 +80,27 @@ internal static class Av1FrameEncoder
             reconY, reconU, reconV,
             monoChrome, baseQIdx, lossless, chroma444);
 
+        // Deblocking (spec §7.14) is a lossy-only tool -- codedLossless's own short-circuit means
+        // loop_filter_params() never even reaches the bitstream at lossless (see Av1FrameHeaderWriter.Write's
+        // own lossless remarks), so there's nothing to search for there. Chooses and applies the filter to
+        // reconY/U/V in place (see Av1InLoopFilterSearch.SearchAndApply's remarks) *before* the frame header
+        // is written, so the header can signal the real, chosen level -- Av1TileEncoder.EncodeTile already
+        // finished producing every pixel these buffers will ever hold, so nothing about the tile's own
+        // (already-flushed) bitstream depends on this running afterward.
+        int loopFilterLevel = 0;
+        if (!lossless)
+        {
+            loopFilterLevel = Av1InLoopFilterSearch.SearchAndApply(
+                reconY, reconU, reconV,
+                yPlane, uPlane, vPlane,
+                paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
+                monoChrome, baseQIdx);
+        }
+
         byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(paddedWidth, paddedHeight, monoChrome, chroma444);
 
         var frameHeaderWriter = new Av1BitWriter();
-        Av1FrameHeaderWriter.Write(frameHeaderWriter, paddedWidth, paddedHeight, monoChrome, baseQIdx, lossless);
+        Av1FrameHeaderWriter.Write(frameHeaderWriter, paddedWidth, paddedHeight, monoChrome, baseQIdx, lossless, loopFilterLevel);
         byte[] frameHeaderPayload = frameHeaderWriter.ToArray();
 
         var output = new List<byte>();
