@@ -3190,7 +3190,32 @@ internal static class Av1TileEncoder
 
             Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, chromaBlockSizePixels, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null);
             Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, chromaBlockSizePixels, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: false, uvTxType);
-            SetBlockDecoded(s, planeIndex, subBlockChromaRow, subBlockChromaCol, true);
+
+            // Marks this whole chromaN x chromaN sub-block footprint decoded -- not just its own (top-left)
+            // position -- mirroring Av1TileDecoder.TransformBlock's own `for (i < stepY) for (j < stepX))
+            // SetBlockDecoded(...)` loop exactly (stepX/stepY there are this same transform's width/height in
+            // chroma 4x4 units, i.e. chromaN here, since tx_mode is always TX_MODE_LARGEST -- see this
+            // method's own remarks). A single-position mark left every OTHER position this region actually
+            // covers (chromaN > 1 means more than one) permanently "not yet decoded" from a later leaf's own
+            // haveAboveRight/haveBelowLeft query's point of view, even after this region's real reconstruction
+            // finished -- silently disagreeing with a real decoder (which, per the loop above, correctly marks
+            // the whole footprint) about whether a neighbor is available. Getting this wrong doesn't matter
+            // for DC_PRED (which never reads the above-right/below-left corner samples these flags gate, see
+            // this method's own remarks above) -- which is exactly why it went unnoticed through PR #75's own
+            // real chroma mode search landing -- but a real directional/smooth (or CFL) mode reads those
+            // corners, and BuildEdges silently clamps/replicates instead of reading the real neighbor pixel
+            // whenever told a neighbor isn't available, corrupting the whole block's prediction from a stale
+            // "not decoded yet" flag, not just a few edge pixels -- confirmed via direct encoder/decoder
+            // instrumentation cross-check, not just inference: at one queried position, the encoder's own
+            // BlockDecoded state said false while the real decoder, given the identical bitstream, said true
+            // for the identical (plane, row, col) query.
+            for (int i = 0; i < chromaN; i++)
+            {
+                for (int j = 0; j < chromaN; j++)
+                {
+                    SetBlockDecoded(s, planeIndex, subBlockChromaRow + i, subBlockChromaCol + j, true);
+                }
+            }
         }
     }
 
