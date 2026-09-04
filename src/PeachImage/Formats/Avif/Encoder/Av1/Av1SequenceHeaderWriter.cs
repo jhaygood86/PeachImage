@@ -75,7 +75,16 @@ internal static class Av1SequenceHeaderWriter
     /// <see cref="Av1FrameEncoder.Encode"/>'s <c>chroma444</c> gate), signals AV1's identity color matrix and
     /// implicit 4:4:4 instead of this encoder's usual BT.601/4:2:0. Ignored when <paramref name="monoChrome"/>.
     /// </param>
-    public static byte[] Write(int width, int height, bool monoChrome, bool chroma444 = false)
+    /// <param name="enableCdef">
+    /// <c>enable_cdef</c> -- whether <see cref="Av1FrameHeaderWriter"/> may signal a real (non-<see cref="Av1CdefChoice.Off"/>)
+    /// CDEF strength combo for this frame (see <see cref="Av1CdefSearch"/>). Tied to <c>!lossless</c> at the
+    /// one caller (<see cref="Av1FrameEncoder.Encode"/>): CDEF is a lossy-only tool (spec's <c>codedLossless</c>
+    /// short-circuit means <c>cdef_params()</c> would never be read at coded-lossless regardless of this
+    /// flag), and enabling it for a lossless frame would only cost bits (the sequence-level flag itself, plus
+    /// the header's <c>cdef_params()</c> bits every frame this sequence header covers would then have to
+    /// carry) for a tool that can never actually run there.
+    /// </param>
+    public static byte[] Write(int width, int height, bool monoChrome, bool chroma444 = false, bool enableCdef = false)
     {
         var writer = new Av1BitWriter();
 
@@ -107,7 +116,7 @@ internal static class Av1SequenceHeaderWriter
         writer.WriteFlag(true); // enable_filter_intra
         writer.WriteFlag(EnableIntraEdgeFilter);
         writer.WriteFlag(false); // enable_superres
-        writer.WriteFlag(false); // enable_cdef
+        writer.WriteFlag(enableCdef); // enable_cdef
         writer.WriteFlag(false); // enable_restoration
 
         WriteColorConfig(writer, monoChrome, chroma444);

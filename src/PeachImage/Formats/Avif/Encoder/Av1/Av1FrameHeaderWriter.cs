@@ -52,8 +52,29 @@ internal static class Av1FrameHeaderWriter
     /// coded-lossless regardless of what value would otherwise have been chosen (see <see cref="Write"/>'s own
     /// <paramref name="lossless"/> remarks).
     /// </param>
-    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false, int loopFilterLevel = 0)
+    /// <param name="enableCdef">
+    /// Must match whatever <c>enable_cdef</c> value the sequence header covering this frame actually wrote
+    /// (<see cref="Av1SequenceHeaderWriter.Write"/>'s own <c>enableCdef</c> parameter) -- <c>cdef_params()</c>
+    /// is only present in the bitstream when the sequence header enabled it (spec's <c>ParseCdefParams</c>
+    /// short-circuits on <c>!seq.EnableCdef</c> regardless of what this method would otherwise write), so
+    /// this can't be derived from <paramref name="lossless"/> alone the way <paramref name="loopFilterLevel"/>'s
+    /// gating can: a caller is free to build a sequence header with CDEF disabled even for a non-lossless
+    /// frame (every default/positional-only call site does exactly that), and writing <c>cdef_params()</c>
+    /// bits in that case would desync the very next syntax element a real decoder reads. Defaults to
+    /// <see langword="false"/>, matching this method's pre-CDEF-support behavior for every caller that
+    /// doesn't pass it explicitly.
+    /// </param>
+    /// <param name="cdef">
+    /// CDEF (spec §7.15) strength choice from <see cref="Av1CdefSearch"/>'s RD search, or
+    /// <see cref="Av1CdefChoice.Off"/> (the default) to signal CDEF as a no-op strength-0/0 combo. This
+    /// encoder always writes exactly one strength combo (<c>cdef_bits = 0</c>) rather than the up to 8 a real
+    /// per-64x64-unit-adaptive encoder would use -- see <see cref="Av1CdefSearch"/>'s remarks. Ignored
+    /// (never written) whenever <paramref name="enableCdef"/> is <see langword="false"/> or
+    /// <paramref name="lossless"/> is <see langword="true"/>.
+    /// </param>
+    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false, int loopFilterLevel = 0, bool enableCdef = false, Av1CdefChoice? cdef = null)
     {
+        var cdefChoice = cdef ?? Av1CdefChoice.Off;
         if (lossless)
         {
             if (baseQIdx != 0)
@@ -139,8 +160,21 @@ internal static class Av1FrameHeaderWriter
             (writtenLevel0, writtenLevel1, writtenLevel2, writtenLevel3) = WriteLoopFilterParams(writer, loopFilterLevel, numPlanes);
         }
 
-        // cdef_params()/lr_params(): seq.EnableCdef == false / seq.EnableRestoration == false short-circuit
-        // both entirely regardless of losslessness -- no bits read/written for either.
+        // cdef_params() is read whenever seq.EnableCdef && !codedLossless && !allowIntrabc (see
+        // Av1FrameHeader.ParseCdefParams). allowIntrabc is itself always tied to lossless for this encoder
+        // (AllowIntrabc = AllowScreenContentTools = lossless, see above), so the only additional condition
+        // beyond !lossless (which loop_filter_params() already gates on) is enableCdef itself -- see that
+        // parameter's own remarks for why this can't just assume enableCdef == !lossless the way AllowIntrabc
+        // safely can.
+        bool cdefParamsPresent = !lossless && enableCdef;
+        var writtenCdef = cdefParamsPresent ? cdefChoice : Av1CdefChoice.Off;
+        if (cdefParamsPresent)
+        {
+            WriteCdefParams(writer, cdefChoice);
+        }
+
+        // lr_params(): seq.EnableRestoration == false short-circuits it entirely regardless of losslessness
+        // -- no bits read/written (loop restoration isn't implemented by this encoder yet).
 
         // tx_mode_select is only read when !codedLossless (tx_mode is otherwise implicitly OnlyTx4x4) --
         // see Av1FrameHeader's own codedLossless branch.
@@ -212,12 +246,12 @@ internal static class Av1FrameHeaderWriter
             },
             Cdef = new Av1CdefParams
             {
-                Damping = 3,
+                Damping = writtenCdef.Damping,
                 Bits = 0,
-                YPriStrength = [0],
-                YSecStrength = [0],
-                UvPriStrength = [0],
-                UvSecStrength = [0],
+                YPriStrength = [writtenCdef.YPriStrength],
+                YSecStrength = [writtenCdef.YSecStrength],
+                UvPriStrength = [writtenCdef.UvPriStrength],
+                UvSecStrength = [writtenCdef.UvSecStrength],
             },
             LoopRestoration = new Av1LoopRestorationParams
             {
@@ -263,4 +297,49 @@ internal static class Av1FrameHeaderWriter
         writer.WriteFlag(false); // loop_filter_delta_enabled
         return (level, level, level2, level3);
     }
+
+    /// <summary>
+    /// <c>cdef_params()</c> (spec §5.9.19) write-side, restricted to this encoder's v1 scope: always
+    /// <c>cdef_bits = 0</c> (exactly one strength combo, applied to every 64x64 unit in the frame -- a real
+    /// per-unit-adaptive encoder would search and signal up to <c>CDEF_MAX_STRENGTHS</c> = 8), and one shared
+    /// (<paramref name="cdef"/>'s <c>YPriStrength</c>/<c>UvPriStrength</c>) primary and
+    /// (<c>YSecStrength</c>/<c>UvSecStrength</c>) secondary strength rather than separately tuned per plane
+    /// beyond that. See <see cref="Av1CdefSearch"/> for how <paramref name="cdef"/> is chosen.
+    ///
+    /// <para>The secondary-strength field only has 4 legal values from its 2-bit code (spec's remap: raw code
+    /// 3 means strength 4, not 3 -- strength 3 is simply unreachable) -- <see cref="Av1CdefChoice"/>'s own
+    /// remarks document why its constructor only accepts <c>{0, 1, 2, 4}</c> for the secondary strengths, so
+    /// this method can invert that remap unconditionally (<c>value == 4 ? 3 : value</c>) without a validity
+    /// check here duplicating that one.</para>
+    /// </summary>
+    private static void WriteCdefParams(Av1BitWriter writer, Av1CdefChoice cdef)
+    {
+        writer.WriteBits((uint)(cdef.Damping - 3), 2); // cdef_damping_minus_3
+        writer.WriteBits(0, 2); // cdef_bits -> exactly 1 strength combo
+
+        writer.WriteBits((uint)cdef.YPriStrength, 4); // cdef_y_pri_strength[0]
+        writer.WriteBits((uint)(cdef.YSecStrength == 4 ? 3 : cdef.YSecStrength), 2); // cdef_y_sec_strength[0]
+        writer.WriteBits((uint)cdef.UvPriStrength, 4); // cdef_uv_pri_strength[0]
+        writer.WriteBits((uint)(cdef.UvSecStrength == 4 ? 3 : cdef.UvSecStrength), 2); // cdef_uv_sec_strength[0]
+    }
+}
+
+/// <summary>
+/// One AV1 CDEF (spec §7.15) strength combo -- this encoder's v1 scope always signals exactly one such combo
+/// per frame (<c>cdef_bits = 0</c>, see <see cref="Av1FrameHeaderWriter.WriteCdefParams"/>), applied
+/// uniformly to every 64x64 unit, rather than the up to 8 a real per-unit-adaptive encoder would choose among.
+/// </summary>
+/// <param name="Damping">Spec's <c>cdef_damping_minus_3 + 3</c>, so 3-6.</param>
+/// <param name="YPriStrength">0-15 (spec's 4-bit <c>cdef_y_pri_strength</c> field, written directly).</param>
+/// <param name="YSecStrength">
+/// One of <c>{0, 1, 2, 4}</c> -- the only 4 values spec's 2-bit secondary-strength field can represent (raw
+/// code 3 remaps to strength 4 on read, per spec §5.9.19; strength 3 itself is unreachable). Not validated
+/// here: <see cref="Av1CdefSearch"/>'s own candidate list is the only caller and never proposes 3.
+/// </param>
+/// <param name="UvPriStrength">0-15, chroma's primary strength.</param>
+/// <param name="UvSecStrength">One of <c>{0, 1, 2, 4}</c>, chroma's secondary strength -- see <see cref="YSecStrength"/>'s remarks.</param>
+internal readonly record struct Av1CdefChoice(int Damping, int YPriStrength, int YSecStrength, int UvPriStrength, int UvSecStrength)
+{
+    /// <summary>A strength-0/0 combo -- CDEF filters nothing (spec: strength 0 disables both the primary and secondary filter passes), so this is a true "off" equivalent to this encoder's previous always-disabled behavior, just with <c>cdef_params()</c> still present in the bitstream (a few extra header bits -- see <see cref="Av1FrameHeaderWriter.WriteCdefParams"/>'s remarks).</summary>
+    public static readonly Av1CdefChoice Off = new(Damping: 3, YPriStrength: 0, YSecStrength: 0, UvPriStrength: 0, UvSecStrength: 0);
 }
