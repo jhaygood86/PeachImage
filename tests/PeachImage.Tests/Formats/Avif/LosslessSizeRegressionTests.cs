@@ -109,16 +109,17 @@ public class LosslessSizeRegressionTests
     /// AVIF beats PNG -- even ffmpeg's own reference lossless AV1 encoder loses to PNG on this content type
     /// (confirmed during the original investigation), so that assertion would be a false positive here, not a
     /// real regression guard. Instead this bounds AVIF to a fixed multiple of the source PNG's size, per size,
-    /// chosen as the midpoint between this exact fixture/seed's measured before-fix and after-fix ratios
-    /// (128x128: 4.23x before / 3.80x after; 256x256: 4.65x before / 4.37x after; 512x512: 3.63x before / 3.38x
-    /// after) -- tight enough to actually fail if this fix regresses back toward its pre-fix behavior, not just
-    /// a loose sanity bound, while still keeping real margin (not the exact post-fix value) against ordinary
-    /// environment/future-content-specific size drift.</para>
+    /// using this exact fixture/seed's measured before-fix and after-fix ratios (128x128: 3.96x before / 3.70x
+    /// after; 256x256: 4.73x before / 4.41x after; 512x512: 4.32x before / 4.07x after) as reference points --
+    /// biased toward the after-fix side (not a plain midpoint) so the bound stays meaningfully below the
+    /// pre-fix ratio (catching a real regression back toward it) while leaving more headroom above the
+    /// post-fix measurement than a tight midpoint would, since a single-run measurement on one platform isn't
+    /// assumed to be the tightest legitimate value every environment will ever produce.</para>
     /// </summary>
     [Theory]
-    [InlineData(128, 128, 4.0)]
-    [InlineData(256, 256, 4.5)]
-    [InlineData(512, 512, 3.5)]
+    [InlineData(128, 128, 3.9)]
+    [InlineData(256, 256, 4.65)]
+    [InlineData(512, 512, 4.25)]
     public void GraphicContentImage_LosslessAvif_DoesNotBlowUpRelativeToSourcePng(int width, int height, double maxRatio)
     {
         using var image = CreateGraphicContentImage(width, height, seed: 42);
@@ -150,7 +151,7 @@ public class LosslessSizeRegressionTests
     {
         var image = Image.Create(width, height, PixelFormat.Rgb24);
         var pixels = image.GetPixelSpan();
-        var rng = new Random(seed);
+        var rng = new DeterministicRng(seed);
 
         for (int row = 0; row < height; row++)
         {
@@ -217,6 +218,39 @@ public class LosslessSizeRegressionTests
         }
 
         return image;
+    }
+
+    /// <summary>
+    /// A minimal SplitMix64-based PRNG, standing in for <see cref="Random"/> in
+    /// <see cref="CreateGraphicContentImage"/> specifically because that fixture backs a *byte-count* (not
+    /// just ordinal) assertion: <see cref="Random"/>'s seeded sequence is only documented to be stable within
+    /// a given .NET version, and this repo's test suite runs across multiple target frameworks (see
+    /// Directory.Build.props) -- a future runtime picking a different sequence for the same seed would
+    /// silently change this fixture's exact pixel content (and so its exact encoded byte counts) without
+    /// changing anything this test is actually meant to guard, a false failure indistinguishable from a real
+    /// regression. This algorithm's arithmetic (fixed-width unsigned multiply/xor/shift) is specified
+    /// completely enough to stay bit-identical on any .NET version/platform indefinitely, unlike relying on
+    /// a BCL implementation detail. <see cref="CreateFractalNoiseImage"/> doesn't need this: its own assertion
+    /// is a coarse ordinal comparison (AVIF smaller than PNG), not a specific byte-count bound, so it's
+    /// already insensitive to this kind of drift.
+    /// </summary>
+    private sealed class DeterministicRng(int seed)
+    {
+        private ulong _state = (ulong)seed + 0x9E3779B97F4A7C15UL;
+
+        private ulong NextUInt64()
+        {
+            _state += 0x9E3779B97F4A7C15UL;
+            ulong z = _state;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBUL;
+            return z ^ (z >> 31);
+        }
+
+        public double NextDouble() => (NextUInt64() >> 11) * (1.0 / (1UL << 53));
+
+        public int Next(int minInclusive, int maxExclusive) =>
+            minInclusive + (int)(NextUInt64() % (ulong)(maxExclusive - minInclusive));
     }
 
     /// <summary>One octave of value noise: independent random values on a <paramref name="cellSize"/>-spaced grid, bilinearly interpolated up to full <paramref name="width"/>x<paramref name="height"/> resolution.</summary>
