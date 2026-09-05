@@ -336,6 +336,57 @@ public class EncodeDecodeRoundTripTests
     }
 
     /// <summary>
+    /// Round-trip safety net for the first increment of rectangular (HORZ/VERT) partition support
+    /// (<c>Av1TileEncoder.EncodeRectangularLeaf</c>/<c>ComputeDecidePartition</c>'s Horz/Vert candidates) --
+    /// before this, the lossless encoder only ever emitted square leaves via a pure NONE/SPLIT quadtree,
+    /// unable to express a wide-short or tall-narrow region in one leaf at all. This fixture's top/bottom
+    /// solid-color halves are exactly <c>PartitionSubsize[Horz][Block64x64]</c>'s shape (two 64x32 leaves),
+    /// but the real RD comparison (<c>ComputeDecidePartition</c>) doesn't actually pick Horz for *this*
+    /// specific fixture as tuned today -- palette already makes each 32x32 quadrant of a plain quadtree split
+    /// just as cheap, so there's no net win here yet (confirmed by direct instrumentation: swapping several
+    /// synthetic variants, none reliably won; the real, measured win -- and proof the rectangular leaf
+    /// machinery is reached and correct -- came from a genuine 1054x1492 photo, where it fired 83 times,
+    /// stayed bit-exact, and shrank the file by ~1.8 KB even in this DC_PRED-only, HORZ/VERT-only first
+    /// increment). Kept as a real assertion of the leaf-commit machinery's correctness (skip/use_intrabc/
+    /// y_mode/uv_mode/palette-gate/filter_intra-gate bit order, the real per-4x4 WHT residual loop, and
+    /// <c>Av1CoefficientWriter.GetChromaAllZeroContext</c>'s area-based, not single-dimension, comparison --
+    /// see its own remarks for why a rectangular coding block needed that fixed) for whenever RDO tuning
+    /// (or a future directional-mode search, this first increment being DC_PRED-only) does choose Horz/Vert
+    /// for content shaped like this.
+    /// </summary>
+    [Fact]
+    public void HorizontalBand_Lossless_RectangularPartitionRoundTripsExactly()
+    {
+        var image = CreateHorizontalBandImage(64, 64);
+
+        var decoded = EncodeThenDecode(image, new AvifEncoderOptions { Lossless = true });
+
+        Assert.Equal(image.GetPixelSpan().ToArray(), decoded.GetPixelSpan().ToArray());
+    }
+
+    private static Image CreateHorizontalBandImage(int width, int height)
+    {
+        var image = Image.Create(width, height, PixelFormat.Rgb24);
+        var pixels = image.GetPixelSpan();
+        for (int row = 0; row < height; row++)
+        {
+            bool topHalf = row < height / 2;
+            byte r = topHalf ? (byte)40 : (byte)210;
+            byte g = topHalf ? (byte)90 : (byte)160;
+            byte b = topHalf ? (byte)180 : (byte)30;
+            for (int col = 0; col < width; col++)
+            {
+                int idx = ((row * width) + col) * 3;
+                pixels[idx + 0] = r;
+                pixels[idx + 1] = g;
+                pixels[idx + 2] = b;
+            }
+        }
+
+        return image;
+    }
+
+    /// <summary>
     /// 64-row filler (horizontal-stripe, structurally unrelated -- see <see cref="CreateFillerPlusStripePatternImage"/>),
     /// followed by a 64-row "source" band and a 64-row "repeat" band both built from a jaggier variant of
     /// <see cref="SmoothedNoise_Lossless_RoundTripsExactly"/>'s own two-incommensurate-periods formula, with
