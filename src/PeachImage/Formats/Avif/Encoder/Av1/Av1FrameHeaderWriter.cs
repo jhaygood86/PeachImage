@@ -125,7 +125,7 @@ internal static class Av1FrameHeaderWriter
             writer.WriteFlag(true); // allow_intrabc
         }
 
-        var tileInfo = Av1TileInfoWriter.Write(writer, miCols, miRows);
+        var tileInfo = Av1TileInfoWriter.Write(writer, miCols, miRows, use128x128Superblock: lossless);
 
         writer.WriteBits((uint)baseQIdx, 8);
         writer.WriteFlag(false); // delta_q_y_dc coded flag -> DeltaQYDc = 0

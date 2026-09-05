@@ -1,9 +1,10 @@
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
 /// <summary>
-/// Top-level AV1 encode entry point: converts a source image to YUV, pads it to a 64-pixel-multiple coded
-/// canvas (edge-replicated -- see <see cref="Av1TileEncoder"/>'s remarks on why this is required for its
-/// simplified, edge-case-free superblock traversal), writes the sequence/frame headers and the single tile,
+/// Top-level AV1 encode entry point: converts a source image to YUV, pads it (edge-replicated -- see
+/// <see cref="Av1TileEncoder"/>'s remarks on why this is required for its simplified, edge-case-free
+/// superblock traversal) to a coded canvas that's a multiple of the actual superblock size -- 128 pixels for
+/// lossless (128x128 superblocks), 64 for everything else -- writes the sequence/frame headers and the single tile,
 /// and assembles the final OBU byte stream (temporal delimiter + sequence header + frame header + tile
 /// group). The true (unpadded) source dimensions are carried separately in the returned
 /// <see cref="Av1EncodedFrame"/> for the container writer's <c>ispe</c> box -- the AVIF container crops the
@@ -21,8 +22,13 @@ internal static class Av1FrameEncoder
     /// </summary>
     public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality, bool lossless = false)
     {
-        int paddedWidth = ((width + 63) / 64) * 64;
-        int paddedHeight = ((height + 63) / 64) * 64;
+        // Lossless uses 128x128 superblocks (Av1SequenceHeaderWriter/Av1TileEncoder), so the coded canvas
+        // must pad to a 128-pixel multiple instead of 64 -- same "every superblock fully in-bounds" reason
+        // the 64-pixel padding exists for the non-lossless/64x64-superblock path (see this class's own
+        // remarks and Av1TileEncoder's).
+        int sbPixels = lossless ? 128 : 64;
+        int paddedWidth = ((width + sbPixels - 1) / sbPixels) * sbPixels;
+        int paddedHeight = ((height + sbPixels - 1) / sbPixels) * sbPixels;
 
         // The one gate for genuinely lossless RGB: lossless + real chroma planes means 4:4:4 with an
         // identity color matrix (Av1RgbToYuvIdentityConverter) instead of 4:2:0 BT.601 -- see that class's
@@ -110,7 +116,7 @@ internal static class Av1FrameEncoder
                 monoChrome, baseQIdx, loopFilterLevel);
         }
 
-        byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(paddedWidth, paddedHeight, monoChrome, chroma444, enableCdef: !lossless);
+        byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(paddedWidth, paddedHeight, monoChrome, chroma444, enableCdef: !lossless, use128x128Superblock: lossless);
 
         var frameHeaderWriter = new Av1BitWriter();
         Av1FrameHeaderWriter.Write(frameHeaderWriter, paddedWidth, paddedHeight, monoChrome, baseQIdx, lossless, loopFilterLevel, enableCdef: !lossless, cdefChoice);
