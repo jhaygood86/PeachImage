@@ -3222,7 +3222,7 @@ internal static class Av1TileEncoder
     }
 
     private const int ApproxSearchWindow = 64;
-    private const int ApproxSignatureBucketWindow = 64;
+    private const int ApproxSignatureBucketWindow = 256;
     private const long ApproxDvSignalingMargin = 64;
 
     /// <summary>
