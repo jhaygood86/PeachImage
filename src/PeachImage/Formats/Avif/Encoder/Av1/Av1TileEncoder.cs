@@ -3560,7 +3560,15 @@ internal static class Av1TileEncoder
     }
 
     private const int ApproxSearchWindow = 64;
-    private const int ApproxSignatureBucketWindow = 256;
+
+    // Widened from the original 256: measured on this project's own real target photo (1054x1492,
+    // communityyardsale0926.png), a wider bucket window keeps finding genuinely better matches beyond the
+    // old cutoff (256 -> 2,076,474 bytes; 1024 -> 2,075,755; 4096 -> 2,075,734 -- diminishing fast past 1024,
+    // capturing ~97% of the 4096 ceiling's gain), at a modest ~9% wall-time cost (this window is scanned once
+    // per leaf that reaches this fallback, unlike MotionSearchCoarseCandidateBudget's own much steeper curve).
+    // 1024 is the practical knee of that curve, not evidence the underlying content-similarity signal stops
+    // mattering past it.
+    private const int ApproxSignatureBucketWindow = 1024;
     private const long ApproxDvSignalingMargin = 64;
 
     /// <summary>
