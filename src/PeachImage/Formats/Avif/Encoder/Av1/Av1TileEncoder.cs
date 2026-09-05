@@ -3185,13 +3185,24 @@ internal static class Av1TileEncoder
     /// <c>gradient</c> computation below for the one term that depends on this.
     /// </summary>
     private static bool IsValidIntrabcSource(TileState s, int r, int c, int sizeMi, int srcR, int srcC)
+        => IsValidIntrabcSourcePixels(s, c * 4, r * 4, sizeMi * 4, srcC * 4, srcR * 4);
+
+    /// <summary>
+    /// Pixel-coordinate generalization of <see cref="IsValidIntrabcSource"/>'s exact same check -- real AV1
+    /// DVs are <em>not</em> constrained to another coding block's own top-left corner (confirmed against
+    /// libaom's own <c>av1_is_dv_valid</c>, <c>av1/common/mvref_common.h</c>: the only alignment requirement
+    /// is whole-pixel, <c>(dv.row | dv.col) &amp; 7 == 0</c> in spec's 1/8-luma-sample units, matching
+    /// <c>force_integer_mv</c> -- there's no further requirement that the referenced position be a multiple
+    /// of 4 pixels, let alone line up with some other leaf's own boundary). <see cref="FindApproximateIntrabcMatchViaMotionSearch"/>
+    /// needs this general form to legality-check arbitrary candidate pixel positions, not just other leaves'
+    /// recorded positions the way <see cref="FindApproximateIntrabcMatch"/>'s older two candidate sources do.
+    /// </summary>
+    private static bool IsValidIntrabcSourcePixels(TileState s, int x, int y, int sizePixels, int srcX, int srcY)
     {
-        int bw = sizeMi * 4;
-        int bh = sizeMi * 4;
-        int srcTopEdge = srcR * 4;
-        int srcLeftEdge = srcC * 4;
-        int srcBottomEdge = srcTopEdge + bh;
-        int srcRightEdge = srcLeftEdge + bw;
+        int srcTopEdge = srcY;
+        int srcLeftEdge = srcX;
+        int srcBottomEdge = srcTopEdge + sizePixels;
+        int srcRightEdge = srcLeftEdge + sizePixels;
 
         if (srcTopEdge < 0 || srcLeftEdge < 0 || srcBottomEdge > s.MiRows * 4 || srcRightEdge > s.MiCols * 4)
         {
@@ -3199,8 +3210,8 @@ internal static class Av1TileEncoder
         }
 
         const int sbH = 64;
-        int activeSbRow = (r * 4) / sbH;
-        int activeSb64Col = (c * 4) >> 6;
+        int activeSbRow = y / sbH;
+        int activeSb64Col = x >> 6;
         int srcSbRow = (srcBottomEdge - 1) / sbH;
         int srcSb64Col = (srcRightEdge - 1) >> 6;
         int totalSb64PerRow = ((s.MiCols - 1) >> 4) + 1;
@@ -3212,7 +3223,7 @@ internal static class Av1TileEncoder
         }
 
         // use_128x128_superblock is always true here -- IntraBC only ever runs under lossless, and lossless
-        // always uses 128x128 superblocks (see this method's remarks above). Real AV1 (libaom's
+        // always uses 128x128 superblocks (see IsValidIntrabcSource's own remarks above). Real AV1 (libaom's
         // av1_is_dv_valid) adds a further +1 to this gradient in exactly that case; this used to omit it
         // (stale from before lossless switched to 128x128 superblocks, when it was genuinely always 0 here),
         // under-widening the wavefront reachability bound for every lossless frame since.
@@ -3261,14 +3272,12 @@ internal static class Av1TileEncoder
         int bestMvCol = 0;
         bool found = false;
 
-        void ConsiderCandidate(int srcR, int srcC)
+        void ConsiderCandidatePixels(int srcX, int srcY)
         {
-            int srcX = srcC * 4;
-            int srcY = srcR * 4;
             int deltaRow = srcY - y;
             int deltaCol = srcX - x;
 
-            if ((deltaRow == 0 && deltaCol == 0) || !IsValidIntrabcSource(s, r, c, sizeMi, srcR, srcC))
+            if ((deltaRow == 0 && deltaCol == 0) || !IsValidIntrabcSourcePixels(s, x, y, sizePixels, srcX, srcY))
             {
                 return;
             }
@@ -3287,6 +3296,8 @@ internal static class Av1TileEncoder
                 found = true;
             }
         }
+
+        void ConsiderCandidate(int srcR, int srcC) => ConsiderCandidatePixels(srcC * 4, srcR * 4);
 
         if (s.PositionsBySize.TryGetValue(sizePixels, out var positions))
         {
@@ -3309,6 +3320,11 @@ internal static class Av1TileEncoder
             }
         }
 
+        if (FindApproximateIntrabcMatchViaMotionSearch(s, x, y, sizePixels, out int motionSrcX, out int motionSrcY))
+        {
+            ConsiderCandidatePixels(motionSrcX, motionSrcY);
+        }
+
         if (!found || bestCost + ApproxDvSignalingMargin >= bestIntraCost)
         {
             return false;
@@ -3317,6 +3333,140 @@ internal static class Av1TileEncoder
         mvRow = bestMvRow;
         mvCol = bestMvCol;
         return true;
+    }
+
+    private const int MotionSearchCoarseCandidateBudget = 200;
+
+    /// <summary>
+    /// Real (if bounded) pixel-level motion search for an IntraBC copy source, unlike
+    /// <see cref="FindApproximateIntrabcMatch"/>'s other two candidate sources (both restricted to some other
+    /// leaf's own recorded top-left position). Confirmed against libaom's own <c>av1_is_dv_valid</c>
+    /// (<c>av1/common/mvref_common.h</c>) that a real DV has no such restriction -- only whole-pixel
+    /// alignment -- so a genuinely good copy source can sit at any pixel position within the legal region,
+    /// not just where some other coding block happened to start. libaom's own real search
+    /// (<c>rd_pick_intrabc_mode_sb</c>, <c>av1/encoder/rdopt.c</c>) is a real full-pixel motion search over
+    /// the whole already-coded "above"/"left" region; this is a bounded two-phase approximation of that idea
+    /// scaled to this encoder's own performance budget: a coarse grid scan (spaced so the total candidate
+    /// count stays roughly constant regardless of frame size, not a fixed pixel step that would blow up on a
+    /// large image) using cheap SAD as the coarse metric (a full WHT-based <see cref="ComputeIntrabcLumaCost"/>
+    /// per coarse candidate would be far too slow at this candidate count), followed by a diamond-style local
+    /// refinement around the coarse winner with halving step size. Only the single final winner is ever priced
+    /// with the real WHT-based cost, by <see cref="FindApproximateIntrabcMatch"/>'s own
+    /// <c>ConsiderCandidatePixels</c> after this returns -- SAD and WHT-magnitude cost don't always agree on
+    /// which of two *close* candidates is cheaper, but do reliably agree on which region of the frame has a
+    /// genuinely similar match at all, which is what this coarse-then-refine search needs to find.
+    /// </summary>
+    private static bool FindApproximateIntrabcMatchViaMotionSearch(TileState s, int x, int y, int sizePixels, out int bestSrcX, out int bestSrcY)
+    {
+        bestSrcX = 0;
+        bestSrcY = 0;
+
+        int regionWidth = s.MiCols * 4;
+        int regionHeight = y + sizePixels;
+        if (regionWidth < sizePixels || regionHeight < sizePixels)
+        {
+            return false;
+        }
+
+        long area = (long)(regionWidth - sizePixels + 1) * (regionHeight - sizePixels + 1);
+        int step = Math.Max(1, (int)Math.Sqrt((double)area / MotionSearchCoarseCandidateBudget));
+
+        long bestSad = long.MaxValue;
+        bool found = false;
+
+        for (int srcY = 0; srcY <= regionHeight - sizePixels; srcY += step)
+        {
+            for (int srcX = 0; srcX <= regionWidth - sizePixels; srcX += step)
+            {
+                if (srcX == x && srcY == y)
+                {
+                    continue;
+                }
+
+                if (!IsValidIntrabcSourcePixels(s, x, y, sizePixels, srcX, srcY))
+                {
+                    continue;
+                }
+
+                long sad = ComputeIntrabcLumaSad(s, x, y, srcX, srcY, sizePixels);
+                if (sad < bestSad)
+                {
+                    bestSad = sad;
+                    bestSrcX = srcX;
+                    bestSrcY = srcY;
+                    found = true;
+                }
+            }
+        }
+
+        if (!found)
+        {
+            return false;
+        }
+
+        int refineStep = Math.Max(1, step / 2);
+        while (refineStep >= 1)
+        {
+            bool improved = false;
+            Span<(int Dy, int Dx)> neighbors =
+            [
+                (-refineStep, 0), (refineStep, 0), (0, -refineStep), (0, refineStep),
+                (-refineStep, -refineStep), (-refineStep, refineStep), (refineStep, -refineStep), (refineStep, refineStep),
+            ];
+
+            foreach (var (dy, dx) in neighbors)
+            {
+                int candX = bestSrcX + dx;
+                int candY = bestSrcY + dy;
+                if (candX < 0 || candY < 0 || candX > regionWidth - sizePixels || candY > regionHeight - sizePixels)
+                {
+                    continue;
+                }
+
+                if (candX == x && candY == y)
+                {
+                    continue;
+                }
+
+                if (!IsValidIntrabcSourcePixels(s, x, y, sizePixels, candX, candY))
+                {
+                    continue;
+                }
+
+                long sad = ComputeIntrabcLumaSad(s, x, y, candX, candY, sizePixels);
+                if (sad < bestSad)
+                {
+                    bestSad = sad;
+                    bestSrcX = candX;
+                    bestSrcY = candY;
+                    improved = true;
+                }
+            }
+
+            if (!improved)
+            {
+                refineStep /= 2;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Cheap sum-of-absolute-differences between this leaf's own source luma and a candidate copy source's already-reconstructed luma -- the coarse-search metric <see cref="FindApproximateIntrabcMatchViaMotionSearch"/> uses instead of a full WHT-based cost, exactly the SAD-then-refine shape real motion search algorithms use to keep the expensive metric off the hot path.</summary>
+    private static long ComputeIntrabcLumaSad(TileState s, int x, int y, int srcX, int srcY, int sizePixels)
+    {
+        long sad = 0;
+        for (int i = 0; i < sizePixels; i++)
+        {
+            int rowBase = ((y + i) * s.YWidth) + x;
+            int srcRowBase = ((srcY + i) * s.YWidth) + srcX;
+            for (int j = 0; j < sizePixels; j++)
+            {
+                sad += Math.Abs(s.SourceY[rowBase + j] - s.ReconY[srcRowBase + j]);
+            }
+        }
+
+        return sad;
     }
 
     /// <summary>Luma-only WHT-magnitude cost of block-copying from (<paramref name="mvRow"/>, <paramref name="mvCol"/>) (spec 1/8th-luma-sample units) instead of the leaf's own source pixels -- see <see cref="ComputeCandidateCost"/>'s remarks for why this proxy, not SSE.</summary>
