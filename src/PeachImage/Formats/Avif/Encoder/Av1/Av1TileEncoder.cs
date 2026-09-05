@@ -297,7 +297,7 @@ internal static class Av1TileEncoder
         // remarks. Keyed by the full (r, c, sizeMi) triple, not just (r, c): the same top-left position is
         // visited at every size level on the way down (a node's leaf-vs-split choice at 32x32 and its
         // leaf-vs-split choice at 16x16 share a top-left corner but are different decisions).
-        public required Dictionary<(int R, int C, int SizeMi), (bool KeepAsLeaf, long Cost)> PartitionDecisions;
+        public required Dictionary<(int R, int C, int SizeMi), (int Type, long Cost)> PartitionDecisions;
         public required Av1CoefficientWriter.PlaneContext YCoeffCtx;
         public required Av1CoefficientWriter.PlaneContext? UCoeffCtx;
         public required Av1CoefficientWriter.PlaneContext? VCoeffCtx;
@@ -347,6 +347,25 @@ internal static class Av1TileEncoder
         4 => Av1BlockSize.Block16x16,
         2 => Av1BlockSize.Block8x8,
         _ => Av1BlockSize.Block4x4,
+    };
+
+    /// <summary>
+    /// Rectangular counterpart to <see cref="BlockSizeFromSizeMi"/>, for a HORZ/VERT-split leaf (<paramref
+    /// name="wMi"/> != <paramref name="hMi"/>) -- falls back to the square mapping when they're equal.
+    /// Covers exactly the shapes <see cref="ComputeDecidePartition"/>'s Horz/Vert candidates can produce
+    /// (parents up to 64x64, see its own remarks): 8x4/4x8 up to 64x32/32x64.
+    /// </summary>
+    private static int BlockSizeFromWidthHeightMi(int wMi, int hMi) => (wMi, hMi) switch
+    {
+        (2, 1) => Av1BlockSize.Block8x4,
+        (1, 2) => Av1BlockSize.Block4x8,
+        (4, 2) => Av1BlockSize.Block16x8,
+        (2, 4) => Av1BlockSize.Block8x16,
+        (8, 4) => Av1BlockSize.Block32x16,
+        (4, 8) => Av1BlockSize.Block16x32,
+        (16, 8) => Av1BlockSize.Block64x32,
+        (8, 16) => Av1BlockSize.Block32x64,
+        _ => BlockSizeFromSizeMi(wMi),
     };
 
     /// <summary><c>log2</c> of a leaf's pixel width/height, for <see cref="Av1IntraPrediction.Predict"/>'s <c>log2W</c>/<c>log2H</c> parameters -- e.g. sizeMi 16 (64 pixels) -&gt; 6.</summary>
@@ -402,20 +421,39 @@ internal static class Av1TileEncoder
         // a genuinely multi-sub-block IntraBC block; IntraBC's *exact*-match path (skip = 1, no residual,
         // verified byte-identical to source before use) never had this problem, since it carries no
         // per-sub-block prediction step at all.
-        if (DecidePartition(s, r, c, sizeMi).KeepAsLeaf)
-        {
-            s.Symbols.WriteSymbol(partitionCdf, Av1PartitionType.None);
-            EncodeLeaf(s, r, c, sizeMi);
-            return;
-        }
-
-        s.Symbols.WriteSymbol(partitionCdf, Av1PartitionType.Split);
-
+        int decidedType = DecidePartition(s, r, c, sizeMi).Type;
         int half = sizeMi / 2;
-        EncodePartitionForced(s, r, c, half);
-        EncodePartitionForced(s, r, c + half, half);
-        EncodePartitionForced(s, r + half, c, half);
-        EncodePartitionForced(s, r + half, c + half, half);
+
+        switch (decidedType)
+        {
+            case Av1PartitionType.None:
+                s.Symbols.WriteSymbol(partitionCdf, Av1PartitionType.None);
+                EncodeLeaf(s, r, c, sizeMi);
+                return;
+
+            // HORZ/VERT (first increment of full AV1 partition-type support, lossless only -- see
+            // ComputeDecidePartition's own remarks): each produces exactly two final, non-recursing leaves
+            // (spec's partition_subsize() gives the final block size directly), unlike SPLIT below.
+            case Av1PartitionType.Horz:
+                s.Symbols.WriteSymbol(partitionCdf, Av1PartitionType.Horz);
+                EncodeRectangularLeaf(s, r, c, sizeMi, half);
+                EncodeRectangularLeaf(s, r + half, c, sizeMi, half);
+                return;
+
+            case Av1PartitionType.Vert:
+                s.Symbols.WriteSymbol(partitionCdf, Av1PartitionType.Vert);
+                EncodeRectangularLeaf(s, r, c, half, sizeMi);
+                EncodeRectangularLeaf(s, r, c + half, half, sizeMi);
+                return;
+
+            default:
+                s.Symbols.WriteSymbol(partitionCdf, Av1PartitionType.Split);
+                EncodePartitionForced(s, r, c, half);
+                EncodePartitionForced(s, r, c + half, half);
+                EncodePartitionForced(s, r + half, c, half);
+                EncodePartitionForced(s, r + half, c + half, half);
+                return;
+        }
     }
 
     // A split node's own signaling is now priced exactly (the real partition symbol's bit cost, computed in
@@ -460,7 +498,7 @@ internal static class Av1TileEncoder
     /// (BuildEdges' clamp/replicate fallback is always a legal prediction), just a slightly less-informed
     /// cost estimate for those specific candidates.</para>
     /// </summary>
-    private static (bool KeepAsLeaf, long Cost) DecidePartition(TileState s, int r, int c, int sizeMi)
+    private static (int Type, long Cost) DecidePartition(TileState s, int r, int c, int sizeMi)
     {
         if (s.PartitionDecisions.TryGetValue((r, c, sizeMi), out var cached))
         {
@@ -473,7 +511,7 @@ internal static class Av1TileEncoder
     }
 
     /// <summary>Actual decision logic behind <see cref="DecidePartition"/>, split out so every return path still goes through that method's single memoization write -- see its own remarks for the overall approach.</summary>
-    private static (bool KeepAsLeaf, long Cost) ComputeDecidePartition(TileState s, int r, int c, int sizeMi)
+    private static (int Type, long Cost) ComputeDecidePartition(TileState s, int r, int c, int sizeMi)
     {
         // Spec's true 4x4 partition floor (see EncodePartitionForced's sizeMi == 1 case) -- lossless is the
         // only mode that ever reaches this (non-lossless's own floor is sizeMi == 2, below) -- nothing
@@ -482,7 +520,7 @@ internal static class Av1TileEncoder
         // cost applies here either.
         if (sizeMi == 1)
         {
-            return (true, EstimateLumaCost(s, r, c, sizeMi) + LeafOtherSignalingCost);
+            return (Av1PartitionType.None, EstimateLumaCost(s, r, c, sizeMi) + LeafOtherSignalingCost);
         }
 
         // Real partition-symbol bit costs (Av1SymbolEncoder.EstimateSymbolCost), replacing the old flat
@@ -527,7 +565,7 @@ internal static class Av1TileEncoder
         if (!s.Lossless && sizeMi == 2)
         {
             long floorNoneBits = Av1SymbolEncoder.EstimateSymbolCost(partitionCdf, Av1PartitionType.None);
-            return (true, EstimateLumaCost(s, r, c, sizeMi) + EstimateChromaCost(s, r, c, sizeMi) + ScaleSignalingBits(LeafOtherSignalingCost + floorNoneBits));
+            return (Av1PartitionType.None, EstimateLumaCost(s, r, c, sizeMi) + EstimateChromaCost(s, r, c, sizeMi) + ScaleSignalingBits(LeafOtherSignalingCost + floorNoneBits));
         }
 
         long splitBits = Av1SymbolEncoder.EstimateSymbolCost(partitionCdf, Av1PartitionType.Split);
@@ -546,7 +584,7 @@ internal static class Av1TileEncoder
         // the leaf-vs-split comparison, so it must never run here, not merely never win.
         if (!s.Lossless && sizeMi == 16)
         {
-            return (false, costSplit);
+            return (Av1PartitionType.Split, costSplit);
         }
 
         // Non-lossless leaves reaching this point are always sizeMi 4 or 8 (16x16/32x32 -- sizeMi == 16 was
@@ -575,7 +613,46 @@ internal static class Av1TileEncoder
 
         long costLeaf = lumaCost + chromaCost + ScaleSignalingBits(LeafOtherSignalingCost + noneBits);
 
-        return costLeaf <= costSplit ? (true, costLeaf) : (false, costSplit);
+        // Rectangular HORZ/VERT candidates (first increment of full AV1 partition-type support -- see
+        // EncodeRectangularLeaf's own remarks for the scoping rationale): lossless only, and only for a
+        // parent at or below 64x64 (sizeMi <= 16), so the resulting leaf is never bigger than 64x32/32x64 in
+        // either dimension -- see EstimateRectLumaCost's remarks for why that keeps this out of the >64px
+        // chunked residual path entirely. Unlike SPLIT, HORZ/VERT never recurse further: spec's own
+        // partition_subsize() gives each half's *final* block size directly, so this only ever costs exactly
+        // two leaves per candidate, not a recursive DecidePartition call.
+        int bestType = Av1PartitionType.None;
+        long bestCost = costLeaf;
+
+        if (costSplit < bestCost)
+        {
+            bestType = Av1PartitionType.Split;
+            bestCost = costSplit;
+        }
+
+        if (s.Lossless && sizeMi <= 16)
+        {
+            long horzBits = Av1SymbolEncoder.EstimateSymbolCost(partitionCdf, Av1PartitionType.Horz);
+            long costHorz = ScaleSignalingBits(horzBits + (2 * LeafOtherSignalingCost))
+                + EstimateRectLumaCost(s, r, c, sizeMi, half)
+                + EstimateRectLumaCost(s, r + half, c, sizeMi, half);
+            if (costHorz < bestCost)
+            {
+                bestType = Av1PartitionType.Horz;
+                bestCost = costHorz;
+            }
+
+            long vertBits = Av1SymbolEncoder.EstimateSymbolCost(partitionCdf, Av1PartitionType.Vert);
+            long costVert = ScaleSignalingBits(vertBits + (2 * LeafOtherSignalingCost))
+                + EstimateRectLumaCost(s, r, c, half, sizeMi)
+                + EstimateRectLumaCost(s, r, c + half, half, sizeMi);
+            if (costVert < bestCost)
+            {
+                bestType = Av1PartitionType.Vert;
+                bestCost = costVert;
+            }
+        }
+
+        return (bestType, bestCost);
     }
 
     /// <summary>
@@ -656,6 +733,80 @@ internal static class Av1TileEncoder
         }
 
         return bestCost;
+    }
+
+    /// <summary>
+    /// Rectangular (HORZ/VERT) counterpart to <see cref="EstimateLumaCost"/>, real per-4x4-sub-block WHT
+    /// trial cost of a <paramref name="wMi"/>x<paramref name="hMi"/> (mi units) leaf at (<paramref name="r"/>,
+    /// <paramref name="c"/>). Lossless-only (see <see cref="ComputeDecidePartition"/>'s Horz/Vert call site --
+    /// non-lossless never calls this) and DC_PRED-only, deliberately: this is a first increment of rectangular
+    /// partition support (see <see cref="EncodeRectangularLeaf"/>'s own remarks for the full scoping
+    /// rationale) -- a real directional/angle_delta search, palette, and IntraBC for a rectangular leaf are
+    /// all left for a follow-up, so there is exactly one candidate to cost here, not a search. Mirrors
+    /// <see cref="EncodeRectangularLeaf"/>'s own per-sub-block, predict-from-progressively-updated-context
+    /// shape, reading <see cref="TileState.SourceY"/> instead of <see cref="TileState.ReconY"/> for the same
+    /// reason <see cref="EstimateLumaCost"/> does (see <see cref="DecidePartition"/>'s remarks: for lossless,
+    /// a real commit's reconstruction is always bit-identical to source, so this is exact, not approximate,
+    /// for the pixel data itself -- only haveAboveRight/haveBelowLeft fall back to their conservative
+    /// "unavailable" default here, exactly like <see cref="EstimateLumaCost"/>'s own choice). Never reached
+    /// for a leaf bigger than 64x64 in either dimension -- <see cref="ComputeDecidePartition"/> only ever
+    /// offers Horz/Vert for a parent at or below sizeMi 16 (64x64), so the biggest rectangular candidate this
+    /// ever costs is 64x32/32x64, never needing the &gt;64px chunked residual shape
+    /// <see cref="EncodeLeaf"/>'s square path still handles separately.
+    /// </summary>
+    private static long EstimateRectLumaCost(TileState s, int r, int c, int wMi, int hMi)
+    {
+        int widthPixels = wMi * 4;
+        int heightPixels = hMi * 4;
+        int x = c * 4;
+        int y = r * 4;
+
+        var above = new Av1EdgeArray(16);
+        var left = new Av1EdgeArray(16);
+        var pred = s.Pred;
+        var scratch = s.ScratchCoeffCtx;
+        var trial = s.TrialSink;
+        scratch.SeedFrom(s.YCoeffCtx, x >> 2, widthPixels >> 2, y >> 2, heightPixels >> 2);
+        trial.Reset();
+
+        int nW = widthPixels / 4;
+        int nH = heightPixels / 4;
+        var residual = s.Residual;
+        var coeff = s.Coeff;
+        var levels = s.Levels;
+
+        for (int dr = 0; dr < nH; dr++)
+        {
+            for (int dc = 0; dc < nW; dc++)
+            {
+                int subX = x + (dc * 4);
+                int subY = y + (dr * 4);
+                bool availU = subY > 0;
+                bool availL = subX > 0;
+
+                Av1IntraPrediction.BuildEdges(above, left, s.SourceY, s.YWidth, subX, subY, 4, 4, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
+                Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, Av1IntraMode.DcPred, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.YWidth - 1, s.YHeight - 1, subX, subY, bitDepth: 8);
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int rowBase = ((subY + i) * s.YWidth) + subX;
+                    int predRowBase = i * 4;
+                    for (int j = 0; j < 4; j++)
+                    {
+                        residual[(i * 4) + j] = s.SourceY[rowBase + j] - pred[predRowBase + j];
+                    }
+                }
+
+                Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+
+                int subX4 = subX >> 2;
+                int subY4 = subY >> 2;
+                Av1CoefficientWriter.WriteCoeffs(trial, s.Cdf, levels, 4, ptype: 0, subX4, subY4, scratch, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels, updateContext: true);
+            }
+        }
+
+        return Av1RdCost.CombineCost(0, trial.Bits, 1.0);
     }
 
     /// <summary>
@@ -2496,6 +2647,283 @@ internal static class Av1TileEncoder
         {
             RecordIntrabcHashEntry(s, r, c, sizeMi, hasChroma);
         }
+    }
+
+    /// <summary>
+    /// Commits a rectangular (HORZ/VERT-split) coding block: <paramref name="wMi"/>x<paramref name="hMi"/>
+    /// mi units, <paramref name="wMi"/> != <paramref name="hMi"/>. First increment of full AV1 partition-type
+    /// support (spec §5.11.4 defines 10 types -- NONE/HORZ/VERT/SPLIT/HORZ_A/HORZ_B/VERT_A/VERT_B/HORZ_4/
+    /// VERT_4; this project's encoder previously only ever wrote NONE/SPLIT, a pure square quadtree -- see
+    /// <see cref="ComputeDecidePartition"/>'s Horz/Vert cost candidates for the RDO half of this feature).
+    /// <see cref="Av1TileDecoder"/> already handles every partition type generally (it must, to decode
+    /// bitstreams from any real encoder), so this needed no decoder changes at all -- confirmed by reading
+    /// <c>Av1TileDecoder.DecodePartition</c>/<c>Av1BlockTables.PartitionSubsize</c>, both already fully
+    /// populated for rectangular sizes.
+    ///
+    /// <para><b>Scope of this first increment</b> (deliberately narrower than <see cref="EncodeLeaf"/>'s
+    /// square path, to land a correct, real win without the risk of generalizing that ~700-line function's
+    /// every helper in one pass):</para>
+    /// <list type="bullet">
+    /// <item>Lossless only -- <see cref="ComputeDecidePartition"/> never offers Horz/Vert for non-lossless.</item>
+    /// <item>DC_PRED only, for both luma and chroma -- no directional/angle_delta search, no CFL. A real
+    /// search is a natural follow-up once this basic shape is proven correct; DC_PRED still lets a wide-short
+    /// or tall-narrow region (e.g. a text stroke or a flat border -- exactly the shapes a square-only quadtree
+    /// can't express directly) code more cheaply than forcing a bigger square (wasted residual) or a smaller
+    /// square split (repeated per-leaf signaling overhead), and <see cref="ComputeDecidePartition"/>'s real
+    /// cost comparison against None/Split means this is never a forced regression, only sometimes a missed
+    /// win relative to a hypothetical directional search.</item>
+    /// <item>No palette, no IntraBC -- both remain square-leaf-only for now. The has_palette_y/has_palette_uv
+    /// and use_intrabc *bits* are still spec-required and written here (see below), just always with a zero/
+    /// false value; a rectangular leaf's content is also never recorded as a future IntraBC copy source
+    /// (<see cref="RecordIntrabcHashEntry"/> is deliberately not called here), since that indexing assumes a
+    /// square source region throughout (<see cref="IsValidIntrabcSource"/>'s own <c>bw = bh = sizeMi * 4</c>).</item>
+    /// <item>Never reached for a leaf bigger than 64x64 in either dimension -- <see cref="ComputeDecidePartition"/>
+    /// only offers Horz/Vert for a parent at or below sizeMi 16, so this never needs the &gt;64px chunked
+    /// residual shape <see cref="EncodeLeaf"/>'s square path handles separately, and never hits the 4:2:0
+    /// <c>bw4==1</c>/<c>bh4==1</c> shared-chroma edge case either (lossless is always 4:4:4 -- see
+    /// <see cref="Av1FrameEncoder.Encode"/>'s <c>chroma444</c> gate -- so this never needs
+    /// <see cref="Av1TileDecoder"/>'s equivalent logic for that).</item>
+    /// </list>
+    ///
+    /// <para>Bit order mirrors <see cref="EncodeLeaf"/>'s exactly (spec's own <c>mode_info()</c>/<c>residual()</c>
+    /// ordering): skip, use_intrabc(=0), y_mode(=DC_PRED, no angle_delta since DC isn't directional), uv_mode
+    /// (=DC_PRED, no cfl_alphas/angle_delta), palette_mode_info() (has_palette_y/uv, both =0, using the real
+    /// spec <c>AllowPalette</c> gate generalized to a rectangular <c>bSize</c> -- see its own
+    /// remarks below for why this can't reuse <see cref="EncodeLeaf"/>'s old sizeMi-based shortcut),
+    /// filter_intra_mode_info() (=0, gated on the real spec <c>max(bw,bh) &lt;= 32</c>, not the old
+    /// square-only <c>sizePixels &lt;= 32</c> shortcut), then real per-4x4-sub-block WHT residual for Y, U,
+    /// V (predicted fresh per sub-block from progressively-updated <see cref="TileState.ReconY"/>/ReconU/
+    /// ReconV, exactly like <see cref="EncodeLosslessLumaResidual"/>/<see cref="EncodeChromaRegion"/>'s own
+    /// lossless paths -- required for correctness, not just style: an interior sub-block's own local DC
+    /// average depends on its immediate neighbors, not the whole leaf's edges, so this can't be a single
+    /// whole-region prediction).</para>
+    ///
+    /// <para>Uses <c>bSize</c> internally (the coding block's own <see cref="Av1BlockSize"/>, derived from
+    /// <paramref name="wMi"/>/<paramref name="hMi"/> via <see cref="BlockSizeFromWidthHeightMi"/>) for every
+    /// spec-defined size-dependent gate below.</para>
+    /// </summary>
+    private static void EncodeRectangularLeaf(TileState s, int r, int c, int wMi, int hMi)
+    {
+        int widthPixels = wMi * 4;
+        int heightPixels = hMi * 4;
+        int bSize = BlockSizeFromWidthHeightMi(wMi, hMi);
+        bool availU = r > 0;
+        bool availL = c > 0;
+        int x = c * 4;
+        int y = r * 4;
+        bool hasChroma = !s.MonoChrome;
+
+        int aboveYMode = availU ? s.YModes[((r - 1) * s.MiCols) + c] : Av1IntraMode.DcPred;
+        int leftYMode = availL ? s.YModes[(r * s.MiCols) + c - 1] : Av1IntraMode.DcPred;
+        int yModeCtx0 = Av1BlockTables.IntraModeContext[aboveYMode];
+        int yModeCtx1 = Av1BlockTables.IntraModeContext[leftYMode];
+
+        int skipCtx = 0;
+        if (availU)
+        {
+            skipCtx += s.Skips[((r - 1) * s.MiCols) + c] ? 1 : 0;
+        }
+
+        if (availL)
+        {
+            skipCtx += s.Skips[(r * s.MiCols) + c - 1] ? 1 : 0;
+        }
+
+        // skip is always 0 here: this leaf never covers every plane exactly (no palette/IntraBC in this
+        // first increment -- see the class-level remarks above), so it always carries a real residual.
+        s.Symbols.WriteSymbol(s.Cdf.Skip[skipCtx], 0);
+
+        // use_intrabc (spec §5.11.7): structurally present whenever the frame allows it (tied to lossless,
+        // same as EncodeLeaf's intrabcStructurallyPresent), regardless of this leaf's shape -- always 0 here.
+        if (s.Lossless)
+        {
+            s.Symbols.WriteSymbol(s.Cdf.Intrabc, 0);
+        }
+
+        s.Symbols.WriteSymbol(s.Cdf.IntraFrameYMode[yModeCtx0][yModeCtx1], Av1IntraMode.DcPred);
+
+        // No angle_delta: DC_PRED isn't directional, matching spec's own intra_angle_info_y() gate.
+        if (hasChroma)
+        {
+            // cflAllowed's CDF-selection matters even though uv_mode is always written DC_PRED here --
+            // getting the *context* wrong silently desyncs a real decoder just as much as getting the value
+            // wrong (see EncodeLeaf's identical remark on this same computation).
+            bool cflAllowed = Av1BlockTables.GetPlaneResidualSize(bSize, 1, !s.Chroma444, !s.Chroma444) == Av1BlockSize.Block4x4;
+            var uvModeCdf = cflAllowed ? s.Cdf.UvModeCflAllowed[Av1IntraMode.DcPred] : s.Cdf.UvModeCflNotAllowed[Av1IntraMode.DcPred];
+            s.Symbols.WriteSymbol(uvModeCdf, Av1IntraMode.DcPred);
+
+            // No cfl_alphas (uv_mode isn't UV_CFL_PRED), no intra_angle_info_uv (uv_mode isn't directional).
+        }
+
+        // palette_mode_info() (spec §5.11.46): structurally present using the *real* spec gate
+        // (AllowPalette -- Av1TileDecoder.AllowPalette, generalized to any block shape, not the old
+        // square-only "sizeMi is >= 2 and <= 16" shortcut EncodeLeaf's own paletteStructurallyPresent still
+        // uses, which has no meaning for a leaf with no single sizeMi). Getting this gate wrong wouldn't
+        // just miss a compression opportunity -- it would desync the entropy stream by omitting/adding a
+        // bit a real decoder does the opposite of.
+        bool paletteStructurallyPresent = s.Lossless
+            && Av1BlockTables.BlockWidth(bSize) <= 64
+            && Av1BlockTables.BlockHeight(bSize) <= 64
+            && bSize >= Av1BlockSize.Block8x8;
+        if (paletteStructurallyPresent)
+        {
+            int bsizeCtx = GetPaletteBsizeCtx(bSize);
+
+            // bestMode is always DC_PRED here, matching palette_mode_info()'s own has_palette_y gate.
+            int paletteModeCtx = GetPaletteModeCtx(s, r, c, availU, availL);
+            s.Symbols.WriteSymbol(s.Cdf.PaletteYMode[bsizeCtx][paletteModeCtx], 0);
+
+            // has_palette_uv is only structurally present when uv_mode == DC_PRED, which it always is here.
+            if (hasChroma)
+            {
+                s.Symbols.WriteSymbol(s.Cdf.PaletteUvMode[0], 0);
+            }
+        }
+
+        // filter_intra_mode_info() (spec §5.11.24): real spec gate is max(bw, bh) <= 32, not a single
+        // sizePixels -- see Av1TileDecoder.FilterIntraModeInfo's identical Math.Max check. bestMode is always
+        // DC_PRED and PaletteSizeY is always 0 here, matching the gate's other two conditions unconditionally.
+        if (Math.Max(widthPixels, heightPixels) <= 32)
+        {
+            s.Symbols.WriteSymbol(s.Cdf.FilterIntra[bSize], 0);
+        }
+
+        // residual() (spec §5.11.34): real per-4x4 WHT residual, Y then U then V (plane-major, matching
+        // spec's own residual() loop and EncodeChromaRegion's identical ordering) -- skip is always 0 here,
+        // so this always runs for every plane, never the reset_block_context() shortcut.
+        int nW = wMi;
+        int nH = hMi;
+        var above = new Av1EdgeArray(16);
+        var left = new Av1EdgeArray(16);
+        var pred = s.Pred;
+        var residual = s.Residual;
+        var coeff = s.Coeff;
+        var levels = s.Levels;
+
+        for (int dr = 0; dr < nH; dr++)
+        {
+            for (int dc = 0; dc < nW; dc++)
+            {
+                int subX = x + (dc * 4);
+                int subY = y + (dr * 4);
+                int subR = r + dr;
+                int subC = c + dc;
+                bool subAvailU = subR > 0;
+                bool subAvailL = subC > 0;
+
+                int subBlockMiRow = subR & s.SbMiMask;
+                int subBlockMiCol = subC & s.SbMiMask;
+                bool haveAboveRight = GetBlockDecoded(s, 0, subBlockMiRow - 1, subBlockMiCol + 1);
+                bool haveBelowLeft = GetBlockDecoded(s, 0, subBlockMiRow + 1, subBlockMiCol - 1);
+
+                Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, subX, subY, 4, 4, subAvailL, subAvailU, haveAboveRight, haveBelowLeft, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
+                Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, Av1IntraMode.DcPred, subAvailL, subAvailU, useFilterIntra: false, filterIntraMode: 0, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.YWidth - 1, s.YHeight - 1, subX, subY, bitDepth: 8);
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int rowBase = ((subY + i) * s.YWidth) + subX;
+                    int predRowBase = i * 4;
+                    for (int j = 0; j < 4; j++)
+                    {
+                        residual[(i * 4) + j] = s.SourceY[rowBase + j] - pred[predRowBase + j];
+                    }
+                }
+
+                Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+
+                for (int i = 0; i < 4; i++)
+                {
+                    Array.Copy(pred, i * 4, s.ReconY, ((subY + i) * s.YWidth) + subX, 4);
+                }
+
+                Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
+                Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
+                SetBlockDecoded(s, 0, subBlockMiRow, subBlockMiCol, true);
+            }
+        }
+
+        if (hasChroma)
+        {
+            // 4:4:4 always, for lossless (see the class-level remarks) -- chroma shares luma's exact
+            // position/footprint 1:1, no subsampling shift anywhere in this loop.
+            foreach (var (source, recon, ctx) in new[]
+            {
+                (s.SourceU!, s.ReconU!, s.UCoeffCtx!),
+                (s.SourceV!, s.ReconV!, s.VCoeffCtx!),
+            })
+            {
+                for (int dr = 0; dr < nH; dr++)
+                {
+                    for (int dc = 0; dc < nW; dc++)
+                    {
+                        int subX = x + (dc * 4);
+                        int subY = y + (dr * 4);
+                        int subR = r + dr;
+                        int subC = c + dc;
+                        bool subAvailU = subR > 0;
+                        bool subAvailL = subC > 0;
+
+                        int subBlockMiRow = subR & s.SbMiMask;
+                        int subBlockMiCol = subC & s.SbMiMask;
+                        bool haveAboveRight = GetBlockDecoded(s, 1, subBlockMiRow - 1, subBlockMiCol + 1);
+                        bool haveBelowLeft = GetBlockDecoded(s, 1, subBlockMiRow + 1, subBlockMiCol - 1);
+
+                        Av1IntraPrediction.BuildEdges(above, left, recon, s.ChromaWidth, subX, subY, 4, 4, subAvailL, subAvailU, haveAboveRight, haveBelowLeft, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
+                        Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, Av1IntraMode.DcPred, subAvailL, subAvailU, useFilterIntra: false, filterIntraMode: 0, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.ChromaWidth - 1, s.ChromaHeight - 1, subX, subY, bitDepth: 8);
+
+                        for (int i = 0; i < 4; i++)
+                        {
+                            int rowBase = ((subY + i) * s.ChromaWidth) + subX;
+                            int predRowBase = i * 4;
+                            for (int j = 0; j < 4; j++)
+                            {
+                                residual[(i * 4) + j] = source[rowBase + j] - pred[predRowBase + j];
+                            }
+                        }
+
+                        Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
+                        Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+
+                        for (int i = 0; i < 4; i++)
+                        {
+                            Array.Copy(pred, i * 4, recon, ((subY + i) * s.ChromaWidth) + subX, 4);
+                        }
+
+                        int chromaBlockSizeArg = (nW * nH > 1) ? widthPixels : 0;
+                        int chromaBlockHeightArg = (nW * nH > 1) ? heightPixels : 0;
+                        Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 1, subC, subR, ctx, writeLumaTxType: null, blockSize: chromaBlockSizeArg, blockHeight: chromaBlockHeightArg);
+                        Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
+                        SetBlockDecoded(s, 1, subBlockMiRow, subBlockMiCol, true);
+                        SetBlockDecoded(s, 2, subBlockMiRow, subBlockMiCol, true);
+                    }
+                }
+            }
+        }
+
+        // Leaf-state bookkeeping, mirroring EncodeLeaf's own identical loop -- neighbor context (yMode,
+        // skip, palette sizes/colors, mv/is_inter) that later leaves' own writes read.
+        for (int dy = 0; dy < hMi; dy++)
+        {
+            int rowIdx = (r + dy) * s.MiCols;
+            for (int dx = 0; dx < wMi; dx++)
+            {
+                int idx = rowIdx + c + dx;
+                s.YModes[idx] = Av1IntraMode.DcPred;
+                s.UvModes[idx] = Av1IntraMode.DcPred;
+                s.MiSizes[idx] = bSize;
+                s.Skips[idx] = false;
+                s.PaletteSizesY[idx] = 0;
+                s.PaletteSizesUV[idx] = 0;
+                s.IsInters[idx] = false;
+                s.MvRowsGrid[idx] = 0;
+                s.MvColsGrid[idx] = 0;
+                s.Written[idx] = true;
+            }
+        }
+
+        // Deliberately no RecordIntrabcHashEntry call -- see the class-level remarks on why a rectangular
+        // leaf is never offered as a future IntraBC copy source in this first increment.
     }
 
     // ---- IntraBC (spec §5.11.7's use_intrabc branch / §7.10.2 find_mv_stack / §5.11.31 MV syntax) ----

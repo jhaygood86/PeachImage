@@ -100,15 +100,18 @@ internal static class Av1CoefficientWriter
     /// <see langword="null"/> for a lossless luma sub-block: <c>Av1TileDecoder.TransformType</c>'s own
     /// <c>qindex &lt;= 0</c> short-circuit never reads a tx_type symbol at coded-lossless either.</para>
     ///
-    /// <para><paramref name="blockSize"/> (luma callers only): the coding block's own pixel width/height
-    /// (this encoder only ever produces square luma coding blocks), when it differs from
-    /// <paramref name="size"/> -- i.e. a lossless luma sub-block, where the coding block is still 8x8 but
-    /// each transform is 4x4. Defaults to <paramref name="size"/> (transform == coding block, this encoder's
-    /// non-lossless case, and always true for chroma), which selects the <c>all_zero</c> context's
-    /// constant-0 shortcut; any other value routes through <see cref="GetLumaAllZeroContext"/> instead,
-    /// mirroring <c>Av1TileDecoder.GetAllZeroContext</c>'s own <c>plane == 0</c> branch exactly (that
-    /// decoder-side method is what proves this formula, not just this one -- it's exercised against every
-    /// real-world AVIF file the decoder's own corpus tests already decode).</para>
+    /// <para><paramref name="blockSize"/>/<paramref name="blockHeight"/> (luma callers only): the coding
+    /// block's own pixel width/height, when either differs from <paramref name="size"/> -- i.e. a lossless
+    /// luma sub-block, where the coding block is still (up to) 64x32 but each transform is 4x4.
+    /// <paramref name="blockHeight"/> defaults to 0, meaning "same as <paramref name="blockSize"/>" (a square
+    /// coding block -- the only shape this encoder produced before rectangular HORZ/VERT partitions), so
+    /// every pre-existing call site is unaffected. <paramref name="blockSize"/> alone defaults to
+    /// <paramref name="size"/> (transform == coding block, this encoder's non-lossless case, and always true
+    /// for chroma), which selects the <c>all_zero</c> context's constant-0 shortcut; any other value routes
+    /// through <see cref="GetLumaAllZeroContext"/> instead, mirroring <c>Av1TileDecoder.GetAllZeroContext</c>'s
+    /// own <c>plane == 0</c> branch exactly (that decoder-side method is what proves this formula, not just
+    /// this one -- it's exercised against every real-world AVIF file the decoder's own corpus tests already
+    /// decode).</para>
     ///
     /// <para><paramref name="s"/> is an <see cref="IAv1SymbolSink"/>, not a concrete <see cref="Av1SymbolEncoder"/>,
     /// so <see cref="Av1RdCost"/>'s RD-search candidate costing can reuse this exact context-derivation logic
@@ -119,13 +122,14 @@ internal static class Av1CoefficientWriter
     /// passes <see langword="false"/> so a candidate that might not even be chosen never leaves a trace in
     /// context state a later, real leaf could read.</para>
     /// </summary>
-    public static int WriteCoeffs(IAv1SymbolSink s, Av1CdfContext cdf, int[] quantLevels, int size, int ptype, int x4, int y4, PlaneContext planeCtx, Action? writeLumaTxType = null, int blockSize = 0, bool updateContext = true)
+    public static int WriteCoeffs(IAv1SymbolSink s, Av1CdfContext cdf, int[] quantLevels, int size, int ptype, int x4, int y4, PlaneContext planeCtx, Action? writeLumaTxType = null, int blockSize = 0, bool updateContext = true, int blockHeight = 0)
     {
         int txSz = Av1ForwardTransform.SizeToTxSz(size);
         int txSzCtx = (Av1CoeffTables.TxSizeSqr[txSz] + Av1CoeffTables.TxSizeSqrUp[txSz] + 1) >> 1;
         int w4 = size >> 2;
         int h4 = size >> 2;
-        int effectiveBlockSize = blockSize > 0 ? blockSize : size;
+        int effectiveBlockWidth = blockSize > 0 ? blockSize : size;
+        int effectiveBlockHeight = blockHeight > 0 ? blockHeight : effectiveBlockWidth;
 
         int[] scan = Av1ScanTables.GetScan(txSz, Av1TxType.DctDct);
 
@@ -140,17 +144,17 @@ internal static class Av1CoefficientWriter
 
         // ptype == 0 (luma): when the transform equals the coding block (this encoder's non-lossless case,
         // tx_mode == TX_MODE_LARGEST) Coeffs()'s "bw == w && bh == h" check is always true -> context 0.
-        // Otherwise (a lossless luma sub-block, where the coding block stays 8x8 but the transform is 4x4)
+        // Otherwise (a lossless luma sub-block, where the coding block stays 8x8+ but the transform is 4x4)
         // that shortcut doesn't apply -- see GetLumaAllZeroContext's remarks.
         // ptype == 1 (chroma): the OR-accumulated above/left context always applies (Coeffs() never takes
         // the luma-only size-match shortcut for chroma), but Coeffs() still adds +3 to it whenever the
         // chroma coding block is larger than the transform (bw*bh > w*h) -- true for a 4:4:4 lossless chroma
-        // sub-block (coding block 8x8, transform 4x4), same as it's true for a lossless luma sub-block, even
+        // sub-block (coding block 8x8+, transform 4x4), same as it's true for a lossless luma sub-block, even
         // though this encoder's 4:2:0 chroma transform always already equals its coding block (so the +3
         // never applies there) -- see GetChromaAllZeroContext's remarks.
         int allZeroCtx = ptype == 0
-            ? (effectiveBlockSize == size ? 0 : GetLumaAllZeroContext(x4, y4, w4, h4, planeCtx))
-            : GetChromaAllZeroContext(x4, y4, w4, h4, planeCtx, effectiveBlockSize, size);
+            ? (effectiveBlockWidth == size && effectiveBlockHeight == size ? 0 : GetLumaAllZeroContext(x4, y4, w4, h4, planeCtx))
+            : GetChromaAllZeroContext(x4, y4, w4, h4, planeCtx, effectiveBlockWidth, effectiveBlockHeight, size);
         bool allZero = eob == 0;
         s.WriteSymbol(cdf.TxbSkip[txSzCtx][allZeroCtx], allZero ? 1 : 0);
 
@@ -460,16 +464,18 @@ internal static class Av1CoefficientWriter
     /// <c>all_zero</c>'s CDF context derivation for chroma (spec §8.3.2) -- luma uses context 0 whenever its
     /// transform equals its coding block (this encoder's non-lossless case), and
     /// <see cref="GetLumaAllZeroContext"/> otherwise (see <see cref="WriteCoeffs"/>'s remarks).
-    /// <paramref name="blockSize"/> and <paramref name="size"/> mirror luma's own coding-block-vs-transform
-    /// comparison: <c>Coeffs()</c> adds +3 to this context whenever the chroma coding block is larger than
-    /// the transform (<c>bw*bh &gt; w*h</c>) -- at this encoder's 4:2:0 subsampling the chroma transform
-    /// always already equals its coding block (both 4x4, lossy or lossless), so the +3 never applies there,
-    /// but a 4:4:4 lossless chroma sub-block has an 8x8 coding block coded as a 4x4 transform, exactly like
-    /// a lossless luma sub-block -- getting this +3 wrong (previously always omitted) doesn't just compress
+    /// <paramref name="blockWidth"/>/<paramref name="blockHeight"/> and <paramref name="size"/> mirror luma's
+    /// own coding-block-vs-transform comparison: <c>Coeffs()</c> adds +3 to this context whenever the chroma
+    /// coding block's real pixel *area* is larger than the transform's (<c>bw*bh &gt; w*h</c> -- an area
+    /// comparison, not a single-dimension one, so it stays correct for a rectangular coding block, e.g. from
+    /// a HORZ/VERT partition) -- at this encoder's 4:2:0 subsampling the chroma transform always already
+    /// equals its coding block (both 4x4, lossy or lossless), so the +3 never applies there, but a 4:4:4
+    /// lossless chroma sub-block has an 8x8-or-bigger coding block coded as a 4x4 transform, exactly like a
+    /// lossless luma sub-block -- getting this +3 wrong (previously always omitted) doesn't just compress
     /// worse, it picks the wrong adaptive CDF and can misread <c>all_zero</c> itself, silently discarding a
     /// real (non-zero) residual on the decode side.
     /// </summary>
-    private static int GetChromaAllZeroContext(int x4, int y4, int w4, int h4, PlaneContext ctx, int blockSize, int size)
+    private static int GetChromaAllZeroContext(int x4, int y4, int w4, int h4, PlaneContext ctx, int blockWidth, int blockHeight, int size)
     {
         int above = 0;
         int leftAcc = 0;
@@ -492,8 +498,7 @@ internal static class Av1CoefficientWriter
         }
 
         int result = (above != 0 ? 1 : 0) + (leftAcc != 0 ? 1 : 0) + 7;
-        int effectiveBlockSize = blockSize > 0 ? blockSize : size;
-        if (effectiveBlockSize * effectiveBlockSize > size * size)
+        if ((long)blockWidth * blockHeight > (long)size * size)
         {
             result += 3;
         }
