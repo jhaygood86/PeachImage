@@ -25,8 +25,9 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// (<see cref="SearchUvMode"/>), for both lossless and non-lossless: non-lossless chroma's transform type is
 /// mode-dependent (<c>Av1TxTypeTables.ModeToTxfm</c>), so <see cref="EncodeChromaRegion"/> forward-transforms
 /// with the matching DCT/ADST-mixed <c>Av1ForwardTransform</c> operator for whatever <c>uv_mode</c> the search
-/// picks, rather than always DCT -- see that method's remarks. CFL is never used (spec-illegal for this
-/// encoder's lossless-always-4:4:4 RGB output, and simply unimplemented for non-lossless).
+/// picks, rather than always DCT -- see that method's remarks. CFL (<see cref="TryCflCandidate"/>) is searched
+/// for non-lossless chroma; spec-illegal for this encoder's lossless-always-4:4:4 RGB output, so never
+/// attempted there.
 ///
 /// <para>Requires the luma plane's width/height to already be padded to a multiple
 /// of 64 (the caller's job -- see <c>Av1FrameEncoder</c>) so every superblock is a full, in-bounds 64x64
@@ -530,7 +531,22 @@ internal static class Av1TileEncoder
         // short-circuit aside, this is skipped entirely there rather than adding a zero no-op term.
         long noneBits = Av1SymbolEncoder.EstimateSymbolCost(partitionCdf, Av1PartitionType.None);
         long chromaCost = s.Lossless ? 0 : EstimateChromaCost(s, r, c, sizeMi);
-        long costLeaf = EstimateLumaCost(s, r, c, sizeMi) + chromaCost + ScaleSignalingBits(LeafOtherSignalingCost + noneBits);
+        long lumaCost = EstimateLumaCost(s, r, c, sizeMi);
+
+        // Palette (spec's own bsize >= BLOCK_8X8 gate -- sizeMi == 1 never reaches this branch, see the
+        // sizeMi == 1 case above) is a real alternative to regular-intra/WHT-residual coding for lossless
+        // leaves, but was invisible to this comparison until now -- see EstimateLosslessPaletteCost's
+        // remarks for why that under-used palette specifically on graphic/screen-content-style images.
+        if (s.Lossless)
+        {
+            long? paletteCost = EstimateLosslessPaletteCost(s, r, c, sizeMi, availU: r > 0, availL: c > 0);
+            if (paletteCost is long pc && pc < lumaCost)
+            {
+                lumaCost = pc;
+            }
+        }
+
+        long costLeaf = lumaCost + chromaCost + ScaleSignalingBits(LeafOtherSignalingCost + noneBits);
 
         return costLeaf <= costSplit ? (true, costLeaf) : (false, costSplit);
     }
@@ -686,6 +702,177 @@ internal static class Av1TileEncoder
         }
 
         return bestCost;
+    }
+
+    /// <summary>
+    /// Trial-only bit cost (<see cref="Av1RdCost.CombineCost"/>, <c>sse: 0, lambda: 1.0</c> -- same
+    /// zero-distortion convention as <see cref="ComputeCandidateCost"/>'s lossless branch, since a palette
+    /// leaf reconstructs bit-exactly by construction, see <c>EncodeLeaf</c>'s <c>usedPalette</c> remarks) of
+    /// covering this whole leaf with palette (Y, plus UV when <c>!s.MonoChrome</c> -- this encoder only ever
+    /// uses palette all-or-nothing across both, see <c>EncodeLeaf</c>'s <c>usedPalette</c> remarks), or
+    /// <see langword="null"/> when this leaf isn't palette-eligible on either plane (more than 8 distinct
+    /// colors, or fewer than 2 -- <see cref="TryBuildYPalette"/>/<see cref="TryBuildUvPalette"/>'s own
+    /// <c>PALETTE_MIN_SIZE</c> gate).
+    ///
+    /// <para>Feeds <see cref="ComputeDecidePartition"/>'s leaf-vs-split comparison. Without this, that
+    /// comparison only ever weighed regular-intra/WHT-residual cost when deciding whether to merge into a
+    /// bigger leaf -- completely blind to the fact that a bigger leaf can lose palette eligibility a smaller
+    /// one wouldn't have, even when the regular-residual costs of the two choices look roughly break-even.
+    /// This under-uses palette specifically on graphic/screen-content-style lossless images: a design element
+    /// with only a handful of colors at a small leaf size can pick up enough anti-aliased/gradient pixels once
+    /// merged into a bigger leaf to blow past the 8-color cap, and the old comparison had no way to see that
+    /// coming. <c>EncodeLeaf</c>'s own real commit-time decision (<c>usedPalette</c>) doesn't need to change
+    /// for this to take effect: it already uses palette unconditionally whenever eligible, so once this makes
+    /// <see cref="DecidePartition"/> stop merging past that eligibility boundary, the leaves it now keeps
+    /// smaller naturally pick up palette on their own.</para>
+    ///
+    /// <para>Mirrors <see cref="WritePaletteColorsY"/>/<see cref="WritePaletteColorsUv"/>/<see cref="WriteColorMapTokens"/>'s
+    /// exact bit-cost shape (color-cache literals, delta-coded/flat color values, NS-coded first index,
+    /// per-pixel color-index symbols) but never writes to <see cref="TileState.Symbols"/> or mutates any CDF --
+    /// <c>WriteColorMapTokens</c>'s own <c>PaletteYColorIndex</c>/<c>PaletteUvColorIndex</c> CDFs are real,
+    /// adaptively-updated state, so a speculative candidate that might not be chosen must never leave a trace
+    /// there (same hazard <see cref="Av1CoefficientWriter.PlaneContext.SeedFrom"/>'s remarks describe for
+    /// coefficient contexts) -- this reads them read-only via <see cref="Av1SymbolEncoder.EstimateSymbolCost"/>,
+    /// the same safe pattern this method's own partition-bit costing already uses just above.</para>
+    /// </summary>
+    private static long? EstimateLosslessPaletteCost(TileState s, int r, int c, int sizeMi, bool availU, bool availL)
+    {
+        int sizePixels = sizeMi * 4;
+        int x = c * 4;
+        int y = r * 4;
+
+        if (!TryBuildYPalette(s, x, y, sizePixels, s.PaletteColorsY, out int nY))
+        {
+            return null;
+        }
+
+        long bits = EstimatePaletteColorBitsY(s, s.PaletteColorsY, nY, r, c, availU, availL);
+        var colorMap = s.PaletteColorMap;
+        BuildColorMap(s.SourceY, s.YWidth, x, y, sizePixels, s.PaletteColorsY, nY, colorMap);
+        bits += EstimateColorMapBits(colorMap, sizePixels, nY, s.Cdf.PaletteYColorIndex);
+
+        if (!s.MonoChrome)
+        {
+            if (!TryBuildUvPalette(s, x, y, sizePixels, s.PaletteColorsU, s.PaletteColorsV, out int nUv))
+            {
+                return null;
+            }
+
+            bits += EstimatePaletteColorBitsUv(s, s.PaletteColorsU, s.PaletteColorsV, nUv, r, c, availU, availL);
+            BuildColorMapUv(s, x, y, sizePixels, s.PaletteColorsU, s.PaletteColorsV, nUv, colorMap);
+            bits += EstimateColorMapBits(colorMap, sizePixels, nUv, s.Cdf.PaletteUvColorIndex);
+        }
+
+        return Av1RdCost.CombineCost(0, bits, 1.0);
+    }
+
+    /// <summary>Pure bit-count mirror of <see cref="WritePaletteColorsY"/> -- same color-cache/delta-width shrinking math, without ever writing to <see cref="TileState.Symbols"/> (see <see cref="EstimateLosslessPaletteCost"/>'s remarks on why a speculative candidate must not).</summary>
+    private static long EstimatePaletteColorBitsY(TileState s, int[] colors, int n, int r, int c, bool availU, bool availL)
+    {
+        int nCache = GetPaletteCacheCount(s, 0, r, c, availU, availL);
+        long bits = nCache + 8;
+        if (n > 1)
+        {
+            bits += 2;
+            const int minBits = 5;
+            const int extraBits = 3;
+            int widthBits = minBits + extraBits;
+            int range = 256 - colors[0] - 1;
+            for (int idx = 1; idx < n; idx++)
+            {
+                bits += widthBits;
+                range -= colors[idx] - colors[idx - 1];
+                widthBits = Math.Min(widthBits, Av1TileDecoder.CeilLog2(range));
+            }
+        }
+
+        return bits;
+    }
+
+    /// <summary>Pure bit-count mirror of <see cref="WritePaletteColorsUv"/> -- see <see cref="EstimatePaletteColorBitsY"/>'s identical remarks.</summary>
+    private static long EstimatePaletteColorBitsUv(TileState s, int[] uColors, int[] vColors, int n, int r, int c, bool availU, bool availL)
+    {
+        int nCache = GetPaletteCacheCount(s, 1, r, c, availU, availL);
+        long bits = nCache + 8;
+        if (n > 1)
+        {
+            bits += 2;
+            const int minBits = 5;
+            const int extraBits = 3;
+            int widthBits = minBits + extraBits;
+            int range = 256 - uColors[0];
+            for (int idx = 1; idx < n; idx++)
+            {
+                bits += widthBits;
+                range -= uColors[idx] - uColors[idx - 1];
+                widthBits = Math.Min(widthBits, Av1TileDecoder.CeilLog2(range));
+            }
+        }
+
+        bits += 1 + (n * 8);
+        return bits;
+    }
+
+    /// <summary>
+    /// Pure bit-count mirror of <see cref="WriteColorMapTokens"/> -- identical NS-coded first index plus
+    /// wavefront-ordered, context-selected per-pixel symbol costs, but via <see cref="Av1SymbolEncoder.EstimateSymbolCost"/>
+    /// against a <em>local, per-candidate scratch clone</em> of <paramref name="mapCdf"/>'s (small, fixed-size --
+    /// spec's own <c>PALETTE_COLOR_INDEX_CONTEXTS</c> == 5) context rows, adapted in place via
+    /// <see cref="Av1CdfAdaptation.AdaptCdf"/> after every pixel exactly like a real <see cref="TileState.Symbols"/>
+    /// write would -- never touching <paramref name="mapCdf"/> itself.
+    ///
+    /// <para><b>This local adaptation is not optional.</b> A single palette leaf can carry thousands of pixels
+    /// through the *same* handful of contexts (unlike coefficient coding's typically-sparse per-block symbol
+    /// counts, where reading the frame's real, currently-adapted CDF once and reusing it for the whole trial is
+    /// an acceptable approximation -- see <see cref="ComputeCandidateCost"/>'s remarks). Reading the same static,
+    /// real CDF for every one of those pixels (this method's own first version) systematically overestimates a
+    /// large uniform region's true cost by an order of magnitude or more: a real encoder's per-symbol cost
+    /// collapses toward zero within the first few pixels as the CDF adapts to the region's dominant color, while
+    /// a static read keeps charging close to <c>log2(n)</c> bits per pixel forever. That bug made every eligible
+    /// palette candidate this method ever scored look far more expensive than regular intra/WHT residual coding
+    /// -- confirmed by an instrumented run of <see cref="EstimateLosslessPaletteCost"/> on this project's
+    /// benchmark image finding 2,946 structurally-eligible candidates across the partition search and zero
+    /// wins, before this local-adaptation fix.</para>
+    /// </summary>
+    private static long EstimateColorMapBits(int[] colorMap, int size, int n, ushort[][][] mapCdf)
+    {
+        var colorOrder = new int[8];
+        var inverseColorOrder = new int[8];
+
+        const int contexts = 5; // spec PALETTE_COLOR_INDEX_CONTEXTS
+        var scratchCdf = new ushort[contexts][];
+        var seeded = new bool[contexts];
+
+        long bits = Av1SymbolEncoder.EstimateNsCost(colorMap[0], n);
+
+        for (int i = 1; i < (2 * size) - 1; i++)
+        {
+            for (int j = Math.Min(i, size - 1); j >= Math.Max(0, i - size + 1); j--)
+            {
+                int row = i - j;
+                int col = j;
+                int ctx = Av1TileDecoder.GetPaletteColorIndexContext(colorMap, size, row, col, n, colorOrder);
+                for (int k = 0; k < n; k++)
+                {
+                    inverseColorOrder[colorOrder[k]] = k;
+                }
+
+                int trueIdx = colorMap[(row * size) + col];
+                int symbol = inverseColorOrder[trueIdx];
+
+                if (!seeded[ctx])
+                {
+                    scratchCdf[ctx] = (ushort[])mapCdf[n - 2][ctx].Clone();
+                    seeded[ctx] = true;
+                }
+
+                var cdf = scratchCdf[ctx];
+                bits += Av1SymbolEncoder.EstimateSymbolCost(cdf, symbol);
+                Av1CdfAdaptation.AdaptCdf(cdf, n, symbol);
+            }
+        }
+
+        return bits;
     }
 
     /// <summary>Write-side mirror of <c>Av1TileDecoder.ClearBlockDecodedFlags</c> (spec's <c>clear_block_decoded_flags(r, c, sbSize4)</c>, §5.11.3) -- always <c>use_128x128_superblock == false</c> here (see the class remarks), and this encoder is always single-tile (MiColEnd/MiRowEnd == MiCols/MiRows).</summary>

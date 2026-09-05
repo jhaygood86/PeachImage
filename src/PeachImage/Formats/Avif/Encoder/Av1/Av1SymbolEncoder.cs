@@ -181,6 +181,21 @@ internal sealed class Av1SymbolEncoder : IAv1SymbolSink
         return 15 - Av1CdfAdaptation.FloorLog2(newRange);
     }
 
+    /// <summary>
+    /// Pure bit-cost counterpart to <see cref="WriteNs"/> -- <c>NS(n)</c> is a non-adaptive, literal-only
+    /// code (see <see cref="WriteNs"/>'s remarks), so unlike <see cref="EstimateSymbolCost"/> this needs no
+    /// canonical-range approximation: the exact same <c>w</c>/<c>m</c> split <see cref="WriteNs"/> would
+    /// write always costs exactly this many bits, regardless of any CDF or adaptation state. Used by RD-search
+    /// candidate costing (e.g. a speculative palette color-index map) that must estimate an <c>NS</c>-coded
+    /// value's cost without actually writing it.
+    /// </summary>
+    internal static int EstimateNsCost(int value, int n)
+    {
+        int w = Av1CdfAdaptation.FloorLog2((uint)n) + 1;
+        int m = (1 << w) - n;
+        return value < m ? w - 1 : w;
+    }
+
     /// <summary><c>cur(idx)</c> exactly as <see cref="Av1SymbolDecoder.ReadSymbolCore"/> computes it for a candidate symbol index.</summary>
     private static uint CurValue(uint range, ReadOnlySpan<ushort> cdf, int idx, int n)
     {
