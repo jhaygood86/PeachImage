@@ -574,12 +574,15 @@ internal static class Av1TileEncoder
         // recursion, a "what if we split" comparison estimates all 4 quadrants' costs before any of them
         // are actually committed, so a quadrant's true availability/neighbor-mode state doesn't exist yet
         // to read (see DecidePartition's remarks on the sibling-ordering approximation this already accepts
-        // for pixel data via SourceY). Reading real (partially-stale, encode-order-dependent) state here
-        // measurably regressed IntraBC's ability to find same-size matches for structurally identical
-        // content at different frame positions (confirmed by RepeatedVerticalStripePattern_Lossless_
-        // IntrabcRoundTripsExactlyAndStaysSmall going from <1.5x growth to ~2x on doubled content) --
-        // fixed, conservative values keep the cost estimate a function of content and true structural
-        // position (availU/availL) only, not of what else happened to be encoded first.
+        // for pixel data via SourceY). Tried swapping in the real BlockDecoded-derived values (EncodeLeaf's
+        // identical formula): passes every test (including RepeatedVerticalStripePattern_Lossless_
+        // IntrabcRoundTripsExactlyAndStaysSmall, unlike an earlier, broader attempt bundling in real
+        // filterTypeSmooth/YModes state too), but measured a net *loss* once both lossy and lossless are
+        // weighed together on this project's benchmark image -- lossless improved by only 770 B (~0.04%)
+        // while Quality=75/90 each grew (+568 B / +590 B) since this estimate is shared by both paths. Not
+        // worth the added real/estimate divergence risk for a net-negative trade -- fixed, conservative
+        // values keep the cost estimate a function of content and true structural position (availU/availL)
+        // only, not of what else happened to be encoded first.
         var above = new Av1EdgeArray(528);
         var left = new Av1EdgeArray(528);
         var pred = s.Pred;
