@@ -135,6 +135,7 @@ internal static class Av1TileEncoder
             Written = new bool[miCols * miRows],
             IntrabcHashIndex = [],
             PositionsBySize = [],
+            IntrabcSignatureIndex = [],
             BlockDecoded = [new bool[BlockDecodedStride * BlockDecodedStride], new bool[BlockDecodedStride * BlockDecodedStride], new bool[BlockDecodedStride * BlockDecodedStride]],
             PartitionDecisions = [],
             PaletteSizesY = new int[miCols * miRows],
@@ -283,6 +284,14 @@ internal static class Av1TileEncoder
         // (FindApproximateIntrabcMatch), which needs real candidates to score by residual cost, not just
         // ones that already match exactly.
         public required Dictionary<int, List<(int R, int C)>> PositionsBySize;
+
+        // Coarse content-signature bucket index (see ComputeCoarseSignature/FindApproximateIntrabcMatch's own
+        // remarks): a visually-similar-but-not-byte-identical leaf (e.g. the same decorative element
+        // re-rendered with different anti-aliasing) can be spaced anywhere in the frame, not just within a
+        // small raster-order recency window -- this buckets every fully-encoded leaf by size + a coarse,
+        // quantized-luma-average signature so the approximate-match search can reach those candidates
+        // directly, at O(bucket size) rather than O(every leaf in the frame).
+        public required Dictionary<(int SizePixels, int Signature), List<(int R, int C)>> IntrabcSignatureIndex;
 
         // Write-side mirror of Av1TileDecoder's BlockDecoded tracking (spec's BlockDecoded[][], §5.11.3) --
         // needed so haveAboveRight/haveBelowLeft (spec §7.11.2's edge-extension availability, which directional
@@ -3213,18 +3222,24 @@ internal static class Av1TileEncoder
     }
 
     private const int ApproxSearchWindow = 64;
+    private const int ApproxSignatureBucketWindow = 64;
     private const long ApproxDvSignalingMargin = 64;
 
     /// <summary>
     /// Phase D technique 5: a bounded approximate-match search, tried only when <see cref="FindIntrabcMatch"/>
     /// found no byte-exact source. Unlike that search (a hash lookup, effectively free), there is no way to
-    /// index "close enough" content cheaply, so this scores real candidates directly: the last
-    /// <see cref="ApproxSearchWindow"/> same-size leaves already encoded (<see cref="TileState.PositionsBySize"/>,
-    /// not the content-hash index), scanned newest-first. Bounded rather than exhaustive over every
-    /// same-size leaf in the frame -- an exhaustive search would be O(leaves) per leaf, O(leaves^2) overall,
-    /// too slow for a general-purpose encoder on a large image -- which trades away distant repeats for
-    /// bounded, predictable cost; recent/local content is also the more common source of real repetition in
-    /// screen-content-style graphics (repeated UI chrome, tiled elements) than a single far-away match.
+    /// index "close enough" content cheaply by *exact* value, so this scores real candidates directly, drawn
+    /// from two sources: the last <see cref="ApproxSearchWindow"/> same-size leaves already encoded
+    /// (<see cref="TileState.PositionsBySize"/>, scanned newest-first -- recent/local content is a common
+    /// source of real repetition in screen-content-style graphics: repeated UI chrome, tiled elements), and
+    /// the last <see cref="ApproxSignatureBucketWindow"/> entries of whichever <see cref="TileState.IntrabcSignatureIndex"/>
+    /// bucket this leaf's own <see cref="ComputeCoarseSignature"/> falls into (a visually-similar-but-not-
+    /// byte-identical leaf -- e.g. the same decorative element re-rendered with different anti-aliasing --
+    /// can be spaced anywhere in the frame, not just within the recency window; measured near-zero real
+    /// IntraBC usage on this project's own real target photo, despite it having exactly this kind of spread-
+    /// out repeated content, before this bucket source was added). Both are bounded rather than exhaustive
+    /// over every same-size leaf in the frame -- an exhaustive search would be O(leaves) per leaf,
+    /// O(leaves^2) overall, too slow for a general-purpose encoder on a large image.
     /// Scored with the same WHT-magnitude proxy <see cref="ComputeCandidateCost"/> uses (luma only -- chroma
     /// cost is real but a second-order term for this comparison, and estimating it here would double the
     /// per-candidate cost for a proxy that's already approximate), then only accepted if it beats
@@ -3241,20 +3256,13 @@ internal static class Av1TileEncoder
         int x = c * 4;
         int y = r * 4;
 
-        if (!s.PositionsBySize.TryGetValue(sizePixels, out var positions))
-        {
-            return false;
-        }
-
-        int start = Math.Max(0, positions.Count - ApproxSearchWindow);
         long bestCost = long.MaxValue;
         int bestMvRow = 0;
         int bestMvCol = 0;
         bool found = false;
 
-        for (int idx = positions.Count - 1; idx >= start; idx--)
+        void ConsiderCandidate(int srcR, int srcC)
         {
-            var (srcR, srcC) = positions[idx];
             int srcX = srcC * 4;
             int srcY = srcR * 4;
             int deltaRow = srcY - y;
@@ -3262,12 +3270,12 @@ internal static class Av1TileEncoder
 
             if ((deltaRow == 0 && deltaCol == 0) || !IsValidIntrabcSource(s, r, c, sizeMi, srcR, srcC))
             {
-                continue;
+                return;
             }
 
             if (!s.MonoChrome && !s.Chroma444 && ((deltaRow & 1) != 0 || (deltaCol & 1) != 0))
             {
-                continue;
+                return;
             }
 
             long cost = ComputeIntrabcLumaCost(s, x, y, deltaRow * 8, deltaCol * 8, sizePixels);
@@ -3277,6 +3285,27 @@ internal static class Av1TileEncoder
                 bestMvRow = deltaRow * 8;
                 bestMvCol = deltaCol * 8;
                 found = true;
+            }
+        }
+
+        if (s.PositionsBySize.TryGetValue(sizePixels, out var positions))
+        {
+            int start = Math.Max(0, positions.Count - ApproxSearchWindow);
+            for (int idx = positions.Count - 1; idx >= start; idx--)
+            {
+                var (srcR, srcC) = positions[idx];
+                ConsiderCandidate(srcR, srcC);
+            }
+        }
+
+        int signature = ComputeCoarseSignature(s, x, y, sizePixels);
+        if (s.IntrabcSignatureIndex.TryGetValue((sizePixels, signature), out var sameSignature))
+        {
+            int start = Math.Max(0, sameSignature.Count - ApproxSignatureBucketWindow);
+            for (int idx = sameSignature.Count - 1; idx >= start; idx--)
+            {
+                var (srcR, srcC) = sameSignature[idx];
+                ConsiderCandidate(srcR, srcC);
             }
         }
 
@@ -3528,6 +3557,64 @@ internal static class Av1TileEncoder
         }
 
         positions.Add((r, c));
+
+        int signature = ComputeCoarseSignature(s, x, y, sizePixels);
+        var sigKey = (sizePixels, signature);
+        if (!s.IntrabcSignatureIndex.TryGetValue(sigKey, out var sigList))
+        {
+            sigList = [];
+            s.IntrabcSignatureIndex[sigKey] = sigList;
+        }
+
+        sigList.Add((r, c));
+    }
+
+    /// <summary>
+    /// Coarse, quantized-luma-average signature for a <paramref name="size"/>x<paramref name="size"/> leaf at
+    /// (<paramref name="x"/>, <paramref name="y"/>), used only to bucket visually-similar leaves for
+    /// <see cref="FindApproximateIntrabcMatch"/> -- unlike <see cref="HashBlock"/> (exact content, used for
+    /// byte-identical matches), this deliberately throws away most of the content so a re-rendered copy of
+    /// the same decorative element (different anti-aliasing, a few source pixels off) still lands in the same
+    /// bucket as its near-duplicates. Splits the leaf into a fixed 2x2 grid of quadrants regardless of its
+    /// own size (so a signature is comparable only against same-size leaves, matching
+    /// <see cref="TileState.IntrabcSignatureIndex"/>'s own size-keyed buckets, but the quantization coarseness
+    /// stays constant across leaf sizes), averages each quadrant's luma, and quantizes each average to 16
+    /// levels (4 bits) -- 4 quadrants x 4 bits packs into a 16-bit signature, deliberately coarse (not a
+    /// perceptual hash proper) so genuinely similar content reliably collides into the same bucket rather than
+    /// being split across many by noise-level differences.
+    /// </summary>
+    private static int ComputeCoarseSignature(TileState s, int x, int y, int size)
+    {
+        int half = Math.Max(1, size / 2);
+        int signature = 0;
+        for (int qr = 0; qr < 2; qr++)
+        {
+            for (int qc = 0; qc < 2; qc++)
+            {
+                int startY = y + (qr * half);
+                int startX = x + (qc * half);
+                int endY = Math.Min(startY + half, y + size);
+                int endX = Math.Min(startX + half, x + size);
+
+                long sum = 0;
+                int count = 0;
+                for (int py = startY; py < endY; py++)
+                {
+                    int rowBase = py * s.YWidth;
+                    for (int px = startX; px < endX; px++)
+                    {
+                        sum += s.SourceY[rowBase + px];
+                        count++;
+                    }
+                }
+
+                int avg = count > 0 ? (int)(sum / count) : 0;
+                int bucket = avg >> 4;
+                signature = (signature << 4) | (bucket & 0xF);
+            }
+        }
+
+        return signature;
     }
 
     /// <summary>Write-side mirror of <c>Av1TileDecoder.FindMvStack</c> + <c>AssignMv</c>'s PredMv derivation, isCompound=0 -- see that method's remarks for the full reasoning (identical here, just reading/writing <see cref="TileState"/>'s grids instead of instance fields).</summary>
