@@ -148,6 +148,13 @@ internal static class Av1TileEncoder
             // 128*128, not 64*64: lossless's real leaf ceiling is now a full 128x128 superblock (see
             // Av1TileEncoder's own remarks on 128x128 superblocks), and a palette leaf can be that big.
             PaletteColorMap = AvifBufferPool.SharedInt32.Rent(128 * 128),
+
+            // Second, independent color-map scratch buffer: needed only by the approximate-palette
+            // residual commit path in EncodeLeaf, which (per the AV1 spec's palette_tokens() ordering)
+            // must write BOTH planes' color-map tokens before encoding EITHER plane's residual -- so
+            // Y's map must still be intact when UV's map is built, ruling out reusing PaletteColorMap
+            // (the single shared buffer every other palette path already reuses) for both at once.
+            PaletteColorMapUv = AvifBufferPool.SharedInt32.Rent(128 * 128),
             YCoeffCtx = new Av1CoefficientWriter.PlaneContext(miCols, miRows),
             UCoeffCtx = monoChrome ? null : new Av1CoefficientWriter.PlaneContext(chroma444 ? miCols : miCols / 2, chroma444 ? miRows : miRows / 2),
             VCoeffCtx = monoChrome ? null : new Av1CoefficientWriter.PlaneContext(chroma444 ? miCols : miCols / 2, chroma444 ? miRows : miRows / 2),
@@ -225,6 +232,7 @@ internal static class Av1TileEncoder
             AvifBufferPool.SharedInt32.Return(state.CflLumaAc);
             AvifBufferPool.SharedInt32.Return(state.LumaLevels);
             AvifBufferPool.SharedInt32.Return(state.PaletteColorMap);
+            AvifBufferPool.SharedInt32.Return(state.PaletteColorMapUv);
         }
     }
 
@@ -335,6 +343,11 @@ internal static class Av1TileEncoder
         public required int[] PaletteColorsU;
         public required int[] PaletteColorsV;
         public required int[] PaletteColorMap;
+
+        // Second color-map scratch buffer, used only by EncodeLeaf's approximate-palette residual
+        // commit path -- see the remark at this state's construction site for why PaletteColorMap
+        // alone isn't enough once both planes' maps must survive to be written before either residual.
+        public required int[] PaletteColorMapUv;
 
         // Rented once per EncodeTile call and reused across every block -- see EncodeTile's remarks.
         public required int[] Pred;
@@ -838,7 +851,12 @@ internal static class Av1TileEncoder
 
         if (paletteStructurallyPresent)
         {
-            long? paletteCost = EstimateLosslessPaletteCost(s, r, c, wMi, hMi, availU: r > 0, availL: c > 0);
+            // allowApproximate: false -- EncodeRectangularLeaf's own commit-time palette logic doesn't
+            // support an approximate (real-residual) palette yet, only an exact, zero-residual one (see
+            // EncodeLeaf's own allowApproximate remarks for why this specific estimate/commit consistency
+            // matters, having already cost a real measured regression once this session when a different
+            // estimate/commit divergence went unnoticed).
+            long? paletteCost = EstimateLosslessPaletteCost(s, r, c, wMi, hMi, availU: r > 0, availL: c > 0, allowApproximate: false);
             if (paletteCost is long pc && pc < lumaCost)
             {
                 lumaCost = pc;
@@ -967,7 +985,7 @@ internal static class Av1TileEncoder
     /// the same safe pattern this method's own partition-bit costing already uses just above.</para>
     /// </summary>
     private static long? EstimateLosslessPaletteCost(TileState s, int r, int c, int sizeMi, bool availU, bool availL)
-        => EstimateLosslessPaletteCost(s, r, c, sizeMi, sizeMi, availU, availL);
+        => EstimateLosslessPaletteCost(s, r, c, sizeMi, sizeMi, availU, availL, allowApproximate: true);
 
     /// <summary>
     /// Rectangular-generalized (wMi != hMi) form of the same estimate, used by
@@ -976,36 +994,206 @@ internal static class Av1TileEncoder
     /// remarks for why Horz/Vert previously lost this comparison unfairly (no palette candidate at all)
     /// on palette-heavy content.
     /// </summary>
-    private static long? EstimateLosslessPaletteCost(TileState s, int r, int c, int wMi, int hMi, bool availU, bool availL)
+    private static long? EstimateLosslessPaletteCost(TileState s, int r, int c, int wMi, int hMi, bool availU, bool availL, bool allowApproximate)
     {
         int widthPixels = wMi * 4;
         int heightPixels = hMi * 4;
         int x = c * 4;
         int y = r * 4;
 
-        if (!TryBuildYPalette(s, x, y, widthPixels, heightPixels, s.PaletteColorsY, out int nY))
+        bool yExact = TryBuildYPalette(s, x, y, widthPixels, heightPixels, s.PaletteColorsY, out int nY);
+        if (!yExact)
         {
-            return null;
+            if (!allowApproximate || !TryBuildApproximateYPalette(s, x, y, widthPixels, heightPixels, s.PaletteColorsY, out nY))
+            {
+                return null;
+            }
         }
 
         long bits = EstimatePaletteColorBitsY(s, s.PaletteColorsY, nY, r, c, availU, availL);
         var colorMap = s.PaletteColorMap;
-        BuildColorMap(s.SourceY, s.YWidth, x, y, widthPixels, heightPixels, s.PaletteColorsY, nY, colorMap);
+        if (yExact)
+        {
+            BuildColorMap(s.SourceY, s.YWidth, x, y, widthPixels, heightPixels, s.PaletteColorsY, nY, colorMap);
+        }
+        else
+        {
+            // Not an exact match by construction (see TryBuildApproximateYPalette's own remarks) -- the real
+            // per-pixel approximation error against this leaf's own assigned centroids has to be priced in
+            // as a real WHT residual cost, exactly like any other prediction mode's residual, not assumed
+            // free the way the exact-match branch above is.
+            BuildApproximateColorMap(s.SourceY, s.YWidth, x, y, widthPixels, heightPixels, s.PaletteColorsY, nY, colorMap);
+        }
+
         bits += EstimateColorMapBits(colorMap, widthPixels, heightPixels, nY, s.Cdf.PaletteYColorIndex);
+        if (!yExact)
+        {
+            bits += ComputePaletteResidualCost(s, s.SourceY, s.YWidth, ptype: 0, x, y, widthPixels, heightPixels, colorMap, widthPixels, s.PaletteColorsY, s.YCoeffCtx, out _);
+        }
 
         if (!s.MonoChrome)
         {
-            if (!TryBuildUvPalette(s, x, y, widthPixels, heightPixels, s.PaletteColorsU, s.PaletteColorsV, out int nUv))
+            bool uvExact = TryBuildUvPalette(s, x, y, widthPixels, heightPixels, s.PaletteColorsU, s.PaletteColorsV, out int nUv);
+            if (!uvExact)
             {
-                return null;
+                if (!allowApproximate || !TryBuildApproximateUvPalette(s, x, y, widthPixels, heightPixels, s.PaletteColorsU, s.PaletteColorsV, out nUv))
+                {
+                    return null;
+                }
             }
 
             bits += EstimatePaletteColorBitsUv(s, s.PaletteColorsU, s.PaletteColorsV, nUv, r, c, availU, availL);
-            BuildColorMapUv(s, x, y, widthPixels, heightPixels, s.PaletteColorsU, s.PaletteColorsV, nUv, colorMap);
+            if (uvExact)
+            {
+                BuildColorMapUv(s, x, y, widthPixels, heightPixels, s.PaletteColorsU, s.PaletteColorsV, nUv, colorMap);
+            }
+            else
+            {
+                BuildApproximateColorMapUv(s, x, y, widthPixels, heightPixels, s.PaletteColorsU, s.PaletteColorsV, nUv, colorMap);
+            }
+
             bits += EstimateColorMapBits(colorMap, widthPixels, heightPixels, nUv, s.Cdf.PaletteUvColorIndex);
+            if (!uvExact)
+            {
+                // U and V are two independent single-channel planes sharing the same color map index (see
+                // BuildApproximateColorMapUv's own (U, V)-pair nearest-centroid assignment) -- exactly
+                // mirroring how every other residual path in this class already treats chroma, this reuses
+                // the same per-plane residual-cost function twice rather than a combined UV variant.
+                bits += ComputePaletteResidualCost(s, s.SourceU!, s.ChromaWidth, ptype: 1, x, y, widthPixels, heightPixels, colorMap, widthPixels, s.PaletteColorsU, s.UCoeffCtx!, out _);
+                bits += ComputePaletteResidualCost(s, s.SourceV!, s.ChromaWidth, ptype: 1, x, y, widthPixels, heightPixels, colorMap, widthPixels, s.PaletteColorsV, s.VCoeffCtx!, out _);
+            }
         }
 
         return Av1RdCost.CombineCost(0, bits, 1.0);
+    }
+
+    /// <summary>
+    /// Real per-4x4-sub-block WHT residual trial cost of an approximate palette prediction: for each pixel,
+    /// "prediction" is simply <c>colors[colorMap[localIdx]]</c> -- no spatial edge-based extrapolation at all
+    /// (unlike every other intra mode candidate this class costs, a palette lookup already <em>is</em> the
+    /// whole prediction) -- so this is simpler than <see cref="ComputeLosslessWholeLeafCostPerSubBlock"/>'s
+    /// own per-sub-block loop: no BuildEdges/Predict/haveAboveRight/haveBelowLeft, just
+    /// residual = source - palette lookup, WHT-transformed/quantized/trial-written exactly like any other
+    /// candidate's residual (same non-mutating trial-sink/scratch-context pattern <c>ComputeLosslessWholeLeafCostPerSubBlock</c>'s
+    /// own remarks describe). <paramref name="allZero"/> comes back <see langword="true"/> when every pixel
+    /// happens to match its assigned centroid exactly -- callers should treat that leaf as free (skip = 1),
+    /// exactly like <see cref="TryBuildYPalette"/>'s own exact-match case, rather than paying for a real
+    /// (here, coincidentally zero) residual.
+    /// </summary>
+    private static long ComputePaletteResidualCost(TileState s, int[] source, int planeWidth, int ptype, int x, int y, int widthPixels, int heightPixels, int[] colorMap, int mapWidth, int[] colors, Av1CoefficientWriter.PlaneContext realCtx, out bool allZero)
+    {
+        int nW = widthPixels / 4;
+        int nH = heightPixels / 4;
+        int x4 = x >> 2;
+        int y4 = y >> 2;
+        var scratch = s.ScratchCoeffCtx;
+        scratch.SeedFrom(realCtx, x4, nW, y4, nH);
+        var trial = s.TrialSink;
+        trial.Reset();
+
+        var residual = s.Residual;
+        var coeff = s.Coeff;
+        var levels = s.Levels;
+        bool anyNonZero = false;
+
+        for (int dr = 0; dr < nH; dr++)
+        {
+            for (int dc = 0; dc < nW; dc++)
+            {
+                int subX = x + (dc * 4);
+                int subY = y + (dr * 4);
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int rowBase = ((subY + i) * planeWidth) + subX;
+                    int mapRowBase = (((dr * 4) + i) * mapWidth) + (dc * 4);
+                    for (int j = 0; j < 4; j++)
+                    {
+                        int predicted = colors[colorMap[mapRowBase + j]];
+                        int diff = source[rowBase + j] - predicted;
+                        residual[(i * 4) + j] = diff;
+                        if (diff != 0)
+                        {
+                            anyNonZero = true;
+                        }
+                    }
+                }
+
+                Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+
+                int subX4 = subX >> 2;
+                int subY4 = subY >> 2;
+                Av1CoefficientWriter.WriteCoeffs(trial, s.Cdf, levels, 4, ptype, subX4, subY4, scratch, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels, updateContext: true);
+            }
+        }
+
+        allZero = !anyNonZero;
+        return Av1RdCost.CombineCost(0, trial.Bits, 1.0);
+    }
+
+    /// <summary>
+    /// Real commit-time counterpart to <see cref="ComputePaletteResidualCost"/>: writes the real WHT residual
+    /// for an approximate palette leaf to <see cref="TileState.Symbols"/> (updating <paramref name="realCtx"/>
+    /// for real), and reconstructs <paramref name="recon"/> as palette-prediction-plus-dequantized-residual,
+    /// mirroring <see cref="EncodeLosslessLumaResidual"/>/<see cref="EncodeRectangularLeaf"/>'s own per-sub-block
+    /// predict-then-reconstruct shape exactly, just with a color-map lookup as the prediction source instead
+    /// of spatial extrapolation or block-copy. Only ever called once a leaf's own residual is already known
+    /// to be non-all-zero (see <c>EncodeLeaf</c>'s own call site) -- an all-zero-residual leaf uses the
+    /// existing exact-match/skip=1 path instead, which is strictly cheaper (no coefficient symbols at all)
+    /// for the case it already handles.
+    /// </summary>
+    private static void EncodePaletteResidual(TileState s, int[] source, int[] recon, int planeWidth, int ptype, int r, int c, int x, int y, int widthPixels, int heightPixels, int[] colorMap, int mapWidth, int[] colors, Av1CoefficientWriter.PlaneContext realCtx, int blockDecodedPlane)
+    {
+        int nW = widthPixels / 4;
+        int nH = heightPixels / 4;
+        var pred = s.Pred;
+        var residual = s.Residual;
+        var coeff = s.Coeff;
+        var levels = s.Levels;
+
+        for (int dr = 0; dr < nH; dr++)
+        {
+            for (int dc = 0; dc < nW; dc++)
+            {
+                int subX = x + (dc * 4);
+                int subY = y + (dr * 4);
+                int subR = r + dr;
+                int subC = c + dc;
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int mapRowBase = (((dr * 4) + i) * mapWidth) + (dc * 4);
+                    int predRowBase = i * 4;
+                    for (int j = 0; j < 4; j++)
+                    {
+                        pred[predRowBase + j] = colors[colorMap[mapRowBase + j]];
+                    }
+                }
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int rowBase = ((subY + i) * planeWidth) + subX;
+                    int predRowBase = i * 4;
+                    for (int j = 0; j < 4; j++)
+                    {
+                        residual[(i * 4) + j] = source[rowBase + j] - pred[predRowBase + j];
+                    }
+                }
+
+                Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+
+                for (int i = 0; i < 4; i++)
+                {
+                    Array.Copy(pred, i * 4, recon, ((subY + i) * planeWidth) + subX, 4);
+                }
+
+                Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype, subC, subR, realCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
+                Av1LocalReconstructor.Reconstruct(recon, planeWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
+                SetBlockDecoded(s, blockDecodedPlane, subR & s.SbMiMask, subC & s.SbMiMask, true);
+            }
+        }
     }
 
     /// <summary>Pure bit-count mirror of <see cref="WritePaletteColorsY"/> -- same color-cache/delta-width shrinking math, without ever writing to <see cref="TileState.Symbols"/> (see <c>EstimateLosslessPaletteCost</c>'s remarks on why a speculative candidate must not).</summary>
@@ -1683,7 +1871,7 @@ internal static class Av1TileEncoder
     /// share identical geometry, so plane 1 (U)'s state stands in for both here; the real per-4x4-sub-block
     /// values <see cref="EncodeChromaRegion"/> uses are exact, not approximated.</para>
     /// </summary>
-    private static (int Mode, int AngleDelta, int AlphaU, int AlphaV) SearchUvMode(TileState s, int r, int c, int x, int y, int sizeMi, bool availU, bool availL)
+    private static (int Mode, int AngleDelta, int AlphaU, int AlphaV, long BestCost) SearchUvMode(TileState s, int r, int c, int x, int y, int sizeMi, bool availU, bool availL)
     {
         bool subsampled = !s.Chroma444;
         int chromaN = s.Chroma444 ? sizeMi : sizeMi / 2;
@@ -1769,7 +1957,7 @@ internal static class Av1TileEncoder
             }
         }
 
-        return (bestMode, bestAngleDelta, bestAlphaU, bestAlphaV);
+        return (bestMode, bestAngleDelta, bestAlphaU, bestAlphaV, bestCost);
     }
 
     /// <summary>
@@ -2277,9 +2465,15 @@ internal static class Av1TileEncoder
         int bestUvAngleDelta = 0;
         int bestAlphaU = 0;
         int bestAlphaV = 0;
+
+        // Sentinel for "the search below never ran" (no available neighbor to build edges from -- only
+        // reachable at the very first leaf(es) of a frame) -- see the approximate-palette RD gate below,
+        // which treats this as "no real non-palette cost to compare against" rather than risking an
+        // overflowing sum with a real bestCost.
+        long bestUvCost = long.MaxValue;
         if (hasChroma && !usedIntrabc && (availU || availL))
         {
-            (bestUvMode, bestUvAngleDelta, bestAlphaU, bestAlphaV) = SearchUvMode(s, r, c, x, y, sizeMi, availU, availL);
+            (bestUvMode, bestUvAngleDelta, bestAlphaU, bestAlphaV, bestUvCost) = SearchUvMode(s, r, c, x, y, sizeMi, availU, availL);
         }
 
         // Trial-build this leaf's palette *before* writing anything -- skip's value depends on whether
@@ -2308,13 +2502,92 @@ internal static class Av1TileEncoder
         // all-or-nothing outcome, and must be written even on the leaves that end up not using palette at
         // all (e.g. because Y's mode isn't DC_PRED, only the independent UV bit is even reachable, but it
         // still has to be there).
+        // yExact/uvExact (vs the *approximate*, k-means-clustered fallback -- see TryBuildApproximateYPalette's
+        // own remarks) is tracked separately from plain eligibility because it's what decides whether this
+        // leaf's residual is guaranteed all-zero (skip = 1 legal) or needs a real per-plane WHT residual on
+        // top of the palette prediction (skip = 0) -- see paletteAllZeroResidual below. The approximate
+        // fallback is only ever tried once the cheaper exact path has already failed.
         int nY = 0;
         int nUv = 0;
-        bool yPaletteEligible = !usedIntrabc && paletteStructurallyPresent && bestMode == Av1IntraMode.DcPred
-            && TryBuildYPalette(s, x, y, sizePixels, sizePixels, s.PaletteColorsY, out nY);
-        bool uvPaletteEligible = !usedIntrabc && paletteStructurallyPresent && hasChroma && bestUvMode == Av1IntraMode.DcPred
-            && TryBuildUvPalette(s, x, y, sizePixels, sizePixels, s.PaletteColorsU, s.PaletteColorsV, out nUv);
+        bool yBasePaletteGate = !usedIntrabc && paletteStructurallyPresent && bestMode == Av1IntraMode.DcPred;
+        bool yExact = yBasePaletteGate && TryBuildYPalette(s, x, y, sizePixels, sizePixels, s.PaletteColorsY, out nY);
+        bool yApprox = !yExact && yBasePaletteGate && TryBuildApproximateYPalette(s, x, y, sizePixels, sizePixels, s.PaletteColorsY, out nY);
+        bool yPaletteEligible = yExact || yApprox;
+
+        bool uvBasePaletteGate = !usedIntrabc && paletteStructurallyPresent && hasChroma && bestUvMode == Av1IntraMode.DcPred;
+        bool uvExact = uvBasePaletteGate && TryBuildUvPalette(s, x, y, sizePixels, sizePixels, s.PaletteColorsU, s.PaletteColorsV, out nUv);
+        bool uvApprox = !uvExact && uvBasePaletteGate && TryBuildApproximateUvPalette(s, x, y, sizePixels, sizePixels, s.PaletteColorsU, s.PaletteColorsV, out nUv);
+        bool uvPaletteEligible = uvExact || uvApprox;
+
         bool usedPalette = yPaletteEligible && (!hasChroma || uvPaletteEligible);
+        bool paletteAllZeroResidual = usedPalette && yExact && (!hasChroma || uvExact);
+
+        // RD-gate the approximate case: unlike an exact-match palette (paletteAllZeroResidual -- always a
+        // strict win, zero residual plus cheaper signaling than the mode search's own real residual), an
+        // approximate (k-means-clustered) palette prediction pays a real per-plane WHT residual on top of
+        // its own quantization error, which can easily cost more bits than just keeping whatever the mode
+        // search above already picked (bestMode for Y, bestUvMode for UV) -- especially on textured/
+        // gradient/anti-aliased content, where a handful of representative colors is a poor predictor even
+        // though every pixel technically falls within the color-count threshold. Real libaom never commits
+        // to an approximate palette without first running it through this same real-residual RD comparison
+        // (av1_pick_uniform_tx_size_type_yrd) against the alternative -- this mirrors that, using the same
+        // trial-cost machinery (EstimatePaletteColorBitsY/Uv, EstimateColorMapBits, ComputePaletteResidualCost)
+        // EstimateLosslessPaletteCost already uses, but reusing this leaf's own already-selected nY/nUv and
+        // colors instead of redoing the k-means/exact-match search a second time. Only ever runs for the
+        // non-zero-residual case; an all-exact leaf is left alone since it's unconditionally cheaper.
+        if (usedPalette && !paletteAllZeroResidual)
+        {
+            long paletteBits = EstimatePaletteColorBitsY(s, s.PaletteColorsY, nY, r, c, availU, availL);
+            var trialColorMapY = s.PaletteColorMap;
+            if (yExact)
+            {
+                BuildColorMap(s.SourceY, s.YWidth, x, y, sizePixels, sizePixels, s.PaletteColorsY, nY, trialColorMapY);
+            }
+            else
+            {
+                BuildApproximateColorMap(s.SourceY, s.YWidth, x, y, sizePixels, sizePixels, s.PaletteColorsY, nY, trialColorMapY);
+            }
+
+            paletteBits += EstimateColorMapBits(trialColorMapY, sizePixels, sizePixels, nY, s.Cdf.PaletteYColorIndex);
+            if (!yExact)
+            {
+                paletteBits += ComputePaletteResidualCost(s, s.SourceY, s.YWidth, ptype: 0, x, y, sizePixels, sizePixels, trialColorMapY, sizePixels, s.PaletteColorsY, s.YCoeffCtx, out _);
+            }
+
+            long nonPaletteBits = bestCost;
+            if (hasChroma)
+            {
+                paletteBits += EstimatePaletteColorBitsUv(s, s.PaletteColorsU, s.PaletteColorsV, nUv, r, c, availU, availL);
+                var trialColorMapUv = s.PaletteColorMapUv;
+                if (uvExact)
+                {
+                    BuildColorMapUv(s, x, y, sizePixels, sizePixels, s.PaletteColorsU, s.PaletteColorsV, nUv, trialColorMapUv);
+                }
+                else
+                {
+                    BuildApproximateColorMapUv(s, x, y, sizePixels, sizePixels, s.PaletteColorsU, s.PaletteColorsV, nUv, trialColorMapUv);
+                }
+
+                paletteBits += EstimateColorMapBits(trialColorMapUv, sizePixels, sizePixels, nUv, s.Cdf.PaletteUvColorIndex);
+                if (!uvExact)
+                {
+                    paletteBits += ComputePaletteResidualCost(s, s.SourceU!, s.ChromaWidth, ptype: 1, x, y, sizePixels, sizePixels, trialColorMapUv, sizePixels, s.PaletteColorsU, s.UCoeffCtx!, out _);
+                    paletteBits += ComputePaletteResidualCost(s, s.SourceV!, s.ChromaWidth, ptype: 1, x, y, sizePixels, sizePixels, trialColorMapUv, sizePixels, s.PaletteColorsV, s.VCoeffCtx!, out _);
+                }
+
+                // bestUvCost's long.MaxValue sentinel (search never ran -- see its own declaration) means
+                // there's no real non-palette reference to compare against; treat that as "non-palette cost
+                // unknown/unbounded" so the gate never blocks palette on the strength of a missing number.
+                nonPaletteBits = bestUvCost == long.MaxValue ? long.MaxValue : nonPaletteBits + bestUvCost;
+            }
+
+            long paletteCost = Av1RdCost.CombineCost(0, paletteBits, 1.0);
+            if (paletteCost >= nonPaletteBits)
+            {
+                usedPalette = false;
+                paletteAllZeroResidual = false;
+            }
+        }
 
         int paletteSizeY = 0;
         int paletteSizeUV = 0;
@@ -2333,7 +2606,7 @@ internal static class Av1TileEncoder
             skipCtx += s.Skips[(r * s.MiCols) + c - 1] ? 1 : 0;
         }
 
-        s.Symbols.WriteSymbol(s.Cdf.Skip[skipCtx], (usedPalette || intrabcExact) ? 1 : 0);
+        s.Symbols.WriteSymbol(s.Cdf.Skip[skipCtx], (paletteAllZeroResidual || intrabcExact) ? 1 : 0);
 
         // use_intrabc (spec §5.11.7): structurally present whenever this frame allows it (tied to lossless
         // -- see Av1FrameHeaderWriter), read/written unconditionally for every leaf regardless of outcome,
@@ -2518,7 +2791,7 @@ internal static class Av1TileEncoder
             }
         }
 
-        if (usedPalette)
+        if (usedPalette && paletteAllZeroResidual)
         {
             // reset_block_context(bw4, bh4) (spec §5.11.5): this leaf is skip = 1, so none of the
             // WriteCoeffs calls below run -- without this, YCoeffCtx/UCoeffCtx/VCoeffCtx would keep
@@ -2564,6 +2837,60 @@ internal static class Av1TileEncoder
             if (hasChroma)
             {
                 MarkChromaBlockDecoded(s, r, c, sizeMi);
+            }
+        }
+        else if (usedPalette)
+        {
+            // Approximate (k-means-clustered, non-exact) palette: skip = 0, so unlike the exact-match branch
+            // above, this leaf carries a real per-plane WHT residual on top of the palette prediction --
+            // exactly like Av1TileDecoder.TransformBlock's own unconditional post-prediction residual()
+            // step, just with a color-map lookup as the prediction source instead of spatial extrapolation
+            // or block-copy. No manual coefficient-context reset needed here (unlike the exact-match branch):
+            // WriteCoeffs runs for real below and updates YCoeffCtx/UCoeffCtx/VCoeffCtx in place, the same
+            // way any other non-skip leaf's residual commit already does.
+            // Real palette_tokens() (spec §5.11.47) reads BOTH planes' color-index maps before
+            // read_block_tx_size()/residual() touches either plane's coefficients -- so both maps must be
+            // built and their tokens written here before EITHER plane's residual is encoded. Y's map lives
+            // in PaletteColorMap and UV's in the separate PaletteColorMapUv (see their declarations) so
+            // building UV's map can't clobber Y's before Y's residual runs.
+            var colorMapY = s.PaletteColorMap;
+            if (yExact)
+            {
+                BuildColorMap(s.SourceY, s.YWidth, x, y, sizePixels, sizePixels, s.PaletteColorsY, nY, colorMapY);
+            }
+            else
+            {
+                BuildApproximateColorMap(s.SourceY, s.YWidth, x, y, sizePixels, sizePixels, s.PaletteColorsY, nY, colorMapY);
+            }
+
+            WriteColorMapTokens(s, colorMapY, sizePixels, sizePixels, nY, s.Cdf.PaletteYColorIndex);
+
+            int[]? colorMapUv = null;
+            if (hasChroma)
+            {
+                colorMapUv = s.PaletteColorMapUv;
+                if (uvExact)
+                {
+                    BuildColorMapUv(s, x, y, sizePixels, sizePixels, s.PaletteColorsU, s.PaletteColorsV, nUv, colorMapUv);
+                }
+                else
+                {
+                    BuildApproximateColorMapUv(s, x, y, sizePixels, sizePixels, s.PaletteColorsU, s.PaletteColorsV, nUv, colorMapUv);
+                }
+
+                WriteColorMapTokens(s, colorMapUv, sizePixels, sizePixels, nUv, s.Cdf.PaletteUvColorIndex);
+            }
+
+            EncodePaletteResidual(s, s.SourceY, s.ReconY, s.YWidth, ptype: 0, r, c, x, y, sizePixels, sizePixels, colorMapY, sizePixels, s.PaletteColorsY, s.YCoeffCtx, blockDecodedPlane: 0);
+
+            if (hasChroma)
+            {
+                // U and V are two independent single-channel planes sharing the same color map index (see
+                // EstimateLosslessPaletteCost's identical remark) -- reuses EncodePaletteResidual once per
+                // plane rather than a combined UV variant, exactly mirroring how every other residual path
+                // in this class already treats chroma.
+                EncodePaletteResidual(s, s.SourceU!, s.ReconU!, s.ChromaWidth, ptype: 1, r, c, x, y, sizePixels, sizePixels, colorMapUv!, sizePixels, s.PaletteColorsU, s.UCoeffCtx!, blockDecodedPlane: 1);
+                EncodePaletteResidual(s, s.SourceV!, s.ReconV!, s.ChromaWidth, ptype: 1, r, c, x, y, sizePixels, sizePixels, colorMapUv!, sizePixels, s.PaletteColorsV, s.VCoeffCtx!, blockDecodedPlane: 2);
             }
         }
         else
@@ -2674,15 +3001,15 @@ internal static class Av1TileEncoder
                 s.YModes[idx] = leafYMode;
                 s.UvModes[idx] = leafUvMode;
                 s.MiSizes[idx] = bSize;
-                // Must mirror the actual written skip bit (usedPalette || intrabcExact, see above -- not
-                // usedIntrabc), which is 0 for an approximate-match IntraBC leaf (it carries a real residual).
+                // Must mirror the actual written skip bit (paletteAllZeroResidual || intrabcExact, see above
+                // -- not usedPalette or usedIntrabc), which is 0 for an approximate-match IntraBC leaf (it
+                // carries a real residual) and now also 0 for an approximate (k-means-clustered, non-exact)
+                // palette leaf, which likewise carries a real residual despite usedPalette being true.
                 // Av1TileDecoder stores its own Skips-equivalent grid from the literally decoded skip bit
-                // (_skips[idx] = _skip), so using usedIntrabc here diverges from the decoder's neighbor-skip
-                // context for any later leaf bordering this one whenever intrabcApprox (not intrabcExact) is
-                // what made usedIntrabc true -- silently latent while approximate-match IntraBC leaves were
-                // rare (this encoder's original 8x8-floor rarely picked one), but common enough once
-                // partition-tree RDO's larger leaves increase how often it's chosen to desync real content.
-                s.Skips[idx] = usedPalette || intrabcExact;
+                // (_skips[idx] = _skip), so using a broader flag here diverges from the decoder's neighbor-
+                // skip context for any later leaf bordering this one -- silently latent while approximate
+                // leaves of either kind were rare, but real once they're not.
+                s.Skips[idx] = paletteAllZeroResidual || intrabcExact;
                 s.PaletteSizesY[idx] = usedPalette ? paletteSizeY : 0;
                 s.PaletteSizesUV[idx] = usedPalette ? paletteSizeUV : 0;
                 int colorBase = idx * 8;
@@ -4320,6 +4647,463 @@ internal static class Av1TileEncoder
 
         count = n;
         return true;
+    }
+
+    // Mirrors libaom's own default color_palette_thresh (av1/encoder/encodeframe.c: "x->color_palette_thresh
+    // = 64") -- the point past which a block is judged unlikely to cluster well into <= 8 representative
+    // colors at all, so it's not worth running k-means (av1/encoder/k_means_template.h's own av1_k_means) on
+    // it in the first place. This is a *speed* gate, not a correctness one: nothing below actually requires
+    // an upper bound on distinct colors to work.
+    private const int ApproximatePaletteColorThreshold = 64;
+
+    /// <summary>
+    /// Real (if approximate) palette support: confirmed against libaom's own <c>av1_rd_pick_palette_intra_sby</c>
+    /// (<c>av1/encoder/palette.c</c>) that real AV1 palette is never restricted to blocks with &lt;= 8 *exact*
+    /// distinct colors the way <see cref="TryBuildYPalette"/> is -- it clusters a much broader range (up to
+    /// <see cref="ApproximatePaletteColorThreshold"/> distinct colors) into <![CDATA[<=]]> 8 representative
+    /// centroids via k-means, assigns each pixel to its nearest one, and corrects the resulting approximation
+    /// error with a real residual on top -- exactly the same prediction-then-residual shape every other intra
+    /// mode already uses, just with a color-map lookup as the prediction source instead of spatial
+    /// extrapolation. This is why palette was almost never used on this project's own real target photo
+    /// despite it having large near-flat regions: anti-aliased text and gradients routinely have many more
+    /// than 8 *exact* distinct color values per leaf, even where a handful of *dominant* colors plus small
+    /// per-pixel corrections would code far more cheaply than a full directional-mode WHT residual.
+    ///
+    /// <para>Only ever called after <see cref="TryBuildYPalette"/> itself has already failed (see
+    /// <c>EncodeLeaf</c>'s/<c>EstimateLosslessPaletteCost</c>'s own call sites) -- a block with
+    /// <![CDATA[<=]]> 8 exact colors already gets an exact, zero-residual palette from that cheaper path, so
+    /// this never needs to re-derive it. Collects up to <see cref="ApproximatePaletteColorThreshold"/>
+    /// distinct luma values (each weighted by its own pixel count, so a color used 1000 times pulls a
+    /// centroid harder than one used once -- real, not cosmetic, since it directly affects how well the
+    /// resulting <![CDATA[<=]]> 8 centroids fit the block's real distribution) via
+    /// <see cref="CollectDistinctYValues"/>, then clusters them via <see cref="KMeans1D"/>. Unlike
+    /// <see cref="TryBuildYPalette"/>, a successful build here does <em>not</em> guarantee a zero-residual
+    /// leaf -- callers must still compute (and code, when nonzero) the real per-pixel residual against
+    /// whichever centroid each pixel's own <see cref="BuildApproximateColorMap"/> entry assigns it to.
+    /// </para>
+    /// </summary>
+    private static bool TryBuildApproximateYPalette(TileState s, int x, int y, int width, int height, int[] colors, out int count)
+    {
+        Span<int> distinctValues = stackalloc int[ApproximatePaletteColorThreshold];
+        Span<int> weights = stackalloc int[ApproximatePaletteColorThreshold];
+        if (!CollectDistinctYValues(s, x, y, width, height, distinctValues, weights, out int distinctCount) || distinctCount < 2)
+        {
+            count = 0;
+            return false;
+        }
+
+        InsertionSortWeighted(distinctValues[..distinctCount], weights[..distinctCount]);
+
+        Span<int> centroids = stackalloc int[8];
+        int n = KMeans1D(distinctValues[..distinctCount], weights[..distinctCount], Math.Min(8, distinctCount), centroids);
+        if (n < 2)
+        {
+            count = 0;
+            return false;
+        }
+
+        for (int i = 0; i < n; i++)
+        {
+            colors[i] = centroids[i];
+        }
+
+        count = n;
+        return true;
+    }
+
+    /// <summary>2D (paired U, V) counterpart to <see cref="TryBuildApproximateYPalette"/> -- see its own remarks for the full reasoning.</summary>
+    private static bool TryBuildApproximateUvPalette(TileState s, int x, int y, int width, int height, int[] uColors, int[] vColors, out int count)
+    {
+        Span<int> distinctU = stackalloc int[ApproximatePaletteColorThreshold];
+        Span<int> distinctV = stackalloc int[ApproximatePaletteColorThreshold];
+        Span<int> weights = stackalloc int[ApproximatePaletteColorThreshold];
+        if (!CollectDistinctUvValues(s, x, y, width, height, distinctU, distinctV, weights, out int distinctCount) || distinctCount < 2)
+        {
+            count = 0;
+            return false;
+        }
+
+        Span<int> centroidU = stackalloc int[8];
+        Span<int> centroidV = stackalloc int[8];
+        int n = KMeans2D(distinctU[..distinctCount], distinctV[..distinctCount], weights[..distinctCount], Math.Min(8, distinctCount), centroidU, centroidV);
+        if (n < 2)
+        {
+            count = 0;
+            return false;
+        }
+
+        for (int i = 0; i < n; i++)
+        {
+            uColors[i] = centroidU[i];
+            vColors[i] = centroidV[i];
+        }
+
+        count = n;
+        return true;
+    }
+
+    /// <summary>Collects up to this leaf's own distinct luma values (each weighted by its own pixel count) for <see cref="TryBuildApproximateYPalette"/>, bailing out past <see cref="ApproximatePaletteColorThreshold"/> distinct values -- see its own remarks on why that's a speed gate, not a correctness one.</summary>
+    private static bool CollectDistinctYValues(TileState s, int x, int y, int width, int height, Span<int> outValues, Span<int> outWeights, out int count)
+    {
+        count = 0;
+        for (int i = 0; i < height; i++)
+        {
+            int rowBase = ((y + i) * s.YWidth) + x;
+            for (int j = 0; j < width; j++)
+            {
+                int v = s.SourceY[rowBase + j];
+                int k = 0;
+                for (; k < count; k++)
+                {
+                    if (outValues[k] == v)
+                    {
+                        outWeights[k]++;
+                        break;
+                    }
+                }
+
+                if (k == count)
+                {
+                    if (count == outValues.Length)
+                    {
+                        return false;
+                    }
+
+                    outValues[count] = v;
+                    outWeights[count] = 1;
+                    count++;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>(U, V)-pair counterpart to <see cref="CollectDistinctYValues"/> -- see its own remarks.</summary>
+    private static bool CollectDistinctUvValues(TileState s, int x, int y, int width, int height, Span<int> outU, Span<int> outV, Span<int> outWeights, out int count)
+    {
+        count = 0;
+        for (int i = 0; i < height; i++)
+        {
+            int rowBase = ((y + i) * s.ChromaWidth) + x;
+            for (int j = 0; j < width; j++)
+            {
+                int u = s.SourceU![rowBase + j];
+                int v = s.SourceV![rowBase + j];
+                int k = 0;
+                for (; k < count; k++)
+                {
+                    if (outU[k] == u && outV[k] == v)
+                    {
+                        outWeights[k]++;
+                        break;
+                    }
+                }
+
+                if (k == count)
+                {
+                    if (count == outU.Length)
+                    {
+                        return false;
+                    }
+
+                    outU[count] = u;
+                    outV[count] = v;
+                    outWeights[count] = 1;
+                    count++;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Simple weighted 1D k-means (Lloyd's algorithm), mirroring libaom's own <c>av1_k_means</c>
+    /// (<c>av1/encoder/k_means_template.h</c>) at a much smaller scale appropriate for one coding block's own
+    /// distinct-color histogram (at most <see cref="ApproximatePaletteColorThreshold"/> entries, not a whole
+    /// frame). <paramref name="distinctValues"/> must already be sorted ascending (see
+    /// <see cref="InsertionSortWeighted"/>) -- centroids are seeded from evenly-spaced positions in that
+    /// sorted list, a simple, deterministic, order-independent starting point, then refined for a small,
+    /// fixed iteration count (Lloyd's algorithm converges very fast for a small k against a bounded 8-bit
+    /// value range). Returns the actual number of *distinct* rounded centroids produced (can be less than
+    /// <paramref name="k"/> if two seeds converge to the same rounded value) -- <paramref name="outCentroids"/>
+    /// comes back sorted ascending.
+    /// </summary>
+    private static int KMeans1D(ReadOnlySpan<int> distinctValues, ReadOnlySpan<int> weights, int k, Span<int> outCentroids)
+    {
+        int count = distinctValues.Length;
+        if (k <= 1)
+        {
+            k = 2;
+        }
+
+        Span<double> centroids = stackalloc double[k];
+        for (int i = 0; i < k; i++)
+        {
+            centroids[i] = distinctValues[(int)((long)i * (count - 1) / (k - 1))];
+        }
+
+        Span<double> sum = stackalloc double[k];
+        Span<long> weightSum = stackalloc long[k];
+
+        const int maxIterations = 12;
+        for (int iter = 0; iter < maxIterations; iter++)
+        {
+            sum.Clear();
+            weightSum.Clear();
+
+            for (int i = 0; i < count; i++)
+            {
+                int best = 0;
+                double bestDist = double.MaxValue;
+                for (int j = 0; j < k; j++)
+                {
+                    double dist = Math.Abs(distinctValues[i] - centroids[j]);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        best = j;
+                    }
+                }
+
+                sum[best] += (double)distinctValues[i] * weights[i];
+                weightSum[best] += weights[i];
+            }
+
+            bool changed = false;
+            for (int j = 0; j < k; j++)
+            {
+                if (weightSum[j] > 0)
+                {
+                    double newCentroid = sum[j] / weightSum[j];
+                    if (Math.Abs(newCentroid - centroids[j]) > 0.01)
+                    {
+                        changed = true;
+                    }
+
+                    centroids[j] = newCentroid;
+                }
+            }
+
+            if (!changed)
+            {
+                break;
+            }
+        }
+
+        Span<int> rounded = stackalloc int[k];
+        for (int i = 0; i < k; i++)
+        {
+            rounded[i] = Math.Clamp((int)Math.Round(centroids[i]), 0, 255);
+        }
+
+        InsertionSort(rounded);
+        int n = 0;
+        for (int i = 0; i < k; i++)
+        {
+            if (n == 0 || rounded[i] != outCentroids[n - 1])
+            {
+                outCentroids[n] = rounded[i];
+                n++;
+            }
+        }
+
+        return n;
+    }
+
+    /// <summary>2D (paired U, V) counterpart to <see cref="KMeans1D"/> -- see its own remarks. Uses squared Euclidean distance in (U, V) space, the standard k-means metric (matching its own mean-based centroid update).</summary>
+    private static int KMeans2D(ReadOnlySpan<int> distinctU, ReadOnlySpan<int> distinctV, ReadOnlySpan<int> weights, int k, Span<int> outU, Span<int> outV)
+    {
+        int count = distinctU.Length;
+        if (k <= 1)
+        {
+            k = 2;
+        }
+
+        Span<double> centroidU = stackalloc double[k];
+        Span<double> centroidV = stackalloc double[k];
+        for (int i = 0; i < k; i++)
+        {
+            int idx = (int)((long)i * (count - 1) / (k - 1));
+            centroidU[i] = distinctU[idx];
+            centroidV[i] = distinctV[idx];
+        }
+
+        Span<double> sumU = stackalloc double[k];
+        Span<double> sumV = stackalloc double[k];
+        Span<long> weightSum = stackalloc long[k];
+
+        const int maxIterations = 12;
+        for (int iter = 0; iter < maxIterations; iter++)
+        {
+            sumU.Clear();
+            sumV.Clear();
+            weightSum.Clear();
+
+            for (int i = 0; i < count; i++)
+            {
+                int best = 0;
+                double bestDist = double.MaxValue;
+                for (int j = 0; j < k; j++)
+                {
+                    double du = distinctU[i] - centroidU[j];
+                    double dv = distinctV[i] - centroidV[j];
+                    double dist = (du * du) + (dv * dv);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        best = j;
+                    }
+                }
+
+                sumU[best] += (double)distinctU[i] * weights[i];
+                sumV[best] += (double)distinctV[i] * weights[i];
+                weightSum[best] += weights[i];
+            }
+
+            bool changed = false;
+            for (int j = 0; j < k; j++)
+            {
+                if (weightSum[j] > 0)
+                {
+                    double newU = sumU[j] / weightSum[j];
+                    double newV = sumV[j] / weightSum[j];
+                    if (Math.Abs(newU - centroidU[j]) > 0.01 || Math.Abs(newV - centroidV[j]) > 0.01)
+                    {
+                        changed = true;
+                    }
+
+                    centroidU[j] = newU;
+                    centroidV[j] = newV;
+                }
+            }
+
+            if (!changed)
+            {
+                break;
+            }
+        }
+
+        Span<int> roundedU = stackalloc int[k];
+        Span<int> roundedV = stackalloc int[k];
+        for (int i = 0; i < k; i++)
+        {
+            roundedU[i] = Math.Clamp((int)Math.Round(centroidU[i]), 0, 255);
+            roundedV[i] = Math.Clamp((int)Math.Round(centroidV[i]), 0, 255);
+        }
+
+        for (int i = 1; i < k; i++)
+        {
+            int keyU = roundedU[i];
+            int keyV = roundedV[i];
+            int j = i - 1;
+            while (j >= 0 && (roundedU[j] > keyU || (roundedU[j] == keyU && roundedV[j] > keyV)))
+            {
+                roundedU[j + 1] = roundedU[j];
+                roundedV[j + 1] = roundedV[j];
+                j--;
+            }
+
+            roundedU[j + 1] = keyU;
+            roundedV[j + 1] = keyV;
+        }
+
+        int n = 0;
+        for (int i = 0; i < k; i++)
+        {
+            if (n == 0 || roundedU[i] != outU[n - 1] || roundedV[i] != outV[n - 1])
+            {
+                outU[n] = roundedU[i];
+                outV[n] = roundedV[i];
+                n++;
+            }
+        }
+
+        return n;
+    }
+
+    /// <summary>Insertion-sorts <paramref name="values"/> ascending, keeping <paramref name="weights"/> aligned to the same reordering -- <see cref="InsertionSort"/>'s own weighted counterpart, needed so <see cref="KMeans1D"/>'s evenly-spaced seeding sees a sorted distinct-value list.</summary>
+    private static void InsertionSortWeighted(Span<int> values, Span<int> weights)
+    {
+        for (int i = 1; i < values.Length; i++)
+        {
+            int key = values[i];
+            int keyWeight = weights[i];
+            int j = i - 1;
+            while (j >= 0 && values[j] > key)
+            {
+                values[j + 1] = values[j];
+                weights[j + 1] = weights[j];
+                j--;
+            }
+
+            values[j + 1] = key;
+            weights[j + 1] = keyWeight;
+        }
+    }
+
+    /// <summary>
+    /// Nearest-centroid (not exact-match) color-map assignment for an approximate palette (see
+    /// <see cref="TryBuildApproximateYPalette"/>'s own remarks) -- <see cref="BuildColorMap"/>'s counterpart
+    /// for the case where a pixel may not exactly equal any palette color, only be close to one. The
+    /// resulting per-pixel approximation error (<c>source - colors[map[i]]</c>) is what callers must code as
+    /// a real residual, exactly mirroring how any other intra mode's own prediction error is coded.
+    /// </summary>
+    private static void BuildApproximateColorMap(int[] source, int stride, int x, int y, int width, int height, int[] colors, int n, int[] outMap)
+    {
+        for (int i = 0; i < height; i++)
+        {
+            int rowBase = ((y + i) * stride) + x;
+            int outRowBase = i * width;
+            for (int j = 0; j < width; j++)
+            {
+                int v = source[rowBase + j];
+                int best = 0;
+                int bestDist = int.MaxValue;
+                for (int k = 0; k < n; k++)
+                {
+                    int dist = Math.Abs(colors[k] - v);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        best = k;
+                    }
+                }
+
+                outMap[outRowBase + j] = best;
+            }
+        }
+    }
+
+    /// <summary>(U, V)-pair counterpart to <see cref="BuildApproximateColorMap"/> -- see its own remarks.</summary>
+    private static void BuildApproximateColorMapUv(TileState s, int x, int y, int width, int height, int[] uColors, int[] vColors, int n, int[] outMap)
+    {
+        for (int i = 0; i < height; i++)
+        {
+            int rowBase = ((y + i) * s.ChromaWidth) + x;
+            int outRowBase = i * width;
+            for (int j = 0; j < width; j++)
+            {
+                int u = s.SourceU![rowBase + j];
+                int v = s.SourceV![rowBase + j];
+                int best = 0;
+                int bestDist = int.MaxValue;
+                for (int k = 0; k < n; k++)
+                {
+                    int du = uColors[k] - u;
+                    int dv = vColors[k] - v;
+                    int dist = (du * du) + (dv * dv);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        best = k;
+                    }
+                }
+
+                outMap[outRowBase + j] = best;
+            }
+        }
     }
 
     private static void InsertionSort(Span<int> values)
