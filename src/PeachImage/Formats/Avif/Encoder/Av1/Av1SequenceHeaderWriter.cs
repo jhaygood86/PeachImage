@@ -84,7 +84,14 @@ internal static class Av1SequenceHeaderWriter
     /// the header's <c>cdef_params()</c> bits every frame this sequence header covers would then have to
     /// carry) for a tool that can never actually run there.
     /// </param>
-    public static byte[] Write(int width, int height, bool monoChrome, bool chroma444 = false, bool enableCdef = false)
+    /// <param name="use128x128Superblock">
+    /// <c>use_128x128_superblock</c> -- tied to <c>lossless</c> at the one caller
+    /// (<see cref="Av1FrameEncoder.Encode"/>): matches libaom's own default superblock-size choice for
+    /// non-tiny images (see <c>Av1TileEncoder</c>'s remarks), and this encoder's own non-lossless path never
+    /// produces a leaf bigger than 32x32 anyway (see the project plan's partition/TX-size RDO phase), so a
+    /// bigger superblock there would only add signaling overhead for zero benefit.
+    /// </param>
+    public static byte[] Write(int width, int height, bool monoChrome, bool chroma444 = false, bool enableCdef = false, bool use128x128Superblock = false)
     {
         var writer = new Av1BitWriter();
 
@@ -106,7 +113,7 @@ internal static class Av1SequenceHeaderWriter
         writer.WriteBits((uint)(width - 1), frameWidthBits);
         writer.WriteBits((uint)(height - 1), frameHeightBits);
 
-        writer.WriteFlag(false); // use_128x128_superblock
+        writer.WriteFlag(use128x128Superblock);
 
         // enable_filter_intra: tied to "always on, let per-leaf RDO decide" the same way
         // allow_screen_content_tools/allow_intrabc are (see Av1FrameHeaderWriter) -- Av1TileEncoder.EncodeLeaf

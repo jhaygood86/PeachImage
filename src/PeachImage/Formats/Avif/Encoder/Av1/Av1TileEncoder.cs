@@ -7,10 +7,12 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// Encodes one single-tile intra frame: walks the superblock grid (spec §5.11.4 <c>decode_partition()</c>'s
 /// write-side mirror). Non-lossless frames still force every 64x64 superblock to split all the way down to
 /// a uniform 8x8 leaf grid (this encoder does not implement non-lossless partition-tree RDO -- see
-/// <see cref="EncodePartitionForced"/>'s remarks for why). Lossless frames instead run a real (if
-/// approximate) rate-distortion partition search (<see cref="DecidePartition"/>, Phase D) at each partition
-/// level down to spec's true 4x4 floor, comparing the actual per-coefficient rate cost (<see cref="ComputeCandidateCost"/>)
-/// of keeping an 8x8/16x16/32x32/64x64 region as one leaf against the summed cost of its 4 quadrants, rather
+/// <see cref="EncodePartitionForced"/>'s remarks for why). Lossless frames use 128x128 superblocks instead
+/// (<c>use_128x128_superblock</c>, matching libaom's own default choice for non-tiny images -- see
+/// <c>Av1SequenceHeaderWriter</c>) and run a real (if approximate) rate-distortion partition search
+/// (<see cref="DecidePartition"/>, Phase D) at each partition level down to spec's true 4x4 floor, comparing
+/// the actual per-coefficient rate cost (<see cref="ComputeCandidateCost"/>) of keeping an
+/// 8x8/16x16/32x32/64x64/128x128 region as one leaf against the summed cost of its 4 quadrants, rather
 /// than a pure flatness/variance threshold -- merging above 4x4 only ever reduces per-leaf mode/skip/partition
 /// signaling, never residual coefficient cost by itself (AV1 forces TX_4X4 for every lossless block regardless
 /// of coding-block size, so the same number of 4x4 Walsh-Hadamard sub-blocks get coded either way), but a real
@@ -29,11 +31,11 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// for non-lossless chroma; spec-illegal for this encoder's lossless-always-4:4:4 RGB output, so never
 /// attempted there.
 ///
-/// <para>Requires the luma plane's width/height to already be padded to a multiple
-/// of 64 (the caller's job -- see <c>Av1FrameEncoder</c>) so every superblock is a full, in-bounds 64x64
-/// block: this eliminates every one of <c>decode_partition()</c>'s edge-of-frame special cases (the
-/// <c>hasRows</c>/<c>hasCols</c>-driven HORZ/VERT-forced partitions), which this encoder does not
-/// implement.</para>
+/// <para>Requires the luma plane's width/height to already be padded to a multiple of the real superblock
+/// size -- 128 for lossless, 64 otherwise (the caller's job -- see <c>Av1FrameEncoder</c>) -- so every
+/// superblock is a full, in-bounds block: this eliminates every one of <c>decode_partition()</c>'s
+/// edge-of-frame special cases (the <c>hasRows</c>/<c>hasCols</c>-driven HORZ/VERT-forced partitions), which
+/// this encoder does not implement.</para>
 /// </summary>
 internal static class Av1TileEncoder
 {
@@ -120,6 +122,7 @@ internal static class Av1TileEncoder
             BaseQIdx = baseQIdx,
             Lossless = lossless,
             Chroma444 = chroma444,
+            SbMiMask = lossless ? 31 : 15,
             Cdf = cdf,
             Symbols = symbols,
             YModes = new int[miCols * miRows],
@@ -141,7 +144,9 @@ internal static class Av1TileEncoder
             PaletteColorsY = new int[8],
             PaletteColorsU = new int[8],
             PaletteColorsV = new int[8],
-            PaletteColorMap = AvifBufferPool.SharedInt32.Rent(64 * 64),
+            // 128*128, not 64*64: lossless's real leaf ceiling is now a full 128x128 superblock (see
+            // Av1TileEncoder's own remarks on 128x128 superblocks), and a palette leaf can be that big.
+            PaletteColorMap = AvifBufferPool.SharedInt32.Rent(128 * 128),
             YCoeffCtx = new Av1CoefficientWriter.PlaneContext(miCols, miRows),
             UCoeffCtx = monoChrome ? null : new Av1CoefficientWriter.PlaneContext(chroma444 ? miCols : miCols / 2, chroma444 ? miRows : miRows / 2),
             VCoeffCtx = monoChrome ? null : new Av1CoefficientWriter.PlaneContext(chroma444 ? miCols : miCols / 2, chroma444 ? miRows : miRows / 2),
@@ -156,16 +161,18 @@ internal static class Av1TileEncoder
 
             // Rented once for the whole tile and reused/overwritten across every block below, rather than
             // allocated fresh per block. Pred/BestPred must be sized for the largest leaf this encoder can
-            // now produce (64x64 = 4096 elements, lossless only -- see EncodePartitionForced): the whole-leaf
-            // mode search predicts into them at the leaf's real size before any residual coding happens.
+            // now produce (128x128 = 16384 elements, lossless only -- a full 128x128 superblock kept as one
+            // leaf, see EncodeTile's own remarks on 128x128 superblocks): the whole-leaf mode search predicts
+            // into them at the leaf's real size before any residual coding happens.
             // Residual/Coeff/Levels/ReconResidual only ever hold one transform block's worth of data at a
             // time -- 1024 elements covers this encoder's largest single transform (a non-lossless 32x32
             // DCT_DCT leaf, see EncodePartitionForced/EncodeLeaf's partition/TX-size RDO remarks; also enough
             // for the largest non-lossless chroma region a 32x32 luma leaf produces at 4:2:0, 16x16 = 256) --
-            // or 16 for any lossless 4x4 WHT sub-block. ReconDequant alone stays fixed at 64*64 regardless of
-            // block size -- see Av1LocalReconstructor.Reconstruct's remarks on why that stride can't shrink.
-            Pred = AvifBufferPool.SharedInt32.Rent(64 * 64),
-            BestPred = AvifBufferPool.SharedInt32.Rent(64 * 64),
+            // or 16 for any lossless 4x4 WHT sub-block, regardless of how big the coding block containing it
+            // is. ReconDequant alone stays fixed at 64*64 regardless of block size -- see
+            // Av1LocalReconstructor.Reconstruct's remarks on why that stride can't shrink.
+            Pred = AvifBufferPool.SharedInt32.Rent(128 * 128),
+            BestPred = AvifBufferPool.SharedInt32.Rent(128 * 128),
             Residual = AvifBufferPool.SharedInt32.Rent(32 * 32),
             Coeff = AvifBufferPool.SharedInt32.Rent(32 * 32),
             Levels = AvifBufferPool.SharedInt32.Rent(32 * 32),
@@ -189,12 +196,17 @@ internal static class Av1TileEncoder
 
         try
         {
-            for (int r = 0; r < miRows; r += 16)
+            // Superblock size: 128x128 (sizeMi 32) for lossless, matching Av1SequenceHeaderWriter's
+            // use_128x128_superblock signaling (always exactly lossless -- see its own remarks) and
+            // Av1FrameEncoder's matching 128-pixel-multiple padding; 64x64 (sizeMi 16) otherwise, this
+            // encoder's original, still-current non-lossless configuration.
+            int sbSizeMi = lossless ? 32 : 16;
+            for (int r = 0; r < miRows; r += sbSizeMi)
             {
-                for (int c = 0; c < miCols; c += 16)
+                for (int c = 0; c < miCols; c += sbSizeMi)
                 {
-                    ClearBlockDecodedFlags(state, r, c, sbSize4: 16);
-                    EncodePartitionForced(state, r, c, sizeMi: 16);
+                    ClearBlockDecodedFlags(state, r, c, sbSize4: sbSizeMi);
+                    EncodePartitionForced(state, r, c, sizeMi: sbSizeMi);
                 }
             }
 
@@ -233,6 +245,15 @@ internal static class Av1TileEncoder
         public required int BaseQIdx;
         public required bool Lossless;
         public required bool Chroma444;
+
+        /// <summary>
+        /// Mi-unit mask for converting an absolute mi row/col into its position relative to the current
+        /// top-level superblock (<c>r &amp; SbMiMask</c>) -- 31 (128x128, 32 mi units) when this frame uses
+        /// 128x128 superblocks (always exactly <see cref="Lossless"/>, see <c>Av1TileEncoder.EncodeTile</c>'s
+        /// top-level loop), 15 (64x64, 16 mi units) otherwise. <see cref="BlockDecodedStride"/> is already
+        /// sized generously enough for either case.
+        /// </summary>
+        public required int SbMiMask;
         public required Av1CdfContext Cdf;
         public required Av1SymbolEncoder Symbols;
         public required int[] YModes;
@@ -320,6 +341,7 @@ internal static class Av1TileEncoder
 
     private static int BlockSizeFromSizeMi(int sizeMi) => sizeMi switch
     {
+        32 => Av1BlockSize.Block128x128,
         16 => Av1BlockSize.Block64x64,
         8 => Av1BlockSize.Block32x32,
         4 => Av1BlockSize.Block16x16,
@@ -330,6 +352,7 @@ internal static class Av1TileEncoder
     /// <summary><c>log2</c> of a leaf's pixel width/height, for <see cref="Av1IntraPrediction.Predict"/>'s <c>log2W</c>/<c>log2H</c> parameters -- e.g. sizeMi 16 (64 pixels) -&gt; 6.</summary>
     private static int PixelLog2(int sizeMi) => sizeMi switch
     {
+        32 => 7,
         16 => 6,
         8 => 5,
         4 => 4,
@@ -359,7 +382,8 @@ internal static class Av1TileEncoder
             1 => s.Cdf.PartitionW8[ctx],
             2 => s.Cdf.PartitionW16[ctx],
             3 => s.Cdf.PartitionW32[ctx],
-            _ => s.Cdf.PartitionW64[ctx],
+            4 => s.Cdf.PartitionW64[ctx],
+            _ => s.Cdf.PartitionW128[ctx],
         };
 
         // Real RD partition search (DecidePartition, Phase D technique 6 originally, now live for
@@ -475,7 +499,8 @@ internal static class Av1TileEncoder
             1 => s.Cdf.PartitionW8[ctx],
             2 => s.Cdf.PartitionW16[ctx],
             3 => s.Cdf.PartitionW32[ctx],
-            _ => s.Cdf.PartitionW64[ctx],
+            4 => s.Cdf.PartitionW64[ctx],
+            _ => s.Cdf.PartitionW128[ctx],
         };
 
         // Signaling-bit terms (noneBits/splitBits/LeafOtherSignalingCost) are real bit *counts* -- for
@@ -533,11 +558,13 @@ internal static class Av1TileEncoder
         long chromaCost = s.Lossless ? 0 : EstimateChromaCost(s, r, c, sizeMi);
         long lumaCost = EstimateLumaCost(s, r, c, sizeMi);
 
-        // Palette (spec's own bsize >= BLOCK_8X8 gate -- sizeMi == 1 never reaches this branch, see the
-        // sizeMi == 1 case above) is a real alternative to regular-intra/WHT-residual coding for lossless
+        // Palette (spec's own Block8x8-through-Block64x64 gate -- sizeMi == 1 never reaches this branch, see
+        // the sizeMi == 1 case above; sizeMi > 16 is structurally never palette-eligible either, see
+        // EncodeLeaf's paletteStructurallyPresent remarks -- real AV1 simply has no palette block-size CDF
+        // context beyond 64x64) is a real alternative to regular-intra/WHT-residual coding for lossless
         // leaves, but was invisible to this comparison until now -- see EstimateLosslessPaletteCost's
         // remarks for why that under-used palette specifically on graphic/screen-content-style images.
-        if (s.Lossless)
+        if (s.Lossless && sizeMi <= 16)
         {
             long? paletteCost = EstimateLosslessPaletteCost(s, r, c, sizeMi, availU: r > 0, availL: c > 0);
             if (paletteCost is long pc && pc < lumaCost)
@@ -606,10 +633,21 @@ internal static class Av1TileEncoder
 
             for (int angleDelta = minDelta; angleDelta <= maxDelta; angleDelta++)
             {
-                Av1IntraPrediction.BuildEdges(above, left, s.SourceY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
-                Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.YWidth - 1, s.YHeight - 1, x, y, bitDepth: 8);
+                long cost;
+                if (sizePixels > 64)
+                {
+                    // Real AV1 intra prediction never spans more than 64x64 in one shot regardless of
+                    // coding-block size (see ComputeLosslessWholeLeafCostPerSubBlock's remarks) -- only
+                    // reachable for a lossless 128x128 superblock kept as one leaf.
+                    cost = ComputeLosslessWholeLeafCostPerSubBlock(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels, ptype: 0, s.YCoeffCtx, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth: false, useRealBoundaryAvailability: false);
+                }
+                else
+                {
+                    Av1IntraPrediction.BuildEdges(above, left, s.SourceY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
+                    Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.YWidth - 1, s.YHeight - 1, x, y, bitDepth: 8);
+                    cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
+                }
 
-                long cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
                 if (cost < bestCost)
                 {
                     bestCost = cost;
@@ -878,7 +916,7 @@ internal static class Av1TileEncoder
         return bits;
     }
 
-    /// <summary>Write-side mirror of <c>Av1TileDecoder.ClearBlockDecodedFlags</c> (spec's <c>clear_block_decoded_flags(r, c, sbSize4)</c>, §5.11.3) -- always <c>use_128x128_superblock == false</c> here (see the class remarks), and this encoder is always single-tile (MiColEnd/MiRowEnd == MiCols/MiRows).</summary>
+    /// <summary>Write-side mirror of <c>Av1TileDecoder.ClearBlockDecodedFlags</c> (spec's <c>clear_block_decoded_flags(r, c, sbSize4)</c>, §5.11.3) -- <paramref name="sbSize4"/> matches whichever superblock size this frame actually uses (see <c>EncodeTile</c>'s remarks), and this encoder is always single-tile (MiColEnd/MiRowEnd == MiCols/MiRows).</summary>
     private static void ClearBlockDecodedFlags(TileState s, int r, int c, int sbSize4)
     {
         int numPlanes = s.MonoChrome ? 1 : 3;
@@ -916,8 +954,8 @@ internal static class Av1TileEncoder
     /// </summary>
     private static void MarkLumaBlockDecoded(TileState s, int r, int c, int bw4, int bh4)
     {
-        int subBlockMiRow = r & 15;
-        int subBlockMiCol = c & 15;
+        int subBlockMiRow = r & s.SbMiMask;
+        int subBlockMiCol = c & s.SbMiMask;
         for (int i = 0; i < bh4; i++)
         {
             for (int j = 0; j < bw4; j++)
@@ -945,8 +983,8 @@ internal static class Av1TileEncoder
         {
             for (int dc = 0; dc < chromaN; dc++)
             {
-                int row = ((r + (dr * mult)) & 15) >> subX;
-                int col = ((c + (dc * mult)) & 15) >> subX;
+                int row = ((r + (dr * mult)) & s.SbMiMask) >> subX;
+                int col = ((c + (dc * mult)) & s.SbMiMask) >> subX;
                 SetBlockDecoded(s, 1, row, col, true);
                 SetBlockDecoded(s, 2, row, col, true);
             }
@@ -1125,6 +1163,115 @@ internal static class Av1TileEncoder
 
                 int subX4 = (x + bx) >> 2;
                 int subY4 = (y + by) >> 2;
+                Av1CoefficientWriter.WriteCoeffs(trial, s.Cdf, levels, 4, ptype, subX4, subY4, scratch, writeLumaTxType: null, blockSize: sizePixels, updateContext: true);
+            }
+        }
+
+        return Av1RdCost.CombineCost(0, trial.Bits, 1.0);
+    }
+
+    /// <summary>
+    /// Real per-4x4-sub-block Lagrangian cost (<see cref="Av1RdCost.CombineCost"/>, <c>sse: 0, lambda: 1.0</c>)
+    /// of a candidate (<paramref name="mode"/>, <paramref name="angleDelta"/>, filter-intra) across a lossless
+    /// leaf bigger than 64x64 (128x128, the only size this ever runs at -- see <see cref="EstimateLumaCost"/>/
+    /// <c>EncodeLeaf</c>'s own call sites), by genuinely re-predicting fresh at each 4x4 sub-block instead of
+    /// <see cref="ComputeCandidateCost"/>'s whole-leaf single-shot shortcut. That shortcut (build edges once
+    /// from the leaf's own outer boundary, predict the whole leaf in one call) is safe up to 64x64 because
+    /// real AV1 intra prediction is architecturally capped at 64x64 per prediction/transform unit regardless
+    /// of coding-block size -- <see cref="Av1IntraPrediction.PredictSmooth"/>'s own <c>Sm_Weights</c> tables
+    /// simply don't exist beyond that (spec never predicts a bigger unit in one shot). Every coding block
+    /// above 64x64 -- which for lossless (always <c>TX_4X4</c> regardless of coding-block size) means every
+    /// lossless leaf above 4x4 already, this method is only reached at 128x128 specifically because 64x64
+    /// still fits the old shortcut -- is really predicted as a grid of smaller units, each with its own fresh
+    /// neighbor context; <c>EncodeLosslessLumaResidual</c> already implements exactly this at 4x4 granularity
+    /// for the real residual commit, and this mirrors it for candidate costing.
+    ///
+    /// <para>Reads <paramref name="source"/> for both prediction input and residual (safe, not approximate,
+    /// for lossless -- source is bit-identical to final reconstruction once a candidate is really committed,
+    /// the same substitution <see cref="DecidePartition"/>'s own remarks already document). Never mutates
+    /// <see cref="TileState.Symbols"/>, any real CDF, or <see cref="TileState.BlockDecoded"/> -- interior
+    /// sub-block-to-sub-block availability (has this leaf's own earlier sub-block, in raster order, already
+    /// been virtually processed) is derived arithmetically from the sub-block's own <c>(dr, dc)</c> grid
+    /// position alone (provably identical to what a real <see cref="GetBlockDecoded"/> read would give for a
+    /// raster-order-earlier interior neighbor -- see this method's own remarks at the call site for the
+    /// derivation), so no scratch/restore bookkeeping is needed the way coefficient contexts require.</para>
+    ///
+    /// <para>Boundary (leaf-external) neighbor availability is controlled by
+    /// <paramref name="useRealBoundaryAvailability"/>: <see langword="false"/> (used by
+    /// <see cref="EstimateLumaCost"/>'s speculative partition-size search) always treats a boundary-crossing
+    /// neighbor as unavailable, matching every other whole-leaf estimate in this class and avoiding the
+    /// measured, position-dependent IntraBC-repeat regression real boundary reads caused there (see
+    /// <see cref="EstimateLumaCost"/>'s own remarks); <see langword="true"/> (used by <c>EncodeLeaf</c>'s real,
+    /// already-size-committed mode search) reads real <see cref="TileState.BlockDecoded"/> state instead,
+    /// matching <c>EncodeLosslessLumaResidual</c>'s real behavior exactly so the mode this picks is scored the
+    /// same way its real residual commit will be.</para>
+    /// </summary>
+    private static long ComputeLosslessWholeLeafCostPerSubBlock(TileState s, int[] source, int planeWidth, int planeHeight, int r, int c, int x, int y, int sizePixels, int ptype, Av1CoefficientWriter.PlaneContext realCtx, int mode, int angleDelta, bool useFilterIntra, int filterIntraMode, bool filterTypeSmooth, bool useRealBoundaryAvailability)
+    {
+        int n = sizePixels / 4;
+        int x4 = x >> 2;
+        int y4 = y >> 2;
+        var scratch = s.ScratchCoeffCtx;
+        scratch.SeedFrom(realCtx, x4, n, y4, n);
+        var trial = s.TrialSink;
+        trial.Reset();
+
+        int blockDecodedPlane = ptype == 0 ? 0 : 1;
+        int subBlockMiRowBase = r & s.SbMiMask;
+        int subBlockMiColBase = c & s.SbMiMask;
+
+        for (int dr = 0; dr < n; dr++)
+        {
+            for (int dc = 0; dc < n; dc++)
+            {
+                int subX = x + (dc * 4);
+                int subY = y + (dr * 4);
+                int subR = r + dr;
+                int subC = c + dc;
+                bool availU = subR > 0;
+                bool availL = subC > 0;
+                int subBlockMiRow = subBlockMiRowBase + dr;
+                int subBlockMiCol = subBlockMiColBase + dc;
+
+                bool haveAboveRight;
+                bool haveBelowLeft;
+                if (useRealBoundaryAvailability)
+                {
+                    haveAboveRight = GetBlockDecoded(s, blockDecodedPlane, subBlockMiRow - 1, subBlockMiCol + 1);
+                    haveBelowLeft = GetBlockDecoded(s, blockDecodedPlane, subBlockMiRow + 1, subBlockMiCol - 1);
+                }
+                else
+                {
+                    // Interior above-right (dr > 0 && dc + 1 < n) was visited at raster index (dr-1)*n+(dc+1),
+                    // always < the current dr*n+dc, so it's provably already available -- exactly what a real
+                    // GetBlockDecoded read would show. A leaf's own bottom-left is never interior in a raster
+                    // (top-to-bottom, left-to-right) scan (the row below is never visited yet), matching real
+                    // AV1 decode order too. Boundary (leaf-external) positions stay conservatively false --
+                    // see this method's own remarks on why.
+                    haveAboveRight = dr > 0 && (dc + 1) < n;
+                    haveBelowLeft = false;
+                }
+
+                var above = new Av1EdgeArray(16);
+                var left = new Av1EdgeArray(16);
+                Av1IntraPrediction.BuildEdges(above, left, source, planeWidth, subX, subY, 4, 4, availL, availU, haveAboveRight, haveBelowLeft, planeWidth - 1, planeHeight - 1, bitDepth: 8);
+
+                var pred = s.Pred;
+                Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, mode, availL, availU, useFilterIntra, filterIntraMode, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, planeWidth - 1, planeHeight - 1, subX, subY, bitDepth: 8);
+
+                var residual = s.Residual;
+                for (int i = 0; i < 16; i++)
+                {
+                    residual[i] = source[((subY + (i / 4)) * planeWidth) + subX + (i % 4)] - pred[i];
+                }
+
+                var coeff = s.Coeff;
+                Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
+                var levels = s.Levels;
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+
+                int subX4 = subX >> 2;
+                int subY4 = subY >> 2;
                 Av1CoefficientWriter.WriteCoeffs(trial, s.Cdf, levels, 4, ptype, subX4, subY4, scratch, writeLumaTxType: null, blockSize: sizePixels, updateContext: true);
             }
         }
@@ -1332,8 +1479,8 @@ internal static class Av1TileEncoder
         int log2Size = Log2FromPixels(chromaSizePixels);
 
         int subX = subsampled ? 1 : 0;
-        int chromaRow = (r & 15) >> subX;
-        int chromaCol = (c & 15) >> subX;
+        int chromaRow = (r & s.SbMiMask) >> subX;
+        int chromaCol = (c & s.SbMiMask) >> subX;
         bool haveAboveRight = GetBlockDecoded(s, 1, chromaRow - 1, chromaCol + chromaN);
         bool haveBelowLeft = GetBlockDecoded(s, 1, chromaRow + chromaN, chromaCol - 1);
         bool filterTypeSmooth = GetChromaFilterType(s, r, c, availU, availL, subsampled);
@@ -1361,13 +1508,26 @@ internal static class Av1TileEncoder
 
             for (int angleDelta = minDelta; angleDelta <= maxDelta; angleDelta++)
             {
-                Av1IntraPrediction.BuildEdges(above, left, s.ReconU!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
-                Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaWidth - 1, s.ChromaHeight - 1, cx, cy, bitDepth: 8);
-                long cost = ComputeCandidateCost(s, s.SourceU!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.UCoeffCtx!);
+                long cost;
+                if (chromaSizePixels > 64)
+                {
+                    // See ComputeLosslessWholeLeafCostPerSubBlock's remarks (only reachable for a lossless
+                    // 4:4:4 128x128 chroma region, paired 1:1 with a 128x128 luma leaf). Real boundary
+                    // availability, matching this real (already-size-committed) mode decision's own
+                    // haveAboveRight/haveBelowLeft above.
+                    cost = ComputeLosslessWholeLeafCostPerSubBlock(s, s.SourceU!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, s.UCoeffCtx!, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: true);
+                    cost += ComputeLosslessWholeLeafCostPerSubBlock(s, s.SourceV!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, s.VCoeffCtx!, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: true);
+                }
+                else
+                {
+                    Av1IntraPrediction.BuildEdges(above, left, s.ReconU!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
+                    Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaWidth - 1, s.ChromaHeight - 1, cx, cy, bitDepth: 8);
+                    cost = ComputeCandidateCost(s, s.SourceU!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.UCoeffCtx!);
 
-                Av1IntraPrediction.BuildEdges(above, left, s.ReconV!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
-                Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaWidth - 1, s.ChromaHeight - 1, cx, cy, bitDepth: 8);
-                cost += ComputeCandidateCost(s, s.SourceV!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.VCoeffCtx!);
+                    Av1IntraPrediction.BuildEdges(above, left, s.ReconV!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
+                    Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaWidth - 1, s.ChromaHeight - 1, cx, cy, bitDepth: 8);
+                    cost += ComputeCandidateCost(s, s.SourceV!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.VCoeffCtx!);
+                }
 
                 if (cost < bestCost)
                 {
@@ -1653,8 +1813,8 @@ internal static class Av1TileEncoder
         // instead when told a neighbor isn't available -- if that disagrees with what a real decoder
         // independently computes for the same position, the two sides predict different pixels from the
         // same signaled mode/angle_delta, corrupting every pixel from there on.
-        int subBlockMiRow = r & 15;
-        int subBlockMiCol = c & 15;
+        int subBlockMiRow = r & s.SbMiMask;
+        int subBlockMiCol = c & s.SbMiMask;
         bool haveAboveRight = GetBlockDecoded(s, 0, subBlockMiRow - 1, subBlockMiCol + sizeMi);
         bool haveBelowLeft = GetBlockDecoded(s, 0, subBlockMiRow + sizeMi, subBlockMiCol - 1);
 
@@ -1691,17 +1851,38 @@ internal static class Av1TileEncoder
                 // candidate, whose bestPred (used directly as the final, actually-encoded prediction for the
                 // non-lossless path) would then disagree with what a real decoder's own single fresh
                 // BuildEdges-then-Predict call independently reconstructs.
-                Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
-                Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.YWidth - 1, s.YHeight - 1, x, y, bitDepth: 8);
-
-                long cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
+                long cost;
+                bool overSized = sizePixels > 64;
+                if (overSized)
+                {
+                    // See ComputeLosslessWholeLeafCostPerSubBlock's remarks: real AV1 intra prediction never
+                    // spans more than 64x64 in one shot, only reachable for a lossless 128x128 leaf. Real
+                    // boundary availability here (unlike EstimateLumaCost's speculative version) since this
+                    // is the real, already-size-committed mode decision, scored the same way
+                    // EncodeLosslessLumaResidual's real per-sub-block residual commit will be.
+                    cost = ComputeLosslessWholeLeafCostPerSubBlock(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels, ptype: 0, s.YCoeffCtx, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: true);
+                }
+                else
+                {
+                    Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.YWidth - 1, s.YHeight - 1, bitDepth: 8);
+                    Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.YWidth - 1, s.YHeight - 1, x, y, bitDepth: 8);
+                    cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
+                }
 
                 if (cost < bestCost)
                 {
                     bestCost = cost;
                     bestMode = mode;
                     bestAngleDelta = angleDelta;
-                    Array.Copy(pred, bestPred, leafElements);
+
+                    // bestPred only matters for the non-lossless whole-leaf commit below (gated
+                    // !s.Lossless) -- never read for lossless (see EncodeLosslessLumaResidual's own real,
+                    // separate per-4x4 prediction), and pred itself only ever holds one 4x4 sub-block's
+                    // worth of data in the overSized branch, not a real whole-leaf snapshot to copy.
+                    if (!overSized)
+                    {
+                        Array.Copy(pred, bestPred, leafElements);
+                    }
                 }
             }
         }
@@ -1739,13 +1920,17 @@ internal static class Av1TileEncoder
         // Whether screen-content palette mode (spec §5.11.46/§5.11.47) is even structurally present in the
         // bitstream for this leaf -- true whenever the frame declared allow_screen_content_tools (tied to
         // lossless -- see Av1FrameHeaderWriter) and this leaf's size is palette-eligible
-        // (Av1TileDecoder.AllowPalette: bSize >= Block8x8, ceiling 64x64 always satisfied since this
-        // encoder's leaf never exceeds 64x64). Every leaf this encoder produced before the partition floor
-        // reached 4x4 (sizeMi == 1) satisfied that size gate unconditionally (floor was 8x8), but a genuine
-        // 4x4 leaf does not -- this must exactly match the decoder's own gate: getting it wrong doesn't just
-        // miss a compression opportunity, it desyncs every bit after it, since a real decoder either does or
-        // doesn't read palette_mode_info() based on this same condition.
-        bool paletteStructurallyPresent = s.Lossless && sizeMi >= 2;
+        // (Av1TileDecoder.AllowPalette: Block8x8 through Block64x64 -- real AV1 simply doesn't define
+        // palette's block-size-context CDF (PaletteYMode/PaletteYSize) beyond 64x64, spec's own
+        // PALETTE_BLOCK_SIZE_CONTEXTS == 7 covering exactly that range, so a coding block above 64x64 --
+        // reachable now via 128x128 superblocks -- must never read palette_mode_info() at all). Every leaf
+        // this encoder produced before the partition floor reached 4x4 (sizeMi == 1) satisfied the lower size
+        // gate unconditionally (floor was 8x8), but a genuine 4x4 leaf does not, and every leaf before
+        // 128x128 superblocks satisfied the upper gate unconditionally too -- this must exactly match the
+        // decoder's own gate: getting it wrong doesn't just miss a compression opportunity, it either
+        // desyncs every bit after it (reading/writing a symbol the other side doesn't) or, as found here,
+        // indexes PaletteYMode/PaletteYSize out of bounds outright.
+        bool paletteStructurallyPresent = s.Lossless && sizeMi is >= 2 and <= 16;
 
         // Whether IntraBC's own use_intrabc bit is structurally present -- tied to lossless the same way
         // allow_screen_content_tools is (see Av1FrameHeaderWriter), since this encoder never uses IntraBC
@@ -2169,7 +2354,38 @@ internal static class Av1TileEncoder
         }
         else
         {
-            if (s.Lossless)
+            if (s.Lossless && sizePixels > 64)
+            {
+                // Spec's real residual() (§5.11.34) never iterates a coding block bigger than 64x64 as one
+                // flat raster scan of transform blocks -- it chunks it into 64x64-or-smaller pieces (Av1TileDecoder.Residual's
+                // widthChunks/heightChunks) and, for EACH chunk, writes every plane (luma, then U, then V)
+                // before moving to the next chunk. Only reachable for a lossless 128x128 leaf (this
+                // encoder's non-lossless leaves never exceed 32x32), so this only ever chunks into exactly 4
+                // 64x64 quadrants (2x2). Confirmed by direct encoder/decoder cross-instrumentation: the
+                // decoder's own x4/y4 sequence wraps at 16 (64 pixels), not 32, proving this chunk-major,
+                // plane-minor order is what a real decoder actually expects -- the previous flat "all luma
+                // sub-blocks for the whole leaf, then all chroma" order desynced the entropy stream the
+                // moment a genuine >64x64 leaf was ever chosen.
+                int chunksPerSide = sizePixels / 64;
+                for (int chunkY = 0; chunkY < chunksPerSide; chunkY++)
+                {
+                    for (int chunkX = 0; chunkX < chunksPerSide; chunkX++)
+                    {
+                        int chunkR = r + (chunkY * 16);
+                        int chunkC = c + (chunkX * 16);
+                        int chunkX_px = x + (chunkX * 64);
+                        int chunkY_px = y + (chunkY * 64);
+
+                        EncodeLosslessLumaResidual(s, chunkR, chunkC, chunkX_px, chunkY_px, bestMode, bestAngleDelta, filterTypeSmooth, bestUseFilterIntra, bestFilterIntraMode, blockSize: 64);
+
+                        if (hasChroma && !usedIntrabc)
+                        {
+                            EncodeChromaRegion(s, chunkR, chunkC, chunkX_px, chunkY_px, sizeMi: 16, bestUvMode, bestUvAngleDelta, bestAlphaU, bestAlphaV);
+                        }
+                    }
+                }
+            }
+            else if (s.Lossless)
             {
                 // AV1 forces TX_4X4 for every block when lossless -- the leaf's transform splits into
                 // (sizePixels/4)^2 4x4 sub-blocks, each with its own predict-then-reconstruct pass (see the
@@ -2269,7 +2485,9 @@ internal static class Av1TileEncoder
             }
         }
 
-        if (hasChroma && !usedPalette && !usedIntrabc)
+        // sizePixels > 64 already wrote chroma inline, interleaved per-64x64-chunk with luma above (see that
+        // branch's remarks on why real AV1 requires that interleaving, not a separate whole-leaf pass here).
+        if (hasChroma && !usedPalette && !usedIntrabc && sizePixels <= 64)
         {
             EncodeChromaRegion(s, r, c, x, y, sizeMi, bestUvMode, bestUvAngleDelta, bestAlphaU, bestAlphaV);
         }
@@ -2566,7 +2784,7 @@ internal static class Av1TileEncoder
                 Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: sizePixels);
                 Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
 
-                SetBlockDecoded(s, 0, subR & 15, subC & 15, true);
+                SetBlockDecoded(s, 0, subR & s.SbMiMask, subC & s.SbMiMask, true);
             }
         }
 
@@ -3542,8 +3760,8 @@ internal static class Av1TileEncoder
                     bool availU = chromaR4 > 0;
                     bool availL = chromaC4 > 0;
 
-                    int subBlockChromaRow = ((r + (dr * mult)) & 15) >> subX;
-                    int subBlockChromaCol = ((c + (dc * mult)) & 15) >> subX;
+                    int subBlockChromaRow = ((r + (dr * mult)) & s.SbMiMask) >> subX;
+                    int subBlockChromaCol = ((c + (dc * mult)) & s.SbMiMask) >> subX;
                     bool haveAboveRight = GetBlockDecoded(s, planeIndex, subBlockChromaRow - 1, subBlockChromaCol + 1);
                     bool haveBelowLeft = GetBlockDecoded(s, planeIndex, subBlockChromaRow + 1, subBlockChromaCol - 1);
 
@@ -3642,8 +3860,8 @@ internal static class Av1TileEncoder
         // Unlike EncodeChromaRegion's own 4x4-sub-block loop (whose subBlockChromaRow/Col shifts per
         // sub-block via `mult`), there is exactly one sub-block here -- the whole chroma region -- so its
         // BlockDecoded position is just (r, c)'s own masked-and-shifted position, no per-iteration offset.
-        int subBlockChromaRow = (r & 15) >> subX;
-        int subBlockChromaCol = (c & 15) >> subX;
+        int subBlockChromaRow = (r & s.SbMiMask) >> subX;
+        int subBlockChromaCol = (c & s.SbMiMask) >> subX;
 
         // Scaled by the region's own width/height in chroma 4x4 units (matching SearchUvMode's identical
         // `chromaCol + chromaN`/`chromaRow + chromaN` computation) -- a fixed +-1 offset only happens to be
@@ -3772,8 +3990,8 @@ internal static class Av1TileEncoder
                 // Av1TileDecoder.TransformBlock exactly at this same 4x4-transform-block granularity) --
                 // required for correctness, not just search quality, once angle_delta is actually nonzero:
                 // see EncodeLeaf's identical remarks on this same point for the whole-block search buffer.
-                int subBlockMiRow = subR & 15;
-                int subBlockMiCol = subC & 15;
+                int subBlockMiRow = subR & s.SbMiMask;
+                int subBlockMiCol = subC & s.SbMiMask;
                 bool haveAboveRight = GetBlockDecoded(s, 0, subBlockMiRow - 1, subBlockMiCol + 1);
                 bool haveBelowLeft = GetBlockDecoded(s, 0, subBlockMiRow + 1, subBlockMiCol - 1);
 

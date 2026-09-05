@@ -7,24 +7,22 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// of <see cref="Av1TileInfo"/>, restricted to producing exactly one tile column and one tile row. Single
 /// tile is only architecturally guaranteed when <c>min_log2_tile_cols</c>/<c>min_log2_tile_rows</c> (per
 /// spec's own tile-size constraints, mirrored here from <see cref="Av1TileInfo.Parse"/>'s math) both work
-/// out to 0, which holds for images up to roughly 4096 pixels per side at the fixed 64x64-superblock,
-/// non-128x128 configuration this encoder always uses -- the top-level image encoder (added alongside the
-/// container-writer/orchestration layer) enforces a dimension cap consistent with that before this is ever
-/// called.
+/// out to 0, which holds for images up to roughly 4096 (64x64-superblock) or 8192 (128x128-superblock,
+/// lossless) pixels per side -- the top-level image encoder (added alongside the container-writer/
+/// orchestration layer) enforces a dimension cap consistent with that before this is ever called.
 /// </summary>
 internal static class Av1TileInfoWriter
 {
     private const int MaxTileWidth = 4096;
     private const int MaxTileArea = 4096 * 2304;
 
-    /// <summary>Writes a single-tile <c>tile_info()</c> for a <paramref name="miCols"/> x <paramref name="miRows"/> frame (in 4x4 mode-info units) and returns its resolved <see cref="Av1TileInfo"/>.</summary>
-    public static Av1TileInfo Write(Av1BitWriter writer, int miCols, int miRows)
+    /// <summary>Writes a single-tile <c>tile_info()</c> for a <paramref name="miCols"/> x <paramref name="miRows"/> frame (in 4x4 mode-info units), matching <paramref name="use128x128Superblock"/>'s superblock size (must agree with what <see cref="Av1SequenceHeaderWriter"/> actually signaled -- spec's own <c>sb_size</c>-derived tile bounds depend on it), and returns its resolved <see cref="Av1TileInfo"/>.</summary>
+    public static Av1TileInfo Write(Av1BitWriter writer, int miCols, int miRows, bool use128x128Superblock = false)
     {
-        // use_128x128_superblock is always false for this encoder (Av1SequenceHeaderWriter).
-        const int sbShift = 4;
-        const int sbSize = sbShift + 2;
-        int sbCols = (miCols + 15) >> 4;
-        int sbRows = (miRows + 15) >> 4;
+        int sbShift = use128x128Superblock ? 5 : 4;
+        int sbSize = sbShift + 2;
+        int sbCols = (miCols + (1 << sbShift) - 1) >> sbShift;
+        int sbRows = (miRows + (1 << sbShift) - 1) >> sbShift;
 
         int maxTileWidthSb = MaxTileWidth >> sbSize;
         int maxTileAreaSb = MaxTileArea >> (2 * sbSize);
@@ -35,7 +33,8 @@ internal static class Av1TileInfoWriter
 
         if (minLog2TileCols > 0)
         {
-            throw new AvifEncodingException($"Image is too wide for this encoder's single-tile AV1 configuration ({sbCols} 64x64 superblock columns; must fit within {maxTileWidthSb}).");
+            int sbPixels = 1 << sbSize;
+            throw new AvifEncodingException($"Image is too wide for this encoder's single-tile AV1 configuration ({sbCols} {sbPixels}x{sbPixels} superblock columns; must fit within {maxTileWidthSb}).");
         }
 
         writer.WriteFlag(true); // uniform_tile_spacing_flag
@@ -50,7 +49,8 @@ internal static class Av1TileInfoWriter
         int minLog2TileRows = Math.Max(minLog2Tiles - tileColsLog2, 0);
         if (minLog2TileRows > 0)
         {
-            throw new AvifEncodingException($"Image is too tall for this encoder's single-tile AV1 configuration ({sbRows} 64x64 superblock rows).");
+            int sbPixels = 1 << sbSize;
+            throw new AvifEncodingException($"Image is too tall for this encoder's single-tile AV1 configuration ({sbRows} {sbPixels}x{sbPixels} superblock rows).");
         }
 
         int tileRowsLog2 = 0;

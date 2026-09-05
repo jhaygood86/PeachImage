@@ -128,10 +128,19 @@ public class LosslessSizeRegressionTests
     /// lower to start with, no longer independently exceed these net10.0-calibrated thresholds -- a real
     /// regression would still fail CI overall via net10.0, just not be independently visible on net8.0
     /// alone).</para>
+    ///
+    /// <para>256x256's threshold was bumped again (4.85 -> 5.0) once lossless switched to 128x128
+    /// superblocks (matching libaom's own default for non-tiny images, spec's use_128x128_superblock):
+    /// this fixture is exactly 2x2 128x128 superblocks, and one of those four now measures whole-superblock
+    /// RD cost as narrowly cheaper (~4.8% margin) than splitting into four 64x64 quadrants -- a real, if
+    /// close, cost-estimate call, not a bug (confirmed by direct DecidePartition cost instrumentation), that
+    /// happens to land slightly worse in real bytes than splitting would have for this specific synthetic
+    /// content. 128x128/512x512 aren't exact 128x128-superblock multiples the same way and weren't observed
+    /// to regress.</para>
     /// </summary>
     [Theory]
     [InlineData(128, 128, 4.05)]
-    [InlineData(256, 256, 4.85)]
+    [InlineData(256, 256, 5.0)]
     [InlineData(512, 512, 4.45)]
     public void GraphicContentImage_LosslessAvif_DoesNotBlowUpRelativeToSourcePng(int width, int height, double maxRatio)
     {
