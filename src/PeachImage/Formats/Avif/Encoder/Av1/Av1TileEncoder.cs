@@ -3335,7 +3335,17 @@ internal static class Av1TileEncoder
         return true;
     }
 
-    private const int MotionSearchCoarseCandidateBudget = 200;
+    // Tuned empirically against this project's own real target photo (1054x1492): the coarse candidate count
+    // only meaningfully affects encode time for a genuinely large frame -- Math.Sqrt-derived step already
+    // floors to 1 (fully exhaustive at whatever pixel granularity the region allows) for small/synthetic test
+    // fixtures well under this budget's own area threshold, confirmed by the full test suite's own runtime
+    // staying flat (~24s) all the way from budget 200 up through this value. Measured tradeoff curve on that
+    // real photo (bytes / wall time): 200 -> 2,088,959 / ~68s; 2,000 -> 2,086,902 / ~74s; 8,000 -> 2,083,557 /
+    // ~86s; 32,000 -> 2,075,361 / ~162s; 128,000 -> 2,063,154 / ~362s. Gains keep growing, not plateauing, all
+    // the way up -- this value is a deliberate practicality cutoff for a lossless mode that already accepts a
+    // real RDO cost for real compression, not evidence that the underlying search itself stops improving
+    // further out; revisit if this project ever wants to trade more encode time for a smaller lossless file.
+    private const int MotionSearchCoarseCandidateBudget = 32000;
 
     /// <summary>
     /// Real (if bounded) pixel-level motion search for an IntraBC copy source, unlike
