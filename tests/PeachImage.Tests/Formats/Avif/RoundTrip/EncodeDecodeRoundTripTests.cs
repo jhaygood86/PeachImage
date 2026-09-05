@@ -300,6 +300,42 @@ public class EncodeDecodeRoundTripTests
     }
 
     /// <summary>
+    /// Regression test for a real bug found while tracing a size-competitiveness gap against libaom on a
+    /// real-world image: <c>Av1TileEncoder.FindMvStackAndPredict</c>'s fallback predictor (used whenever an
+    /// IntraBC leaf's MV-stack neighbor scan finds no usable candidate -- <c>NumMvFound &lt; 2</c>, spec's own
+    /// <c>PredMv</c> fallback) hardcoded <c>sbSize4 = 16</c> (<c>Num_4x4_Blocks_High[BLOCK_64X64]</c>), a
+    /// pre-PR-#80 assumption. Lossless has used 128x128 superblocks since that PR
+    /// (<c>Av1FrameEncoder.cs</c>'s <c>sbSizeMi = lossless ? 32 : 16</c>), and
+    /// <c>Av1TileDecoder.AssignMv</c>'s identical fallback already derives <c>sbSize4</c> from the real
+    /// <c>Use128x128Superblock</c> flag (32) -- so the two sides silently predicted a *different* Mv for any
+    /// IntraBC leaf that reached this fallback, ever since PR #80 landed. Confirmed via direct encoder/decoder
+    /// cross-instrumentation on a real photo (a leaf at mi-row 52 in a 1054x1492 image): the encoder computed
+    /// <c>predMvRow=-512</c>, the decoder independently computed <c>predMvRow=-1024</c> for the very same
+    /// leaf -- a real, silent 2x divergence, not a rounding difference. Once <c>diffMv</c> (correctly encoded/
+    /// decoded -- the entropy stream itself never desynced) was added back, the decoder's block-copy read from
+    /// a completely different, wrong source position, corrupting every pixel that leaf's IntraBC prediction
+    /// touched (confirmed: fixing only this one constant took that image from ~130,000 wrong bytes to 0).
+    ///
+    /// <para>This reuses <see cref="CreateSmoothedNoiseWithApproximateIntrabcRepeatImage"/> unchanged --
+    /// merely narrowing its width (160 instead of 384) changes the partition/RD outcome enough that the
+    /// repeat band's approximate-match IntraBC leaf ends up with no seedable MV-stack neighbor, reaching the
+    /// buggy fallback directly (no palette or partition-cost changes needed to reach it, unlike how this bug
+    /// was originally found). At width 384 the same fixture's IntraBC leaf(s) apparently have a neighbor that
+    /// seeds a real (nonzero) candidate, avoiding the fallback -- illustrating just how easy this was to miss
+    /// (and hard to un-hit once a real image happens to hit it): the two widths differ only in how many
+    /// leaves happen to precede this one, yet only one of them exercises the broken code path.</para>
+    /// </summary>
+    [Fact]
+    public void SmoothedNoiseRepeat_Lossless_IntrabcFallbackMvPredictorRoundTripsExactly()
+    {
+        var image = CreateSmoothedNoiseWithApproximateIntrabcRepeatImage(width: 160);
+
+        var decoded = EncodeThenDecode(image, new AvifEncoderOptions { Lossless = true });
+
+        Assert.Equal(image.GetPixelSpan().ToArray(), decoded.GetPixelSpan().ToArray());
+    }
+
+    /// <summary>
     /// 64-row filler (horizontal-stripe, structurally unrelated -- see <see cref="CreateFillerPlusStripePatternImage"/>),
     /// followed by a 64-row "source" band and a 64-row "repeat" band both built from a jaggier variant of
     /// <see cref="SmoothedNoise_Lossless_RoundTripsExactly"/>'s own two-incommensurate-periods formula, with
