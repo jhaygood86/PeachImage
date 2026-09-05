@@ -2590,14 +2590,19 @@ internal static class Av1TileEncoder
     }
 
     /// <summary>
-    /// <c>is_mv_valid</c>'s IntraBC region-reachability check (spec §6.10.25), specialized: this encoder is
-    /// always single-tile (MiRowStart/MiColStart are always 0, MiRowEnd/MiColEnd are always MiRows/MiCols)
-    /// and never uses 128x128 superblocks (see <see cref="EncodeTile"/>'s fixed sizeMi=16 top-level loop).
-    /// The spec's <c>bw &lt; 8 &amp;&amp; subsampling_x</c> / <c>bh &lt; 8 &amp;&amp; subsampling_y</c> edge
-    /// adjustments are omitted: every leaf this encoder ever produces is at least 8x8 (see the class-level
-    /// remarks), so they can never apply. Getting this wrong wouldn't break round-tripping through this
-    /// project's own decoder (which doesn't enforce it at read time -- see Av1TileDecoder.ReadMv's remarks),
-    /// only real-world conformance, so it's implemented in full rather than approximated.
+    /// <c>is_mv_valid</c>'s IntraBC region-reachability check (spec §6.10.25 / libaom's <c>av1_is_dv_valid</c>),
+    /// specialized: this encoder is always single-tile (MiRowStart/MiColStart are always 0, MiRowEnd/MiColEnd
+    /// are always MiRows/MiCols). The spec's <c>bw &lt; 8 &amp;&amp; subsampling_x</c> / <c>bh &lt; 8 &amp;&amp;
+    /// subsampling_y</c> edge adjustments are omitted: every leaf this encoder ever produces is at least 8x8
+    /// (see the class-level remarks), so they can never apply. Getting this wrong wouldn't break
+    /// round-tripping through this project's own decoder (which doesn't enforce it at read time -- see
+    /// Av1TileDecoder.ReadMv's remarks), only real-world conformance against a third-party decoder (dav1d,
+    /// libaom) that does -- an AVIF whose only purpose is to round-trip through this project's own codec
+    /// wouldn't need this at all, but real interop is the actual point of writing AVIF files, so it's
+    /// implemented in full rather than approximated. IntraBC is only ever attempted under lossless (see
+    /// <see cref="EncodeLeaf"/>'s <c>intrabcStructurallyPresent</c>), and lossless always uses 128x128
+    /// superblocks since PR #80 (<c>Av1FrameEncoder.cs</c>'s <c>sbSizeMi = lossless ? 32 : 16</c>) -- see the
+    /// <c>gradient</c> computation below for the one term that depends on this.
     /// </summary>
     private static bool IsValidIntrabcSource(TileState s, int r, int c, int sizeMi, int srcR, int srcC)
     {
@@ -2626,7 +2631,12 @@ internal static class Av1TileEncoder
             return false;
         }
 
-        const int gradient = 1 + IntrabcDelaySb64; // + use_128x128_superblock, always 0 here
+        // use_128x128_superblock is always true here -- IntraBC only ever runs under lossless, and lossless
+        // always uses 128x128 superblocks (see this method's remarks above). Real AV1 (libaom's
+        // av1_is_dv_valid) adds a further +1 to this gradient in exactly that case; this used to omit it
+        // (stale from before lossless switched to 128x128 superblocks, when it was genuinely always 0 here),
+        // under-widening the wavefront reachability bound for every lossless frame since.
+        int gradient = 1 + IntrabcDelaySb64 + (s.Lossless ? 1 : 0);
         int wfOffset = gradient * (activeSbRow - srcSbRow);
         return srcSbRow <= activeSbRow && srcSb64Col < activeSb64Col - IntrabcDelaySb64 + wfOffset;
     }
@@ -3012,7 +3022,17 @@ internal static class Av1TileEncoder
 
         if (predMvRow == 0 && predMvCol == 0)
         {
-            const int sbSize4 = 16; // Num_4x4_Blocks_High[BLOCK_64X64] -- always 64x64 superblocks here
+            // Num_4x4_Blocks_High[BLOCK_128X128 or BLOCK_64X64] (spec's own sbSize4 in this exact fallback,
+            // mirrored from Av1TileDecoder.AssignMv's identical branch) -- IntraBC only ever runs under
+            // lossless (see EncodeLeaf's intrabcStructurallyPresent remarks), and lossless has used 128x128
+            // superblocks since PR #80 (Av1FrameEncoder.cs's sbSizeMi = lossless ? 32 : 16), so this must be
+            // 32, not the pre-#80 64x64-only value of 16 this used to hardcode. Getting this wrong doesn't
+            // just compress worse: since this fallback is the actual PredMv the decoder independently derives
+            // too, a stale/mismatched constant here silently predicts a *different* Mv on each side once
+            // diffMv is added back, corrupting every pixel this leaf's IntraBC block-copy reads from --
+            // confirmed via direct encoder/decoder cross-instrumentation (encoder computed predMvRow=-512,
+            // decoder independently computed predMvRow=-1024 for the same leaf).
+            int sbSize4 = s.Lossless ? 32 : 16;
             if (r - sbSize4 < 0)
             {
                 predMvRow = 0;
