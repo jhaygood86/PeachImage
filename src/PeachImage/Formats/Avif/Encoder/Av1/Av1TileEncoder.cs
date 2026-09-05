@@ -170,6 +170,20 @@ internal static class Av1TileEncoder
             Levels = AvifBufferPool.SharedInt32.Rent(32 * 32),
             ReconDequant = AvifBufferPool.SharedInt32.Rent(64 * 64),
             ReconResidual = AvifBufferPool.SharedInt32.Rent(32 * 32),
+
+            // Separate from Residual: TryCflPlane's alpha-candidate loop needs this to stay stable across
+            // multiple ComputeCandidateCost calls, but ComputeCandidateCost's own non-lossless branch
+            // clobbers TileState.Residual as its own scratch on every call -- aliasing the two would silently
+            // feed ApplyCflAlpha the previous candidate's leftover pixel residual instead of real luma AC
+            // data from the second alpha candidate onward.
+            CflLumaAc = AvifBufferPool.SharedInt32.Rent(32 * 32),
+
+            // Non-lossless luma's real, final quantized levels, computed and cached before SearchUvMode runs
+            // (so CFL's search has this leaf's own real reconstructed luma to work with) and consumed later
+            // at the leaf's normal bitstream-order commit position. Separate from TileState.Levels: that
+            // buffer is shared, trial-only scratch that ComputeCandidateCost's own non-lossless branch
+            // (called many times over, by SearchUvMode's mode loop and CFL alike) clobbers on every call.
+            LumaLevels = AvifBufferPool.SharedInt32.Rent(32 * 32),
         };
 
         try
@@ -194,6 +208,8 @@ internal static class Av1TileEncoder
             AvifBufferPool.SharedInt32.Return(state.Levels);
             AvifBufferPool.SharedInt32.Return(state.ReconDequant);
             AvifBufferPool.SharedInt32.Return(state.ReconResidual);
+            AvifBufferPool.SharedInt32.Return(state.CflLumaAc);
+            AvifBufferPool.SharedInt32.Return(state.LumaLevels);
             AvifBufferPool.SharedInt32.Return(state.PaletteColorMap);
         }
     }
@@ -297,6 +313,8 @@ internal static class Av1TileEncoder
         public required int[] Levels;
         public required int[] ReconDequant;
         public required int[] ReconResidual;
+        public required int[] CflLumaAc;
+        public required int[] LumaLevels;
     }
 
     private static int BlockSizeFromSizeMi(int sizeMi) => sizeMi switch
@@ -1114,7 +1132,7 @@ internal static class Av1TileEncoder
     /// share identical geometry, so plane 1 (U)'s state stands in for both here; the real per-4x4-sub-block
     /// values <see cref="EncodeChromaRegion"/> uses are exact, not approximated.</para>
     /// </summary>
-    private static (int Mode, int AngleDelta) SearchUvMode(TileState s, int r, int c, int x, int y, int sizeMi, bool availU, bool availL)
+    private static (int Mode, int AngleDelta, int AlphaU, int AlphaV) SearchUvMode(TileState s, int r, int c, int x, int y, int sizeMi, bool availU, bool availL)
     {
         bool subsampled = !s.Chroma444;
         int chromaN = s.Chroma444 ? sizeMi : sizeMi / 2;
@@ -1135,6 +1153,8 @@ internal static class Av1TileEncoder
         var pred = s.Pred;
         int bestMode = Av1IntraMode.DcPred;
         int bestAngleDelta = 0;
+        int bestAlphaU = 0;
+        int bestAlphaV = 0;
         long bestCost = long.MaxValue;
 
         // Gated on the luma leaf's own sizeMi (matching intra_angle_info_uv()'s _miSize -- the coding
@@ -1168,8 +1188,240 @@ internal static class Av1TileEncoder
             }
         }
 
-        return (bestMode, bestAngleDelta);
+        // CFL (Phase 6 backlog item of the project plan), non-lossless only -- see TryCflCandidate's remarks
+        // for why lossless is out of scope here. Competes fairly against every mode above via the same real
+        // ComputeCandidateCost trial cost, just with a linear-model prediction (Av1IntraPrediction's own
+        // decode-side PredictChromaFromLuma math, spec §7.11.5) instead of a fixed directional/smooth pattern.
+        if (!s.Lossless)
+        {
+            long cflCost = TryCflCandidate(s, x, y, cx, cy, chromaSizePixels, log2Size, subX, availL, availU, haveAboveRight, haveBelowLeft, filterTypeSmooth, above, left, pred, out int cflAlphaU, out int cflAlphaV);
+            if (cflCost < bestCost)
+            {
+                bestCost = cflCost;
+                bestMode = Av1IntraMode.UvCflPred;
+                bestAngleDelta = 0;
+                bestAlphaU = cflAlphaU;
+                bestAlphaV = cflAlphaV;
+            }
+        }
+
+        return (bestMode, bestAngleDelta, bestAlphaU, bestAlphaV);
     }
+
+    /// <summary>
+    /// CFL (chroma-from-luma, spec §7.11.5) candidate for <see cref="SearchUvMode"/> -- non-lossless only:
+    /// lossless's WHT/pure-bits cost domain and its own already-correct <c>cflAllowed</c> CDF-selection logic
+    /// in <see cref="EncodeLeaf"/> are left untouched (that logic already handles CFL-eligibility correctly
+    /// for both lossless and non-lossless, independent of whether CFL is ever actually searched); this is
+    /// scoped to the lossy path the project plan explicitly flagged CFL as a real, unexploited opportunity
+    /// for.
+    ///
+    /// <para>U and V are searched independently -- CFL's alpha_u/alpha_v each only affect their own plane's
+    /// prediction -- around a fast least-squares estimate of the alpha that best explains this block's real
+    /// chroma AC content from its own luma AC content (<c>alpha* = sum(lumaAc*chromaAc) / sum(lumaAc^2)</c>,
+    /// the closed-form minimizer of squared prediction error before quantization/entropy cost is considered
+    /// at all); a small window around that estimate is then trial-costed for real via the same
+    /// <see cref="ComputeCandidateCost"/> every other candidate in <see cref="SearchUvMode"/> uses, so the
+    /// actual accept/reject decision is never based on the (rate-blind) estimate itself. alpha_u/alpha_v
+    /// share one bitstream sign symbol (spec's <c>cfl_alpha_signs</c> -- (0,0) isn't an encodable combination,
+    /// at least one channel must be nonzero), so the two planes' independently-best alphas are combined and
+    /// the real joint signaling cost (<see cref="WriteCflAlphas"/>, trial-costed exactly like the residual
+    /// bits are) is added once here, not per-plane.</para>
+    /// </summary>
+    private static long TryCflCandidate(TileState s, int lumaX, int lumaY, int cx, int cy, int chromaSizePixels, int log2Size, int subX, bool availL, bool availU, bool haveAboveRight, bool haveBelowLeft, bool filterTypeSmooth, Av1EdgeArray above, Av1EdgeArray left, int[] pred, out int alphaU, out int alphaV)
+    {
+        int[] lumaAcU = s.CflLumaAc;
+        long lumaAvgU = ComputeCflLumaAc(s.ReconY, s.YWidth, lumaX, lumaY, chromaSizePixels, log2Size, subX, lumaAcU);
+
+        long costU = TryCflPlane(s, s.ReconU!, s.SourceU!, s.UCoeffCtx!, cx, cy, chromaSizePixels, log2Size, availL, availU, haveAboveRight, haveBelowLeft, filterTypeSmooth, above, left, pred, lumaAcU, lumaAvgU, out alphaU);
+
+        // U's own AC buffer is fully consumed (every read of it happens inside TryCflPlane's own
+        // alpha-candidate loop, via ApplyCflAlpha) before V starts, so reusing the same TileState.CflLumaAc
+        // scratch for both planes -- like SearchUvMode's own pred buffer -- is safe. This must stay a
+        // dedicated buffer, not TileState.Residual: ComputeCandidateCost's own non-lossless branch (called
+        // from inside TryCflPlane's loop, once per alpha candidate) clobbers Residual as its own scratch on
+        // every call, which would silently feed ApplyCflAlpha stale pixel-residual data instead of real luma
+        // AC values from the second alpha candidate onward.
+        int[] lumaAcV = s.CflLumaAc;
+        long lumaAvgV = ComputeCflLumaAc(s.ReconY, s.YWidth, lumaX, lumaY, chromaSizePixels, log2Size, subX, lumaAcV);
+        long costV = TryCflPlane(s, s.ReconV!, s.SourceV!, s.VCoeffCtx!, cx, cy, chromaSizePixels, log2Size, availL, availU, haveAboveRight, haveBelowLeft, filterTypeSmooth, above, left, pred, lumaAcV, lumaAvgV, out alphaV);
+
+        if (alphaU == 0 && alphaV == 0)
+        {
+            // Not spec-encodable (cfl_alpha_signs has no (zero, zero) symbol -- ReadCflAlphas's own
+            // signU/signV derivation never produces this pair) and not useful anyway: zero alpha on both
+            // planes means CFL's AC term vanishes entirely, so this would just be a strictly more expensive
+            // way to signal what DC_PRED already offers for free.
+            return long.MaxValue;
+        }
+
+        var trial = s.TrialSink;
+        trial.Reset();
+        WriteCflAlphas(trial, s.Cdf, alphaU, alphaV);
+        long signalingCost = Av1RdCost.CombineCost(0, trial.Bits, s.Lambda);
+
+        return costU + costV + signalingCost;
+    }
+
+    /// <summary>One plane's real, trial-costed CFL alpha search -- see <see cref="TryCflCandidate"/>'s remarks.</summary>
+    private static long TryCflPlane(TileState s, int[] reconPlane, int[] source, Av1CoefficientWriter.PlaneContext ctx, int cx, int cy, int chromaSizePixels, int log2Size, bool availL, bool availU, bool haveAboveRight, bool haveBelowLeft, bool filterTypeSmooth, Av1EdgeArray above, Av1EdgeArray left, int[] pred, int[] lumaAc, long lumaAvg, out int bestAlpha)
+    {
+        Av1IntraPrediction.BuildEdges(above, left, reconPlane, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
+        Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, Av1IntraMode.DcPred, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaWidth - 1, s.ChromaHeight - 1, cx, cy, bitDepth: 8);
+
+        // DC_PRED produces one constant value across the whole predicted block, so a single sample stands in
+        // for the entire buffer -- avoids needing a second scratch buffer to remember the DC baseline across
+        // ApplyCflAlpha's per-candidate in-place overwrites of `pred`.
+        int dcConstant = pred[0];
+
+        long numerator = 0;
+        long denominator = 0;
+        int total = chromaSizePixels * chromaSizePixels;
+        for (int i = 0; i < chromaSizePixels; i++)
+        {
+            int rowBase = ((cy + i) * s.ChromaWidth) + cx;
+            int localRowBase = i * chromaSizePixels;
+            for (int j = 0; j < chromaSizePixels; j++)
+            {
+                long ac = lumaAc[localRowBase + j] - lumaAvg;
+                numerator += ac * (source[rowBase + j] - dcConstant);
+                denominator += ac * ac;
+            }
+        }
+
+        bestAlpha = 0;
+        if (denominator == 0)
+        {
+            // This block's luma has zero AC variance (perfectly flat) -- CFL has nothing to predict from,
+            // regardless of what the chroma content looks like.
+            return long.MaxValue;
+        }
+
+        int alphaEstimate = (int)Math.Clamp(Math.Round(numerator * 64.0 / denominator), -16, 16);
+        int windowLo = Math.Max(-16, alphaEstimate - 1);
+        int windowHi = Math.Min(16, alphaEstimate + 1);
+
+        long bestCost = long.MaxValue;
+        for (int alpha = windowLo; alpha <= windowHi; alpha++)
+        {
+            if (alpha == 0)
+            {
+                continue; // never spec-legal to signal alone (see TryCflCandidate) and never useful either
+            }
+
+            ApplyCflAlpha(pred, lumaAc, lumaAvg, total, dcConstant, alpha, bitDepth: 8);
+            long cost = ComputeCandidateCost(s, source, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, ctx);
+            if (cost < bestCost)
+            {
+                bestCost = cost;
+                bestAlpha = alpha;
+            }
+        }
+
+        return bestCost;
+    }
+
+    /// <summary>
+    /// Luma AC term for CFL (spec §7.11.5's <c>predict_chroma_from_luma</c>, the part shared across every
+    /// alpha candidate -- luma content doesn't depend on alpha, only how it's scaled and added to chroma's DC
+    /// does). Ported from <see cref="Av1IntraPrediction.PredictChromaFromLuma"/>'s own identical loop, not a
+    /// re-derivation: same subsample-and-average-then-Q3-scale computation, same rounding.
+    ///
+    /// <para><paramref name="lumaPlane"/> is always <see cref="TileState.ReconY"/> in practice, but taken as
+    /// a parameter rather than hardcoded so this method doesn't need to know which caller it's serving. Real,
+    /// already-reconstructed luma matters here: <see cref="SearchUvMode"/>'s CFL candidate only runs after
+    /// <see cref="EncodeLeaf"/>'s early, pre-search luma reconstruction (see its remarks) has already written
+    /// this leaf's own real <see cref="TileState.ReconY"/> data, and the real, final commit
+    /// (<see cref="EncodeChromaRegion"/>/<see cref="EncodeNonLosslessLargeChromaRegion"/>) reads the same,
+    /// by-then-unquestionably-real buffer -- both callers see identical data, eliminating the search/commit
+    /// mismatch an earlier version of this method had when the search used <see cref="TileState.SourceY"/>
+    /// as a stand-in instead.</para>
+    /// </summary>
+    private static long ComputeCflLumaAc(int[] lumaPlane, int lumaStride, int lumaX, int lumaY, int chromaSizePixels, int log2Size, int subX, int[] lumaAcOut)
+    {
+        int subY = subX; // this encoder's chroma subsampling is always symmetric (4:2:0 or 4:4:4)
+        int maxLumaW = lumaX + (chromaSizePixels << subX);
+        int maxLumaH = lumaY + (chromaSizePixels << subY);
+
+        long lumaAvg = 0;
+        for (int i = 0; i < chromaSizePixels; i++)
+        {
+            int lumaRow = Math.Min(lumaY + (i << subY), maxLumaH - (1 << subY));
+            for (int j = 0; j < chromaSizePixels; j++)
+            {
+                int lumaCol = Math.Min(lumaX + (j << subX), maxLumaW - (1 << subX));
+
+                int t = 0;
+                for (int dy = 0; dy <= subY; dy++)
+                {
+                    for (int dx = 0; dx <= subX; dx++)
+                    {
+                        t += lumaPlane[((lumaRow + dy) * lumaStride) + lumaCol + dx];
+                    }
+                }
+
+                int v = t << (3 - subX - subY);
+                lumaAcOut[(i * chromaSizePixels) + j] = v;
+                lumaAvg += v;
+            }
+        }
+
+        return Round2(lumaAvg, log2Size + log2Size);
+    }
+
+    /// <summary>Applies a candidate CFL alpha on top of an already-DC-predicted <paramref name="pred"/>, matching <see cref="Av1IntraPrediction.PredictChromaFromLuma"/>'s exact formula (spec §7.11.5).</summary>
+    private static void ApplyCflAlpha(int[] pred, int[] lumaAc, long lumaAvg, int total, int dcConstant, int alpha, int bitDepth)
+    {
+        for (int i = 0; i < total; i++)
+        {
+            long ac = lumaAc[i] - lumaAvg;
+            int scaledLuma = Round2Signed(alpha * ac, 6);
+            pred[i] = Clip1(dcConstant + scaledLuma, bitDepth);
+        }
+    }
+
+    /// <summary>
+    /// Write-side mirror of <c>Av1TileDecoder.ReadCflAlphas</c> (spec §5.11.45's write direction) -- an
+    /// <see cref="IAv1SymbolSink"/> parameter so the same call trial-costs (<see cref="Av1TrialSymbolSink"/>,
+    /// via <see cref="TryCflCandidate"/>) or really writes (<see cref="Av1SymbolEncoder"/>, via
+    /// <see cref="EncodeLeaf"/>) identically, matching this file's existing <see cref="Av1CoefficientWriter.WriteCoeffs"/>
+    /// convention. <paramref name="alphaU"/>/<paramref name="alphaV"/> are the real signed alpha values
+    /// (spec range roughly ±1..16, never both zero -- see <see cref="TryCflCandidate"/>'s remarks), not the
+    /// bitstream symbols themselves; this derives cflAlphaSigns/cflAlphaU/cflAlphaV the same way
+    /// <c>ReadCflAlphas</c> reconstructs alphaU/alphaV from them, just in reverse.
+    /// </summary>
+    private static void WriteCflAlphas(IAv1SymbolSink sink, Av1CdfContext cdf, int alphaU, int alphaV)
+    {
+        int signU = alphaU == 0 ? 0 : alphaU < 0 ? 1 : 2;
+        int signV = alphaV == 0 ? 0 : alphaV < 0 ? 1 : 2;
+
+        // Inverse of ReadCflAlphas's `signU = (cflAlphaSigns+1)/3; signV = (cflAlphaSigns+1)%3` -- a bijection
+        // over cflAlphaSigns in [0,7] onto every (signU, signV) pair except (0, 0), which TryCflCandidate's
+        // caller never passes here.
+        int cflAlphaSigns = (signU * 3) + signV - 1;
+        sink.WriteSymbol(cdf.CflSign, cflAlphaSigns);
+
+        if (signU != 0)
+        {
+            int ctx = ((signU - 1) * 3) + signV;
+            sink.WriteSymbol(cdf.CflAlpha[ctx], Math.Abs(alphaU) - 1);
+        }
+
+        if (signV != 0)
+        {
+            int ctx = ((signV - 1) * 3) + signU;
+            sink.WriteSymbol(cdf.CflAlpha[ctx], Math.Abs(alphaV) - 1);
+        }
+    }
+
+    /// <summary><c>Round2</c> (spec §4.7). Duplicated from <see cref="Av1IntraPrediction"/>'s own private identically-named helper rather than widening that method's visibility, to keep this encoder-only CFL search self-contained.</summary>
+    private static int Round2(long x, int n) => n == 0 ? (int)x : (int)((x + (1L << (n - 1))) >> n);
+
+    /// <summary><c>Round2Signed</c> (spec §4.7). See <see cref="Round2"/>'s remarks.</summary>
+    private static int Round2Signed(long x, int n) => x >= 0 ? Round2(x, n) : -Round2(-x, n);
+
+    /// <summary><c>Clip1</c> (spec §4.10.6). See <see cref="Round2"/>'s remarks.</summary>
+    private static int Clip1(int x, int bitDepth) => Math.Clamp(x, 0, (1 << bitDepth) - 1);
 
     private static int PartitionContext(TileState s, int r, int c, int bSize, out int bsl)
     {
@@ -1371,11 +1623,74 @@ internal static class Av1TileEncoder
         // still reconstructs bit-exactly regardless (residual always corrects the rest of the way), but
         // choosing DC_PRED avoids gambling extra angle_delta signaling bits on a block with no real content
         // to base a directional choice on.
+        // Non-lossless luma's real transform/quantize/trellis/reconstruct, computed here -- before
+        // SearchUvMode runs, not at this leaf's later bitstream-order commit position below -- so CFL's
+        // search (TryCflCandidate) has this leaf's own real reconstructed luma to read from
+        // TileState.ReconY, matching what a real decoder will actually have available by the equivalent
+        // point in its own decode. uv_mode/cfl_alphas are decided (and, per spec, their bitstream position
+        // precedes) before luma's own residual is ever written, but nothing requires the ENCODER's internal
+        // pixel reconstruction to wait that long too -- only WriteCoeffs (the actual bitstream symbol write,
+        // which must stay at its original position to preserve mode_info()-before-residual() ordering) is
+        // deferred; TileState.LumaLevels and bestTxType (declared here, at a scope enclosing both this block
+        // and the later commit site) carry the result forward for that deferred write to reuse instead of
+        // recomputing.
+        //
+        // Always run when reached (not conditioned on whether this leaf's Y palette will end up used --
+        // that isn't decided until after this point, see the palette eligibility checks below), so it can't
+        // avoid the tx_type search/transform/quantize/trellis cost purely by knowing palette will win --
+        // real, if occasionally wasted, work is far simpler and safer than also hoisting palette's own
+        // decision earlier just to skip it. A leaf whose Y palette does win later overwrites TileState.ReconY
+        // with the palette's own (exact, source-copied) reconstruction instead -- see that branch, unchanged,
+        // below.
+        int bestTxType = Av1TxType.DctDct;
+        if (!s.Lossless && !usedIntrabc)
+        {
+            int[] earlyResidual = s.Residual;
+            int leafElementCount = sizePixels * sizePixels;
+            long earlySse = 0;
+            for (int i = 0; i < leafElementCount; i++)
+            {
+                int diff = s.SourceY[((y + (i / sizePixels)) * s.YWidth) + x + (i % sizePixels)] - bestPred[i];
+                earlyResidual[i] = diff;
+                earlySse += (long)diff * diff;
+            }
+
+            if (sizePixels < 32)
+            {
+                long bestTxTypeCost = long.MaxValue;
+                foreach (int candidateTxType in Av1TxTypeTables.TxTypeIntraInvSet2)
+                {
+                    long txTypeCost = ComputeTxTypeCost(s, earlyResidual, earlySse, sizePixels, ptype: 0, x, y, s.YCoeffCtx, candidateTxType);
+                    if (txTypeCost < bestTxTypeCost)
+                    {
+                        bestTxTypeCost = txTypeCost;
+                        bestTxType = candidateTxType;
+                    }
+                }
+            }
+
+            int[] earlyCoeff = s.Coeff;
+            Av1ForwardTransform.Forward2D(earlyResidual, earlyCoeff, sizePixels, bestTxType);
+            Av1ForwardQuantizer.Quantize(earlyCoeff, s.LumaLevels, sizePixels, s.BaseQIdx);
+            OptimizeCoeffTrellis(s, earlyCoeff, s.LumaLevels, sizePixels, ptype: 0, c, r, s.YCoeffCtx);
+
+            // Write the prediction into the reconstruction buffer before Reconstruct() adds the residual --
+            // matches Av1TileDecoder's own predict-then-reconstruct-in-place ordering.
+            for (int i = 0; i < sizePixels; i++)
+            {
+                Array.Copy(bestPred, i * sizePixels, s.ReconY, ((y + i) * s.YWidth) + x, sizePixels);
+            }
+
+            Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, x, y, sizePixels, s.LumaLevels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: false, bestTxType);
+        }
+
         int bestUvMode = Av1IntraMode.DcPred;
         int bestUvAngleDelta = 0;
+        int bestAlphaU = 0;
+        int bestAlphaV = 0;
         if (hasChroma && !usedIntrabc && (availU || availL))
         {
-            (bestUvMode, bestUvAngleDelta) = SearchUvMode(s, r, c, x, y, sizeMi, availU, availL);
+            (bestUvMode, bestUvAngleDelta, bestAlphaU, bestAlphaV) = SearchUvMode(s, r, c, x, y, sizeMi, availU, availL);
         }
 
         // Trial-build this leaf's palette *before* writing anything -- skip's value depends on whether
@@ -1526,20 +1841,35 @@ internal static class Av1TileEncoder
             // AV1 decoder, since CFL-allowed-ness
             // picks which adaptive probability table the very next symbol is read from. Chroma444 and
             // non-lossless never co-occur in this encoder (see Av1FrameEncoder.Encode's chroma444 gate),
-            // so the non-lossless branch never needs to consult it. CFL itself is never selected here (not
-            // implemented, and spec-illegal for this encoder's lossless-always-4:4:4 output), only ever a
-            // real non-CFL mode from SearchUvMode.
+            // so the non-lossless branch never needs to consult it. This condition was already exactly right
+            // before CFL (Phase 6 backlog item) was real-searched -- SearchUvMode never picked
+            // Av1IntraMode.UvCflPred before, but the CDF-selection logic here has to match the decoder's
+            // is_cfl_allowed() regardless of whether CFL is ever actually chosen, since it's read
+            // unconditionally whenever hasChroma.
             bool cflAllowed = s.Lossless
                 ? Av1BlockTables.GetPlaneResidualSize(bSize, 1, !s.Chroma444, !s.Chroma444) == Av1BlockSize.Block4x4
                 : true;
             var uvModeCdf = cflAllowed ? s.Cdf.UvModeCflAllowed[bestMode] : s.Cdf.UvModeCflNotAllowed[bestMode];
             s.Symbols.WriteSymbol(uvModeCdf, bestUvMode);
 
+            // read_cfl_alphas() (spec §5.11.45): structurally present, immediately after uv_mode and before
+            // intra_angle_info_uv(), whenever uv_mode == UV_CFL_PRED (Av1TileDecoder's own read order at
+            // ReadUvMode()/ReadCflAlphas()/IntraAngleInfoUv -- bitstream position matters here, not just
+            // logical presence). SearchUvMode never returns UvCflPred unless cflAllowed was true for this
+            // leaf (see its own remarks), so this can't fire from a CDF table that didn't structurally offer
+            // the symbol in the first place.
+            if (bestUvMode == Av1IntraMode.UvCflPred)
+            {
+                WriteCflAlphas(s.Symbols, s.Cdf, bestAlphaU, bestAlphaV);
+            }
+
             // intra_angle_info_uv() (spec §5.11.43): structurally present whenever this leaf's size is
             // >= 8x8 (no longer always true now that the partition floor reaches 4x4, sizeMi == 1) and the
             // searched uv_mode is directional, mirroring Av1TileDecoder.IntraAngleInfoUv exactly, including
             // its shared AngleDelta CDF table (indexed by mode class, not by plane). SearchUvMode's own
             // angleDeltaAllowed gate already never picks a nonzero bestUvAngleDelta for such a leaf.
+            // UV_CFL_PRED is never directional (Av1IntraMode.IsDirectional(UvCflPred) is false), so this
+            // never fires for a CFL leaf -- no angle_delta symbol competes with cfl_alphas for this leaf.
             if (sizeMi >= 2 && Av1IntraMode.IsDirectional(bestUvMode))
             {
                 s.Symbols.WriteSymbol(s.Cdf.AngleDelta[bestUvMode - Av1IntraMode.VPred], bestUvAngleDelta + MaxAngleDelta);
@@ -1666,52 +1996,15 @@ internal static class Av1TileEncoder
                 // partition/TX-size RDO phase). tx_mode stays TX_MODE_LARGEST (Av1FrameHeaderWriter never
                 // signals tx_mode_select), so the transform size here is always exactly the coding block's
                 // own size -- no separate tx_size symbol to write, unlike a TX_MODE_SELECT encoder would need.
-                int[] residual = s.Residual;
-                int leafElementCount = sizePixels * sizePixels;
-                long sse = 0;
-                for (int i = 0; i < leafElementCount; i++)
-                {
-                    int diff = s.SourceY[((y + (i / sizePixels)) * s.YWidth) + x + (i % sizePixels)] - bestPred[i];
-                    residual[i] = diff;
-                    sse += (long)diff * diff;
-                }
-
-                // Real tx_type search (Phase 4 of the project plan): this encoder's reduced_tx_set (always
-                // on, see Av1FrameHeaderWriter) means Av1TileDecoder.GetTxSet always resolves to
-                // TX_SET_INTRA_2 at every size that reads a tx_type symbol at all (8x8/16x16 here -- 32x32 is
-                // DCTONLY, no symbol, see below), so Av1TxTypeTables.TxTypeIntraInvSet2's 5 members are the
-                // complete real search space, not an arbitrary subset. Reuses the same residual/SSE already
-                // computed above for every candidate (SSE is a property of the *residual*, fixed once
-                // bestPred is chosen -- only which transform decorrelates that residual, and so how many
-                // bits the result costs, actually varies by tx_type), so this only re-runs the
-                // transform+quantize+entropy-trial per candidate, not the prediction/SSE gather.
-                int bestTxType = Av1TxType.DctDct;
-                if (sizePixels < 32)
-                {
-                    long bestTxTypeCost = long.MaxValue;
-                    foreach (int candidateTxType in Av1TxTypeTables.TxTypeIntraInvSet2)
-                    {
-                        long txTypeCost = ComputeTxTypeCost(s, residual, sse, sizePixels, ptype: 0, x, y, s.YCoeffCtx, candidateTxType);
-                        if (txTypeCost < bestTxTypeCost)
-                        {
-                            bestTxTypeCost = txTypeCost;
-                            bestTxType = candidateTxType;
-                        }
-                    }
-                }
-
-                int[] coeff = s.Coeff;
-                Av1ForwardTransform.Forward2D(residual, coeff, sizePixels, bestTxType);
-                int[] levels = s.Levels;
-                Av1ForwardQuantizer.Quantize(coeff, levels, sizePixels, s.BaseQIdx);
-                OptimizeCoeffTrellis(s, coeff, levels, sizePixels, ptype: 0, c, r, s.YCoeffCtx);
-
-                // Write the prediction into the reconstruction buffer before Reconstruct() adds the
-                // residual -- matches Av1TileDecoder's own predict-then-reconstruct-in-place ordering.
-                for (int i = 0; i < sizePixels; i++)
-                {
-                    Array.Copy(bestPred, i * sizePixels, s.ReconY, ((y + i) * s.YWidth) + x, sizePixels);
-                }
+                //
+                // The real transform/quantize/trellis/reconstruct work (Phase 4's tx_type search included)
+                // already ran early, before SearchUvMode -- see that call site's remarks for why (CFL needs
+                // this leaf's own real reconstructed luma before it can be searched at all, which is earlier
+                // than this leaf's residual would otherwise be committed). TileState.LumaLevels and
+                // bestTxType (both from that earlier scope) are this branch's only remaining inputs; only
+                // WriteCoeffs (the actual bitstream write) waits until here, matching spec's
+                // mode_info()-before-residual() ordering.
+                int[] levels = s.LumaLevels;
 
                 int txSz = Av1ForwardTransform.SizeToTxSz(sizePixels);
                 int txSzSqr = Av1CoeffTables.TxSizeSqr[txSz];
@@ -1745,7 +2038,6 @@ internal static class Av1TileEncoder
                 // stops updating past whichever axis is shorter in mi-units -- desyncing every block's
                 // entropy context (and the whole rest of the tile with it) from exactly that point onward.
                 Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, sizePixels, ptype: 0, c, r, s.YCoeffCtx, writeLumaTxType);
-                Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, x, y, sizePixels, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: false, bestTxType);
                 MarkLumaBlockDecoded(s, r, c, sizeMi, sizeMi);
             }
         }
@@ -1789,7 +2081,7 @@ internal static class Av1TileEncoder
 
         if (hasChroma && !usedPalette && !usedIntrabc)
         {
-            EncodeChromaRegion(s, r, c, x, y, sizeMi, bestUvMode, bestUvAngleDelta);
+            EncodeChromaRegion(s, r, c, x, y, sizeMi, bestUvMode, bestUvAngleDelta, bestAlphaU, bestAlphaV);
         }
 
         if (s.Lossless)
@@ -2986,7 +3278,7 @@ internal static class Av1TileEncoder
     /// desync the entropy stream the moment there's more than one sub-block per plane (any leaf bigger than
     /// the previous fixed 8x8 grid).</para>
     /// </summary>
-    private static void EncodeChromaRegion(TileState s, int r, int c, int x, int y, int sizeMi, int uvMode, int uvAngleDelta)
+    private static void EncodeChromaRegion(TileState s, int r, int c, int x, int y, int sizeMi, int uvMode, int uvAngleDelta, int alphaU, int alphaV)
     {
         int uvTxType = Av1TxTypeTables.ModeToTxfm[uvMode];
         int chromaN = s.Chroma444 ? sizeMi : sizeMi / 2;
@@ -3028,9 +3320,17 @@ internal static class Av1TileEncoder
         // forward-transforming can't handle.
         if (!s.Lossless && chromaN > 1)
         {
-            EncodeNonLosslessLargeChromaRegion(s, r, c, chromaR4Base, chromaC4Base, cxBase, cyBase, chromaBlockSizePixels, subX, filterTypeSmooth, uvMode, uvAngleDelta, uvTxType);
+            EncodeNonLosslessLargeChromaRegion(s, r, c, chromaR4Base, chromaC4Base, cxBase, cyBase, chromaBlockSizePixels, subX, filterTypeSmooth, uvMode, uvAngleDelta, uvTxType, alphaU, alphaV);
             return;
         }
+
+        // Non-lossless (this branch never reaches here with s.Lossless -- see EncodeLeaf's remarks on why
+        // CFL is scoped to the lossy path), chromaN == 1 always means this loop's single (dr, dc) == (0, 0)
+        // iteration covers exactly this leaf's own luma extent (sizeMi == 2, an 8x8 luma leaf at 4:2:0's
+        // fixed non-lossless partition floor -- see the class remarks), so (x, y) -- this leaf's own base
+        // luma pixel position, already this method's own parameters -- is CFL's luma base directly, with no
+        // per-sub-block offset to add.
+        bool isCfl = uvMode == Av1IntraMode.UvCflPred;
 
         int planeIndex = 0;
         foreach (var (source, recon, ctx) in new[]
@@ -3065,7 +3365,19 @@ internal static class Av1TileEncoder
                     // safe because luma's use of them is already fully consumed (WriteCoeffs/Reconstruct
                     // called for every luma sub-block) before this method runs.
                     var pred = s.Pred;
-                    Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, uvMode, availL, availU, useFilterIntra: false, filterIntraMode: 0, uvAngleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaWidth - 1, s.ChromaHeight - 1, cx, cy, bitDepth: 8);
+
+                    // CFL predicts through an ordinary DC_PRED baseline (predict_intra's own DC-with-
+                    // UV_CFL_PRED-mapped-to-DC_PRED call, spec §7.11.2 -- mirrored from Av1TileDecoder's
+                    // identical `mode = isCfl ? DcPred : uvMode` substitution), then adds the luma-derived AC
+                    // term on top -- Predict() itself has no UV_CFL_PRED case to dispatch to.
+                    Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, isCfl ? Av1IntraMode.DcPred : uvMode, availL, availU, useFilterIntra: false, filterIntraMode: 0, uvAngleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaWidth - 1, s.ChromaHeight - 1, cx, cy, bitDepth: 8);
+                    if (isCfl)
+                    {
+                        int dcConstant = pred[0];
+                        int alpha = planeIndex == 1 ? alphaU : alphaV;
+                        long lumaAvg = ComputeCflLumaAc(s.ReconY, s.YWidth, x, y, 4, log2Size: 2, subX, s.CflLumaAc);
+                        ApplyCflAlpha(pred, s.CflLumaAc, lumaAvg, total: 16, dcConstant, alpha, bitDepth: 8);
+                    }
 
                     var residual = s.Residual;
                     for (int i = 0; i < 16; i++)
@@ -3124,10 +3436,18 @@ internal static class Av1TileEncoder
     /// exactly equals the chroma coding block (the same "transform == coding block" shortcut
     /// <see cref="EncodeLeaf"/>'s own non-lossless call already relies on).
     /// </summary>
-    private static void EncodeNonLosslessLargeChromaRegion(TileState s, int r, int c, int chromaR4, int chromaC4, int cx, int cy, int chromaBlockSizePixels, int subX, bool filterTypeSmooth, int uvMode, int uvAngleDelta, int uvTxType)
+    private static void EncodeNonLosslessLargeChromaRegion(TileState s, int r, int c, int chromaR4, int chromaC4, int cx, int cy, int chromaBlockSizePixels, int subX, bool filterTypeSmooth, int uvMode, int uvAngleDelta, int uvTxType, int alphaU, int alphaV)
     {
         bool availU = chromaR4 > 0;
         bool availL = chromaC4 > 0;
+        bool isCfl = uvMode == Av1IntraMode.UvCflPred;
+
+        // Real luma pixel coords this region's local (0, 0) corresponds to -- cx/cy are already real
+        // full-resolution chroma-plane coords (this encoder's mi-grid alignment guarantees cx << subX == the
+        // exact real luma x with no rounding loss, the same invariant SearchUvMode's own TryCflCandidate call
+        // relies on for its (x, y) luma base).
+        int lumaX = cx << subX;
+        int lumaY = cy << subX;
 
         // Unlike EncodeChromaRegion's own 4x4-sub-block loop (whose subBlockChromaRow/Col shifts per
         // sub-block via `mult`), there is exactly one sub-block here -- the whole chroma region -- so its
@@ -3164,7 +3484,18 @@ internal static class Av1TileEncoder
             bool haveBelowLeft = GetBlockDecoded(s, planeIndex, subBlockChromaRow + chromaN, subBlockChromaCol - 1);
 
             Av1IntraPrediction.BuildEdges(above, left, recon, s.ChromaWidth, cx, cy, chromaBlockSizePixels, chromaBlockSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaWidth - 1, s.ChromaHeight - 1, bitDepth: 8);
-            Av1IntraPrediction.Predict(pred, chromaBlockSizePixels, chromaBlockSizePixels, log2Size, log2Size, above, left, uvMode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta: uvAngleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaWidth - 1, s.ChromaHeight - 1, cx, cy, bitDepth: 8);
+
+            // CFL predicts through an ordinary DC_PRED baseline (spec §7.11.2's DC-with-UV_CFL_PRED-mapped-
+            // to-DC_PRED call), then adds the luma-derived AC term on top -- Predict() itself has no
+            // UV_CFL_PRED case to dispatch to (see EncodeChromaRegion's identical substitution).
+            Av1IntraPrediction.Predict(pred, chromaBlockSizePixels, chromaBlockSizePixels, log2Size, log2Size, above, left, isCfl ? Av1IntraMode.DcPred : uvMode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta: uvAngleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaWidth - 1, s.ChromaHeight - 1, cx, cy, bitDepth: 8);
+            if (isCfl)
+            {
+                int dcConstant = pred[0];
+                int alpha = planeIndex == 1 ? alphaU : alphaV;
+                long lumaAvg = ComputeCflLumaAc(s.ReconY, s.YWidth, lumaX, lumaY, chromaBlockSizePixels, log2Size, subX, s.CflLumaAc);
+                ApplyCflAlpha(pred, s.CflLumaAc, lumaAvg, total: chromaBlockSizePixels * chromaBlockSizePixels, dcConstant, alpha, bitDepth: 8);
+            }
 
             var residual = s.Residual;
             for (int i = 0; i < chromaBlockSizePixels; i++)
