@@ -2366,7 +2366,7 @@ internal static class Av1TileEncoder
         int approxMvRow = 0;
         int approxMvCol = 0;
         bool intrabcApprox = !intrabcExact && intrabcStructurallyPresent
-            && FindApproximateIntrabcMatch(s, r, c, sizeMi, bestCost, out approxMvRow, out approxMvCol);
+            && FindApproximateIntrabcMatch(s, r, c, sizeMi, bSize, bestCost, out approxMvRow, out approxMvCol);
         if (intrabcApprox)
         {
             intrabcMvRow = approxMvRow;
@@ -3565,9 +3565,11 @@ internal static class Av1TileEncoder
     // communityyardsale0926.png), a wider bucket window keeps finding genuinely better matches beyond the
     // old cutoff (256 -> 2,076,474 bytes; 1024 -> 2,075,755; 4096 -> 2,075,734 -- diminishing fast past 1024,
     // capturing ~97% of the 4096 ceiling's gain), at a modest ~9% wall-time cost (this window is scanned once
-    // per leaf that reaches this fallback, unlike MotionSearchCoarseCandidateBudget's own much steeper curve).
-    // 1024 is the practical knee of that curve, not evidence the underlying content-similarity signal stops
-    // mattering past it.
+    // per leaf that reaches this fallback). 1024 is the practical knee of that curve, not evidence the
+    // underlying content-similarity signal stops mattering past it. Measured before
+    // FindApproximateIntrabcMatchViaMotionSearch's own real-diamond-search rewrite -- worth re-measuring
+    // against that, since a real motion search covering the whole legal region may make this bucket source
+    // partly or wholly redundant.
     private const int ApproxSignatureBucketWindow = 1024;
     private const long ApproxDvSignalingMargin = 64;
 
@@ -3593,7 +3595,7 @@ internal static class Av1TileEncoder
     /// this proxy doesn't otherwise account for (mv_joint/class/sign/magnitude bits the intra candidates'
     /// own cost never had to pay).
     /// </summary>
-    private static bool FindApproximateIntrabcMatch(TileState s, int r, int c, int sizeMi, long bestIntraCost, out int mvRow, out int mvCol)
+    private static bool FindApproximateIntrabcMatch(TileState s, int r, int c, int sizeMi, int bSize, long bestIntraCost, out int mvRow, out int mvCol)
     {
         mvRow = 0;
         mvCol = 0;
@@ -3655,9 +3657,26 @@ internal static class Av1TileEncoder
             }
         }
 
-        if (FindApproximateIntrabcMatchViaMotionSearch(s, x, y, sizePixels, out int motionSrcX, out int motionSrcY))
+        if (FindApproximateIntrabcMatchViaMotionSearch(s, r, c, bSize, x, y, sizePixels, out int motionSrcX, out int motionSrcY))
         {
             ConsiderCandidatePixels(motionSrcX, motionSrcY);
+        }
+
+        // libaom's own av1_full_pixel_search doesn't stop at the diamond search above when its result still
+        // looks weak (its own run_mesh_search/force_mesh_thresh escape hatch, av1/encoder/mcomp.c) -- it falls
+        // back to a real exhaustive/mesh search over a wider area first. A predictor-seeded diamond search is
+        // a greedy local search: when FindMvStackAndPredict's own predictor falls through to its fixed
+        // "directly left"/"directly above" default (the common case on a frame with little existing IntraBC
+        // usage for neighbors to have contributed a real DV to the stack from), the diamond search above never
+        // explores anywhere else in the frame at all -- confirmed by measurement: without this, real IntraBC
+        // usage on this project's own target photo *dropped* from 721 to 153 leaves and the file grew, despite
+        // the diamond search itself being a more faithful match to libaom's real starting-point/step logic.
+        // This mirrors that escape hatch with this project's own prior coarse-grid scan (bounded so total
+        // candidate count stays roughly constant regardless of frame size, same shape as libaom's own
+        // candidate-count-bounded mesh patterns) instead of reimplementing libaom's exact mesh pattern.
+        if (FindApproximateIntrabcMatchViaMeshSearch(s, x, y, sizePixels, out int meshSrcX, out int meshSrcY))
+        {
+            ConsiderCandidatePixels(meshSrcX, meshSrcY);
         }
 
         if (!found || bestCost + ApproxDvSignalingMargin >= bestIntraCost)
@@ -3670,38 +3689,167 @@ internal static class Av1TileEncoder
         return true;
     }
 
+    /// <summary>
+    /// Real diamond-pattern full-pixel motion search for an IntraBC copy source -- rewritten to mirror
+    /// libaom's own <c>av1_full_pixel_search</c> (<c>av1/encoder/mcomp.c</c>), read directly to settle a real
+    /// discrepancy: profiling this project's own real target photo (1054x1492) found libaom using approximate
+    /// IntraBC on 5,022 leaves (12.8% of the frame) versus this project's prior fixed-budget-coarse-grid
+    /// version finding only 721 (1.8% of pixels) -- a ~7x gap traced to two structural differences from
+    /// libaom's real search, not a tuning gap:
+    /// <list type="bullet">
+    /// <item>libaom's <c>rd_pick_intrabc_mode_sb</c> seeds its search from a real spatial DV predictor
+    /// (<c>dv_ref</c>, from <c>av1_find_mv_refs</c>/<c>av1_find_best_ref_mvs_from_stack</c> -- the same
+    /// nearest/near-neighbor MV stack machinery real inter prediction uses), not an arbitrary fixed point. This
+    /// project already has the exact write-side mirror of that (<see cref="FindMvStackAndPredict"/>, previously
+    /// only used at the final MV-diff-signaling site) -- reused here as this search's own starting point.</item>
+    /// <item>From that seed, libaom runs a real adaptive step-halving diamond search (its <c>NSTEP</c>/
+    /// <c>DIAMOND</c> family, dispatched from <c>av1_full_pixel_search</c>) over the *whole* legal already-coded
+    /// region, not a fixed-budget uniform grid sampled at whatever spacing keeps the total candidate count
+    /// around a constant. A uniform grid can step clean over a real match sitting between its sample points,
+    /// especially for a small block where the useful search radius is itself small; a step-halving diamond
+    /// search starting from a spatially-informed predictor reaches the same fine positions with far fewer
+    /// candidates and without ever risking stepping over them.</item>
+    /// </list>
+    /// Legality is still gated the same way as before, by <see cref="IsValidIntrabcSourcePixels"/> (this
+    /// project's own conservative wavefront-reachability check, mirroring libaom's <c>av1_is_dv_valid</c>) --
+    /// libaom instead pre-clips its search to two separate "above"/"left" mv_limits boxes before searching, an
+    /// implementation-level optimization this project doesn't need since its own legality check is already a
+    /// single, more general predicate any candidate position can be tested against directly.
+    /// </summary>
+    private static bool FindApproximateIntrabcMatchViaMotionSearch(TileState s, int r, int c, int bSize, int x, int y, int sizePixels, out int bestSrcX, out int bestSrcY)
+    {
+        bestSrcX = 0;
+        bestSrcY = 0;
+
+        int regionWidth = s.MiCols * 4;
+        int regionHeight = y + sizePixels;
+        if (regionWidth < sizePixels || regionHeight < sizePixels)
+        {
+            return false;
+        }
+
+        long bestSad = long.MaxValue;
+        bool found = false;
+        int bestX = 0;
+        int bestY = 0;
+
+        void Consider(int candX, int candY)
+        {
+            if (candX < 0 || candY < 0 || candX > regionWidth - sizePixels || candY > regionHeight - sizePixels)
+            {
+                return;
+            }
+
+            if (candX == x && candY == y)
+            {
+                return;
+            }
+
+            if (!IsValidIntrabcSourcePixels(s, x, y, sizePixels, candX, candY))
+            {
+                return;
+            }
+
+            long sad = ComputeIntrabcLumaSad(s, x, y, candX, candY, sizePixels);
+            if (sad < bestSad)
+            {
+                bestSad = sad;
+                bestX = candX;
+                bestY = candY;
+                found = true;
+            }
+        }
+
+        // Real spatial DV predictor (see this method's own remarks) in 1/8-pel MV units -- DVs are always
+        // whole-pixel (spec's force_integer_mv for intrabc), so dividing by 8 is exact, never truncating a
+        // real fractional offset away.
+        var (predMvRow, predMvCol) = FindMvStackAndPredict(s, r, c, bSize);
+        int startX = Math.Clamp(x + (predMvCol / 8), 0, regionWidth - sizePixels);
+        int startY = Math.Clamp(y + (predMvRow / 8), 0, regionHeight - sizePixels);
+        Consider(startX, startY);
+
+        int maxDim = Math.Max(regionWidth, regionHeight);
+        int step = 1;
+        while (step * 2 <= maxDim)
+        {
+            step *= 2;
+        }
+
+        Span<(int Dy, int Dx)> neighbors = stackalloc (int Dy, int Dx)[8];
+        while (step >= 1)
+        {
+            neighbors[0] = (-step, 0);
+            neighbors[1] = (step, 0);
+            neighbors[2] = (0, -step);
+            neighbors[3] = (0, step);
+            neighbors[4] = (-step, -step);
+            neighbors[5] = (-step, step);
+            neighbors[6] = (step, -step);
+            neighbors[7] = (step, step);
+
+            // Keep probing the current step size around whatever is currently best, re-centering after every
+            // improvement (the real diamond-search shape: a big win can chain into another big win at the same
+            // step size), only halving once a full round finds nothing better.
+            bool improved;
+            do
+            {
+                improved = false;
+                int baseX = bestX;
+                int baseY = bestY;
+                foreach (var (dy, dx) in neighbors)
+                {
+                    long before = bestSad;
+                    Consider(baseX + dx, baseY + dy);
+                    if (bestSad < before)
+                    {
+                        improved = true;
+                    }
+                }
+            }
+            while (improved);
+
+            step /= 2;
+        }
+
+        bestSrcX = bestX;
+        bestSrcY = bestY;
+        return found;
+    }
+
     // Tuned empirically against this project's own real target photo (1054x1492): the coarse candidate count
     // only meaningfully affects encode time for a genuinely large frame -- Math.Sqrt-derived step already
     // floors to 1 (fully exhaustive at whatever pixel granularity the region allows) for small/synthetic test
     // fixtures well under this budget's own area threshold, confirmed by the full test suite's own runtime
     // staying flat (~24s) all the way from budget 200 up through this value. Measured tradeoff curve on that
-    // real photo (bytes / wall time): 200 -> 2,088,959 / ~68s; 2,000 -> 2,086,902 / ~74s; 8,000 -> 2,083,557 /
-    // ~86s; 32,000 -> 2,075,361 / ~162s; 128,000 -> 2,063,154 / ~362s. Gains keep growing, not plateauing, all
-    // the way up -- this value is a deliberate practicality cutoff for a lossless mode that already accepts a
-    // real RDO cost for real compression, not evidence that the underlying search itself stops improving
-    // further out; revisit if this project ever wants to trade more encode time for a smaller lossless file.
+    // real photo (bytes / wall time, this mesh search as the only motion-search-family source, i.e. before
+    // FindApproximateIntrabcMatchViaMotionSearch's own predictor-seeded diamond search existed): 200 ->
+    // 2,088,959 / ~68s; 2,000 -> 2,086,902 / ~74s; 8,000 -> 2,083,557 / ~86s; 32,000 -> 2,075,361 / ~162s;
+    // 128,000 -> 2,063,154 / ~362s. Gains kept growing, not plateauing, all the way up -- this value is a
+    // deliberate practicality cutoff for a lossless mode that already accepts a real RDO cost for real
+    // compression, not evidence that the underlying search itself stops improving further out; revisit if this
+    // project ever wants to trade more encode time for a smaller lossless file.
     private const int MotionSearchCoarseCandidateBudget = 32000;
 
     /// <summary>
-    /// Real (if bounded) pixel-level motion search for an IntraBC copy source, unlike
-    /// <see cref="FindApproximateIntrabcMatch"/>'s other two candidate sources (both restricted to some other
-    /// leaf's own recorded top-left position). Confirmed against libaom's own <c>av1_is_dv_valid</c>
-    /// (<c>av1/common/mvref_common.h</c>) that a real DV has no such restriction -- only whole-pixel
-    /// alignment -- so a genuinely good copy source can sit at any pixel position within the legal region,
-    /// not just where some other coding block happened to start. libaom's own real search
-    /// (<c>rd_pick_intrabc_mode_sb</c>, <c>av1/encoder/rdopt.c</c>) is a real full-pixel motion search over
-    /// the whole already-coded "above"/"left" region; this is a bounded two-phase approximation of that idea
-    /// scaled to this encoder's own performance budget: a coarse grid scan (spaced so the total candidate
-    /// count stays roughly constant regardless of frame size, not a fixed pixel step that would blow up on a
-    /// large image) using cheap SAD as the coarse metric (a full WHT-based <see cref="ComputeIntrabcLumaCost"/>
-    /// per coarse candidate would be far too slow at this candidate count), followed by a diamond-style local
-    /// refinement around the coarse winner with halving step size. Only the single final winner is ever priced
-    /// with the real WHT-based cost, by <see cref="FindApproximateIntrabcMatch"/>'s own
-    /// <c>ConsiderCandidatePixels</c> after this returns -- SAD and WHT-magnitude cost don't always agree on
-    /// which of two *close* candidates is cheaper, but do reliably agree on which region of the frame has a
-    /// genuinely similar match at all, which is what this coarse-then-refine search needs to find.
+    /// Fallback exhaustive-ish coarse-grid scan, tried alongside <see cref="FindApproximateIntrabcMatchViaMotionSearch"/>'s
+    /// own predictor-seeded diamond search -- mirrors libaom's own <c>run_mesh_search</c>/<c>force_mesh_thresh</c>
+    /// escape hatch (<c>av1/encoder/mcomp.c</c>'s <c>av1_full_pixel_search</c>), which falls back to a real
+    /// exhaustive/mesh search whenever a predictor-seeded diamond search's own result still looks weak. A
+    /// diamond search is a greedy local search: when the spatial DV predictor it starts from isn't actually
+    /// informative (the common case when few of this leaf's neighbors have used IntraBC themselves, so
+    /// <see cref="FindMvStackAndPredict"/> falls through to its own fixed "directly left"/"directly above"
+    /// default), the diamond search alone never looks anywhere else in the frame at all -- confirmed by
+    /// measurement: removing this source entirely (keeping only the predictor-seeded diamond search) dropped
+    /// real IntraBC usage on this project's own target photo from 721 to 153 leaves and grew the file, despite
+    /// the diamond search itself being a more faithful match to libaom's real starting-point/step logic. This
+    /// restores the original coarse-grid-then-diamond-refine scan (spaced so the total candidate count stays
+    /// roughly constant regardless of frame size) as that same kind of broader safety net, using cheap SAD as
+    /// the coarse metric (a full WHT-based <see cref="ComputeIntrabcLumaCost"/> per coarse candidate would be
+    /// far too slow at this candidate count). Only the single final winner is ever priced with the real
+    /// WHT-based cost, by <see cref="FindApproximateIntrabcMatch"/>'s own <c>ConsiderCandidatePixels</c> after
+    /// this returns.
     /// </summary>
-    private static bool FindApproximateIntrabcMatchViaMotionSearch(TileState s, int x, int y, int sizePixels, out int bestSrcX, out int bestSrcY)
+    private static bool FindApproximateIntrabcMatchViaMeshSearch(TileState s, int x, int y, int sizePixels, out int bestSrcX, out int bestSrcY)
     {
         bestSrcX = 0;
         bestSrcY = 0;
