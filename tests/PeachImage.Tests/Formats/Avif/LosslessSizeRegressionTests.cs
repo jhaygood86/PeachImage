@@ -40,6 +40,13 @@ public class LosslessSizeRegressionTests
         using var avifStream = new MemoryStream();
         image.Save(avifStream, "avif", new AvifEncoderOptions { Lossless = true });
 
+        // Round-trips through the real decoder, not just a size check -- see
+        // GraphicContentImage_LosslessAvif_DoesNotBlowUpRelativeToSourcePng's identical assertion and its own
+        // remarks on the real decode-corruption bug this class of check has already caught once.
+        avifStream.Position = 0;
+        var decoded = Image.Load(avifStream);
+        Assert.Equal(image.GetPixelSpan().ToArray(), decoded.GetPixelSpan().ToArray());
+
         Assert.True(
             avifStream.Length < pngStream.Length,
             $"Lossless AVIF ({avifStream.Length} bytes) was not smaller than the source PNG ({pngStream.Length} bytes) for a {width}x{height} photo-like image.");
@@ -137,11 +144,34 @@ public class LosslessSizeRegressionTests
     /// happens to land slightly worse in real bytes than splitting would have for this specific synthetic
     /// content. 128x128/512x512 aren't exact 128x128-superblock multiples the same way and weren't observed
     /// to regress.</para>
+    ///
+    /// <para>256x256/512x512's thresholds were tightened sharply (5.0 -> 3.4, 4.45 -> 2.25) after fixing a
+    /// real, previously-undiscovered gap in <c>EncodeLeaf</c>'s own palette eligibility: palette was only
+    /// ever attempted when the leaf's raw, residual-only intra mode search had already picked DC_PRED as its
+    /// own winner -- but DC_PRED's flat, single-value prediction genuinely produces the *largest* raw
+    /// residual of any candidate for exactly the periodic, few-distinct-color content this fixture's solid
+    /// rectangular blocks are made of, so a directional/PAETH mode routinely won that unrelated comparison
+    /// first, silently making palette structurally unreachable for that leaf even though palette's own real
+    /// cost (an exact per-pixel index map, with no prediction-quality dependence at all) could be an order of
+    /// magnitude cheaper. Fixed by trying palette unconditionally (see <c>writtenYMode</c>/<c>writtenUvMode</c>
+    /// in <c>EncodeLeaf</c>, which override the actually-written y_mode/uv_mode to DC_PRED whenever palette's
+    /// own RD comparison wins, exactly like <c>usedIntrabc</c> already did) rather than gating the search
+    /// itself on an unrelated mode having already won. Measured on this exact fixture: 256x256 dropped from
+    /// 34,640 to 23,511 bytes (real PNG ratio 4.22 -> 2.87, a ~32% size reduction), 512x512 from 47,516 to
+    /// 29,543 bytes (ratio 3.01 -> 1.87 (net10.0) / 1.80 (net8.0), a ~38% reduction); 128x128 barely moved
+    /// (19,366 -> 19,271, ratio 3.50 -> 3.48 (net10.0) / 3.53 (net8.0)) since this fixture's smaller cell
+    /// pattern rarely triggers the same non-DC_PRED-wins-the-raw-comparison scenario at that size. New
+    /// thresholds keep the same real-PNG-compression-variance headroom discipline as the rest of this
+    /// comment (measured both net8.0 and net10.0 PNG sizes directly rather than estimating one from the
+    /// other, then added ~15-20% margin above the worse of the two measured ratios per size) rather than
+    /// leaving them at their old, now-enormously-loose values just because the test still technically passed.
+    /// 128x128's threshold is unchanged (4.05 already sat close to its own measured ratio either way, and
+    /// this size barely moved).</para>
     /// </summary>
     [Theory]
     [InlineData(128, 128, 4.05)]
-    [InlineData(256, 256, 5.0)]
-    [InlineData(512, 512, 4.45)]
+    [InlineData(256, 256, 3.4)]
+    [InlineData(512, 512, 2.25)]
     public void GraphicContentImage_LosslessAvif_DoesNotBlowUpRelativeToSourcePng(int width, int height, double maxRatio)
     {
         using var image = CreateGraphicContentImage(width, height, seed: 42);
@@ -151,6 +181,15 @@ public class LosslessSizeRegressionTests
 
         using var avifStream = new MemoryStream();
         image.Save(avifStream, "avif", new AvifEncoderOptions { Lossless = true });
+
+        // Round-trips through the real decoder, not just a size check: this fixture is the only one in this
+        // class that regularly exercises IntraBC/palette (screen-content-style content), and a real,
+        // reproducible decode-corruption bug in an IntraBC candidate search (a geometrically-legal-but-not-
+        // yet-actually-encoded source slipping past the search's own causality check) was found via exactly
+        // this assertion -- see Av1TileEncoder.IsSourceFootprintWritten's own remarks.
+        avifStream.Position = 0;
+        var decoded = Image.Load(avifStream);
+        Assert.Equal(image.GetPixelSpan().ToArray(), decoded.GetPixelSpan().ToArray());
 
         Assert.True(
             avifStream.Length < pngStream.Length * maxRatio,

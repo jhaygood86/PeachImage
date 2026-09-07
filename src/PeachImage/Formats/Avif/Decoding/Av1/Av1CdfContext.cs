@@ -99,6 +99,64 @@ internal sealed class Av1CdfContext
     public readonly ushort[][] MvSign = [Clone(Av1CdfTables.DefaultMvSign), Clone(Av1CdfTables.DefaultMvSign)];
     public readonly ushort[][][] MvBit = [Clone(Av1CdfTables.DefaultMvBit), Clone(Av1CdfTables.DefaultMvBit)];
 
+    /// <summary>
+    /// Overwrites this context's coefficient-related tables (<see cref="TxbSkip"/>, <see cref="EobPt16"/>/
+    /// <see cref="EobPt32"/>/<see cref="EobPt64"/>/<see cref="EobPt128"/>/<see cref="EobPt256"/>/
+    /// <see cref="EobPt512"/>/<see cref="EobPt1024"/>, <see cref="EobExtra"/>, <see cref="DcSign"/>,
+    /// <see cref="CoeffBaseEob"/>, <see cref="CoeffBase"/>, <see cref="CoeffBr"/> -- the exact set
+    /// <c>Av1CoefficientWriter.WriteCoeffs</c> reads) with <paramref name="other"/>'s current values,
+    /// in place -- never reallocating any array, only copying elements, so this is safe to call once per RD
+    /// candidate without allocating. Every OTHER table (partition/mode/palette/MV/etc.) is deliberately left
+    /// untouched: nothing outside coefficient coding ever reads a <see cref="Av1CdfContext"/> used this way
+    /// (see <c>Av1TileEncoder.TileState.ScratchCdf</c>'s own remarks for the one call site that needs this),
+    /// so copying them would be pure waste. Requires <paramref name="other"/> to have been constructed with
+    /// the same <c>baseQIdx</c>-derived shape as this instance (both this project's own two constructions
+    /// always are, see <c>Av1TileEncoder.EncodeTile</c>'s <c>ScratchCdf</c> initializer) -- a shape mismatch
+    /// would throw, not silently corrupt, since every copy below is a same-length array copy.
+    /// </summary>
+    public void CopyFrom(Av1CdfContext other)
+    {
+        Copy(TxbSkip, other.TxbSkip);
+        Copy(EobPt16, other.EobPt16);
+        Copy(EobPt32, other.EobPt32);
+        Copy(EobPt64, other.EobPt64);
+        Copy(EobPt128, other.EobPt128);
+        Copy(EobPt256, other.EobPt256);
+        Copy(EobPt512, other.EobPt512);
+        Copy(EobPt1024, other.EobPt1024);
+        Copy(EobExtra, other.EobExtra);
+        Copy(DcSign, other.DcSign);
+        Copy(CoeffBaseEob, other.CoeffBaseEob);
+        Copy(CoeffBase, other.CoeffBase);
+        Copy(CoeffBr, other.CoeffBr);
+    }
+
+    private static void Copy(ushort[] dest, ushort[] source) => Array.Copy(source, dest, source.Length);
+
+    private static void Copy(ushort[][] dest, ushort[][] source)
+    {
+        for (int i = 0; i < source.Length; i++)
+        {
+            Copy(dest[i], source[i]);
+        }
+    }
+
+    private static void Copy(ushort[][][] dest, ushort[][][] source)
+    {
+        for (int i = 0; i < source.Length; i++)
+        {
+            Copy(dest[i], source[i]);
+        }
+    }
+
+    private static void Copy(ushort[][][][] dest, ushort[][][][] source)
+    {
+        for (int i = 0; i < source.Length; i++)
+        {
+            Copy(dest[i], source[i]);
+        }
+    }
+
     private static ushort[] Clone(ushort[] source) => (ushort[])source.Clone();
 
     private static ushort[][] Clone(ushort[][] source)

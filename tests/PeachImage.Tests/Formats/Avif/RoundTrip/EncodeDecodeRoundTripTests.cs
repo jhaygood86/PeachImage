@@ -128,6 +128,55 @@ public class EncodeDecodeRoundTripTests
     }
 
     /// <summary>
+    /// Frame-size-padding regression coverage: neither dimension is a multiple of the lossless encoder's
+    /// 128x128 superblock, so <c>Av1FrameEncoder</c> signals the bitstream's own <c>frame_width</c>/
+    /// <c>frame_height</c> as the true 100x100 size while the internal working canvas still pads to
+    /// 128x128 -- exactly the gap between <c>TileState.TrueMiCols</c>/<c>TrueMiRows</c> (the real, unpadded
+    /// mi bounds a real decoder computes) and <c>TileState.MiCols</c>/<c>MiRows</c> (this encoder's own
+    /// padded working-canvas bounds) that <c>ComputeDecidePartition</c>'s <c>hasRows</c>/<c>hasCols</c>
+    /// restriction and its own additional "never commit an overhanging leaf" fit checks exist to close. Also
+    /// a genuinely non-8-pixel-multiple width/height (100 isn't a multiple of 8), stressing spec's own
+    /// <c>MiCols = 2 * ((width + 7) &gt;&gt; 3)</c> rounding (104, 4 px short of the padded canvas) on top of
+    /// the coarser 128px superblock rounding.
+    /// </summary>
+    [Fact]
+    public void Rgb24SolidColor_NonSuperblockMultiple_Lossless_RoundTripsExactly()
+    {
+        var source = CreateSolidColorImage(100, 100, 180, 90, 40);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Lossless = true });
+
+        Assert.Equal(source.GetPixelSpan().ToArray(), decoded.GetPixelSpan().ToArray());
+    }
+
+    /// <summary>Gradient counterpart to <see cref="Rgb24SolidColor_NonSuperblockMultiple_Lossless_RoundTripsExactly"/>, non-square (150x100) so width and height overhang the true frame edge by different amounts.</summary>
+    [Fact]
+    public void Rgb24Gradient_NonSuperblockMultiple_Lossless_RoundTripsExactly()
+    {
+        var source = CreateGradientImage(150, 100);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Lossless = true });
+
+        Assert.Equal(source.GetPixelSpan().ToArray(), decoded.GetPixelSpan().ToArray());
+    }
+
+    /// <summary>
+    /// Odd (non-multiple-of-4) dimensions in both directions -- 129x129 -- so even the true frame's own mi
+    /// rounding (<c>MiCols = 2 * ((129 + 7) &gt;&gt; 3) = 34</c>, 136px, 7px of pixel-level overhang past the
+    /// true 129px width) combines with the coarser 128-superblock overhang this fixture's dimensions also
+    /// trigger (129 needs a second, mostly out-of-frame superblock).
+    /// </summary>
+    [Fact]
+    public void Rgb24SolidColor_OddDimensions_Lossless_RoundTripsExactly()
+    {
+        var source = CreateSolidColorImage(129, 129, 12, 200, 77);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Lossless = true });
+
+        Assert.Equal(source.GetPixelSpan().ToArray(), decoded.GetPixelSpan().ToArray());
+    }
+
+    /// <summary>
     /// Correctness check for lossless mode's partition-tree RDO (<c>Av1TileEncoder.ShouldKeepAsLeaf</c>):
     /// half the image is a flat solid color (eligible to collapse into one big leaf at every partition
     /// level up to 64x64) and the other half is a gradient (forces normal splitting all the way to 8x8,
@@ -528,6 +577,27 @@ public class EncodeDecodeRoundTripTests
     public void Rgb24Gradient_Lossless_RoundTripsExactly()
     {
         var source = CreateGradientImage(48, 32);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Lossless = true });
+
+        Assert.Equal(source.GetPixelSpan().ToArray(), decoded.GetPixelSpan().ToArray());
+    }
+
+    /// <summary>
+    /// Regression guard for a real crash found via the project's own harness, not this suite: a full 128x128
+    /// (2x2 grid of 64x64 regions) lossless, non-screen-content image is exactly the smallest size at which
+    /// <see cref="Av1TileEncoder.ComputeDecidePartition"/>'s own <c>sizeMi == 32</c> top level recurses into
+    /// *more than one* 64x64 region, each needing its own independently-reset
+    /// <c>Av1IntraCnnPartitionPruner</c> quad-tree index (mirroring libaom's own <c>quad_tree_idx = 0</c> reset
+    /// at every 64x64 node's own entry) -- every pre-existing round-trip fixture in this file uses dimensions
+    /// too small to ever reach a second 64x64 region, so none of them exercised the specific bug (an
+    /// <see cref="IndexOutOfRangeException"/> from an incorrectly-inherited, non-zero quad-tree index) this
+    /// guards against.
+    /// </summary>
+    [Fact]
+    public void Rgb24Gradient128x128_Lossless_RoundTripsExactly()
+    {
+        var source = CreateGradientImage(128, 128);
 
         var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Lossless = true });
 

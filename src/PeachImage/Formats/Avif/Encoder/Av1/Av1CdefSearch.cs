@@ -198,7 +198,19 @@ internal static class Av1CdefSearch
             PlaneHeights = u is null ? [height, 0, 0] : [height, chromaHeight, chromaHeight],
             StoppedAtResidual = false,
             YModes = [],
+            UvModes = [],
             MiSizes = [],
+            PaletteSizesY = [],
+            PaletteSizesUV = [],
+            PaletteColorsYGrid = [],
+            PaletteColorsUGrid = [],
+            IsInters = [],
+            MvRowsGrid = [],
+            MvColsGrid = [],
+            AngleDeltaYGrid = [],
+            AngleDeltaUvGrid = [],
+            UseFilterIntraGrid = [],
+            FilterIntraModeGrid = [],
 
             // CDEF bypasses an 8x8 unit only when it and its 3 neighbor mi positions are *all* skip (spec
             // §7.15.1) -- this encoder's non-lossless leaves never set Skips at all (that flag only ever

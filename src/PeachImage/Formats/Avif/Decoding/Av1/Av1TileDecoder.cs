@@ -66,6 +66,15 @@ internal sealed class Av1TileDecoder
     private readonly int[] _mvColsGrid;
     private readonly bool[] _written;
 
+    // Frame-sized angle_delta/filter_intra neighbor context, for the Phase 1 structural decision-log
+    // diffing tool (tools/PeachImage.LibaomParity) only -- no in-loop decode logic reads these, unlike the
+    // grids above (which real neighbor-context derivation genuinely depends on). Same redundant-write
+    // convention as _yModes/_miSizes.
+    private readonly int[] _angleDeltaYGrid;
+    private readonly int[] _angleDeltaUvGrid;
+    private readonly bool[] _useFilterIntraGrid;
+    private readonly int[] _filterIntraModeGrid;
+
     // Frame-sized reconstructed pixel planes (spec's CurrFrame), shared across every tile of the frame --
     // safe for the same reason the neighbor-context arrays above are: every read this decoder performs
     // either targets already-reconstructed positions (raster decode order) or is gated by AvailU/AvailL
@@ -262,7 +271,11 @@ internal sealed class Av1TileDecoder
         int[] cdefIdx,
         int[][] loopfilterTxSizes,
         int[] loopfilterTxSizeStrides,
-        Av1RestorationUnitGrid?[] restorationUnits)
+        Av1RestorationUnitGrid?[] restorationUnits,
+        int[] angleDeltaYGrid,
+        int[] angleDeltaUvGrid,
+        bool[] useFilterIntraGrid,
+        int[] filterIntraModeGrid)
     {
         _s = symbols;
         _cdf = cdf;
@@ -296,6 +309,10 @@ internal sealed class Av1TileDecoder
         _loopfilterTxSizes = loopfilterTxSizes;
         _loopfilterTxSizeStrides = loopfilterTxSizeStrides;
         _restorationUnits = restorationUnits;
+        _angleDeltaYGrid = angleDeltaYGrid;
+        _angleDeltaUvGrid = angleDeltaUvGrid;
+        _useFilterIntraGrid = useFilterIntraGrid;
+        _filterIntraModeGrid = filterIntraModeGrid;
 
         for (int plane = 0; plane < 3; plane++)
         {
@@ -852,6 +869,10 @@ internal sealed class Av1TileDecoder
                 _mvRowsGrid[idx] = _mvRow;
                 _mvColsGrid[idx] = _mvCol;
                 _written[idx] = true;
+                _angleDeltaYGrid[idx] = _angleDeltaY;
+                _angleDeltaUvGrid[idx] = _angleDeltaUv;
+                _useFilterIntraGrid[idx] = _useFilterIntra;
+                _filterIntraModeGrid[idx] = _filterIntraMode;
             }
         }
 

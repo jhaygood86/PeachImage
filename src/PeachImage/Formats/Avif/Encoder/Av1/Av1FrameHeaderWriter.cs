@@ -72,7 +72,26 @@ internal static class Av1FrameHeaderWriter
     /// (never written) whenever <paramref name="enableCdef"/> is <see langword="false"/> or
     /// <paramref name="lossless"/> is <see langword="true"/>.
     /// </param>
-    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false, int loopFilterLevel = 0, bool enableCdef = false, Av1CdefChoice? cdef = null)
+    /// <param name="allowScreenContentTools">
+    /// <c>allow_screen_content_tools</c> -- real, content-based decision
+    /// (<see cref="Av1ScreenContentEstimator"/>) for whether palette mode is structurally present in this
+    /// frame's bitstream. The one caller only ever computes a real estimate when <paramref name="lossless"/>
+    /// is <see langword="true"/> (this encoder's palette support is lossless-only); defaults to
+    /// <see langword="false"/>, matching this method's pre-estimator behavior.
+    /// </param>
+    /// <param name="allowIntrabc">
+    /// <c>allow_intrabc</c> -- a real decision computed separately from
+    /// <paramref name="allowScreenContentTools"/> (<c>Av1TileEncoder.TileState.AllowIntrabc</c>'s remarks
+    /// explain why these genuinely decouple in practice). Only meaningful (read at all) when
+    /// <paramref name="allowScreenContentTools"/> is also <see langword="true"/>.
+    /// </param>
+    /// <param name="reducedTxSet">
+    /// <c>reduced_tx_set</c> -- spec-provably inert whenever <paramref name="lossless"/> (tx_type is never
+    /// read from the bitstream at coded-lossless at all), so the one caller passes <see langword="false"/>
+    /// there to match real encoders' own observed choice. Defaults to <see langword="true"/>, this method's
+    /// pre-existing (and, for non-lossless, still unverified-safe-to-change) hardcoded value.
+    /// </param>
+    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false, int loopFilterLevel = 0, bool enableCdef = false, Av1CdefChoice? cdef = null, bool allowScreenContentTools = false, bool allowIntrabc = false, bool reducedTxSet = true)
     {
         var cdefChoice = cdef ?? Av1CdefChoice.Off;
         if (lossless)
@@ -87,15 +106,14 @@ internal static class Av1FrameHeaderWriter
             throw new ArgumentOutOfRangeException(nameof(baseQIdx), baseQIdx, "base_q_idx must be in [1, 255] when lossless is false -- 0 would silently trigger AV1's coded-lossless path.");
         }
 
-        // allow_screen_content_tools is set whenever (and only whenever) this frame is lossless -- palette
-        // mode (Av1TileEncoder.TryEncodePalette) is only ever attempted in lossless leaves, and this is the
-        // single frame-level gate that lets a decoder's palette_mode_info() read anything at all. Tying it
-        // to lossless rather than running a real two-pass "did any leaf actually use palette" check costs
-        // at most one wasted header bit (and, per leaf, one always-false has_palette_y/has_palette_uv
-        // symbol) on a lossless frame that ends up not using palette anywhere -- negligible next to the
-        // savings on the frames this is actually for.
-        bool allowScreenContentTools = lossless;
-
+        // allow_screen_content_tools: the single frame-level gate that lets a decoder's palette_mode_info()/
+        // use_intrabc read anything at all. Caller (Av1FrameEncoder.Encode) computes this from real content
+        // analysis (Av1ScreenContentEstimator, a faithful port of libaom's own estimate_screen_content) rather
+        // than the old "always on whenever lossless" shortcut -- confirmed via this project's own libaom
+        // byte-exact comparison harness that real encoders make this a genuine per-frame content decision,
+        // not an unconditional lossless-implies-on rule (a 128x128 solid-color test frame: aomenc leaves both
+        // this and allow_intrabc off entirely). Always false when !lossless (the one caller never computes a
+        // real estimate otherwise), matching this encoder's palette/IntraBC support being lossless-only.
         writer.WriteFlag(false); // disable_cdf_update -- CDF adaptation is active during encode
         writer.WriteFlag(allowScreenContentTools); // allow_screen_content_tools
 
@@ -116,13 +134,12 @@ internal static class Av1FrameHeaderWriter
         if (allowScreenContentTools)
         {
             // allow_intrabc is only read when allowScreenContentTools && upscaledWidth == frameWidth (always
-            // true here -- this encoder never uses superres). Tied to lossless the same "always on, let
-            // per-leaf RDO decide" way allowScreenContentTools itself is (see its own remarks above) --
-            // Av1TileEncoder.EncodeLeaf only ever actually uses IntraBC when it finds an exact-pixel-match
-            // copy source (see FindIntrabcMatch), so a lossless frame with no such match anywhere just pays
-            // the same one-header-bit-plus-per-leaf-use_intrabc-bit cost allowScreenContentTools already
-            // does for palette.
-            writer.WriteFlag(true); // allow_intrabc
+            // true here -- this encoder never uses superres). A real, separately-computed decision
+            // (Av1ScreenContentEstimator), not automatically true whenever allowScreenContentTools is --
+            // confirmed via this project's own libaom byte-exact comparison harness that these genuinely
+            // decouple in practice (a checkerboard test frame: real encoders enable palette but leave IntraBC
+            // off, since its own stricter high-variance threshold isn't met).
+            writer.WriteFlag(allowIntrabc);
         }
 
         var tileInfo = Av1TileInfoWriter.Write(writer, miCols, miRows, use128x128Superblock: lossless);
@@ -161,11 +178,12 @@ internal static class Av1FrameHeaderWriter
         }
 
         // cdef_params() is read whenever seq.EnableCdef && !codedLossless && !allowIntrabc (see
-        // Av1FrameHeader.ParseCdefParams). allowIntrabc is itself always tied to lossless for this encoder
-        // (AllowIntrabc = AllowScreenContentTools = lossless, see above), so the only additional condition
-        // beyond !lossless (which loop_filter_params() already gates on) is enableCdef itself -- see that
-        // parameter's own remarks for why this can't just assume enableCdef == !lossless the way AllowIntrabc
-        // safely can.
+        // Av1FrameHeader.ParseCdefParams). !codedLossless (i.e. !lossless) alone already makes this false for
+        // any lossless frame regardless of allowIntrabc's own (now independently-computed, see
+        // Av1TileEncoder.EncodeTile's allowIntrabc parameter) value -- allowIntrabc is only ever true when
+        // lossless is, never the reverse, so it can never flip this condition on its own. The only additional
+        // condition beyond !lossless is enableCdef itself -- see that parameter's own remarks for why this
+        // can't just assume enableCdef == !lossless.
         bool cdefParamsPresent = !lossless && enableCdef;
         var writtenCdef = cdefParamsPresent ? cdefChoice : Av1CdefChoice.Off;
         if (cdefParamsPresent)
@@ -183,19 +201,31 @@ internal static class Av1FrameHeaderWriter
             writer.WriteFlag(false); // tx_mode_select -> TX_MODE_LARGEST
         }
 
-        writer.WriteFlag(true); // reduced_tx_set
+        // reduced_tx_set is spec-provably inert for lossless: tx_type is never read from the bitstream at
+        // coded-lossless at all (spec forces WHT_WHT unconditionally, see Av1TileDecoder's own lossless
+        // branch), so this bit can never affect how any symbol is interpreted there -- confirmed via this
+        // project's own libaom byte-exact comparison harness that real encoders signal it false for lossless
+        // (both a solid-color and a checkerboard test frame). Left true for non-lossless (this encoder's own
+        // tx-type search doesn't consult ReducedTxSet at all when choosing what to write, so flipping it there
+        // without first verifying the decoder's reduced-vs-full symbol/CDF table selection still matches would
+        // be a real risk, not a proven-inert cleanup like this one).
+        writer.WriteFlag(reducedTxSet); // reduced_tx_set
         // film_grain_params_present == false short-circuits the apply_grain bit -- no bit read/written.
 
-        // trailing_bits() -- mandatory OBU padding (a stop bit, then zero bits out to the byte boundary),
-        // matching Av1SequenceHeaderWriter.Write's own call and its remarks on why this is required even
-        // when the preceding content already lands on a byte boundary: trailing_bits() always writes at
-        // least one bit, so skipping it isn't just "redundant padding" whenever there happens to be zero
-        // bits' worth of slack left -- it desyncs a real decoder by exactly the bits this OBU's declared
-        // size then falls short of. This previously went unnoticed because every prior configuration
-        // (lossy, or any frame with chroma) always had a few bits of incidental padding entropy to absorb
-        // the gap; a monochrome lossless frame header is short enough to land exactly byte-aligned with
-        // none, which is what exposed the missing call (real decoders overran the OBU trying to read it).
-        writer.WriteTrailingBits();
+        // byte_alignment() (spec §5.3.5, plain zero-bit padding to the next byte boundary -- writes NOTHING
+        // when already aligned), not trailing_bits() (§5.3.4, which always writes at least one bit, a full
+        // spurious extra 0x80 byte when already aligned). This frame header is always embedded in a combined
+        // OBU_FRAME (Av1FrameEncoder.Encode: frame_header_obu() + byte_alignment() + tile_group_obu(sz), all
+        // in one OBU, matching real encoders' own --obu output) rather than written as its own standalone
+        // OBU_FRAME_HEADER -- per spec's frame_obu(), the step between the header and the tile group data is
+        // explicitly byte_alignment(), not trailing_bits() (that generic OBU-wrapper-level call only applies
+        // to a standalone OBU_FRAME_HEADER/OBU_REDUNDANT_FRAME_HEADER, which this encoder no longer emits).
+        // Using trailing_bits() here after switching to the combined OBU_FRAME form silently wrote one
+        // spurious extra byte whenever the header happened to land already byte-aligned, shifting the tile
+        // group's real start by a full byte and corrupting every entropy-coded bit read after it -- exactly
+        // the kind of divergence real interop depends on getting right, not just this project's own decoder
+        // (which -- like the header's own Av1FrameHeader.Parse -- reads a plain byte_alignment() here too).
+        writer.ByteAlign();
 
         return new Av1FrameHeader
         {
@@ -207,7 +237,7 @@ internal static class Av1FrameHeaderWriter
             MiCols = miCols,
             MiRows = miRows,
             AllowScreenContentTools = allowScreenContentTools,
-            AllowIntrabc = allowScreenContentTools,
+            AllowIntrabc = allowIntrabc,
             BaseQIdx = baseQIdx,
             DeltaQYDc = 0,
             DeltaQUDc = 0,
@@ -260,7 +290,7 @@ internal static class Av1FrameHeaderWriter
                 UnitSize = [0, 0, 0],
             },
             TxMode = lossless ? Av1FrameHeader.OnlyTx4x4 : Av1FrameHeader.TxModeLargest,
-            ReducedTxSet = true,
+            ReducedTxSet = reducedTxSet,
             TileInfo = tileInfo,
             DisableCdfUpdate = false,
         };
