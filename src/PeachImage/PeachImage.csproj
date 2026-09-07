@@ -24,6 +24,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="PeachImage.Tests" />
     <InternalsVisibleTo Include="PeachImage.Benchmarks" />
+    <InternalsVisibleTo Include="PeachImage.LibaomParity" />
   </ItemGroup>
 
   <ItemGroup>

@@ -153,7 +153,7 @@ internal static class AvifContainerWriter
     private static byte[] BuildIprp(Av1EncodedFrame frame, Av1EncodedFrame? alphaFrame)
     {
         byte[] ispe = BuildIspe(frame.Width, frame.Height);
-        byte[] av1C = BuildAv1Config(frame.MonoChrome, frame.Chroma444);
+        byte[] av1C = BuildAv1Config(frame.MonoChrome, frame.Chroma444, frame.SeqLevelIdx);
         byte[] pixi = BuildPixi(frame.MonoChrome);
 
         if (alphaFrame is null)
@@ -167,7 +167,7 @@ internal static class AvifContainerWriter
         // alpha item and always takes the assembled image's width/height from the color item, so an alpha
         // ispe would be redundant (this mirrors this repo's own decoder tolerance, not a spec requirement
         // this encoder needs to lean on for interop -- real decoders are expected to do the same fallback).
-        byte[] alphaAv1C = BuildAv1Config(monoChrome: true, chroma444: false);
+        byte[] alphaAv1C = BuildAv1Config(monoChrome: true, chroma444: false, alphaFrame.SeqLevelIdx);
         byte[] alphaPixi = BuildPixi(monoChrome: true);
         byte[] auxC = AvifAuxCBox.Build();
         byte[] ipcoWithAlpha = AvifBoxWriter.Box("ipco", ispe, av1C, pixi, alphaAv1C, alphaPixi, auxC);
@@ -207,12 +207,12 @@ internal static class AvifContainerWriter
     /// wouldn't be caught by this repo's round-trip tests -- it still matters for spec conformance and for
     /// any other tool that trusts <c>av1C</c> for fast subsampling probing without a full bitstream parse.
     /// </summary>
-    private static byte[] BuildAv1Config(bool monoChrome, bool chroma444)
+    private static byte[] BuildAv1Config(bool monoChrome, bool chroma444, int seqLevelIdx)
     {
         int seqProfile = chroma444 ? Av1SequenceHeaderWriter.SeqProfileChroma444 : Av1SequenceHeaderWriter.SeqProfile;
         var payload = new byte[4];
         payload[0] = (byte)(0x80 | 1); // marker=1, version=1
-        payload[1] = (byte)(((seqProfile & 0x7) << 5) | (Av1SequenceHeaderWriter.SeqLevelIdx0 & 0x1F));
+        payload[1] = (byte)(((seqProfile & 0x7) << 5) | (seqLevelIdx & 0x1F));
         int b2 = 0; // seq_tier0=0, high_bitdepth=0 (8-bit), twelve_bit=0
         if (monoChrome)
         {

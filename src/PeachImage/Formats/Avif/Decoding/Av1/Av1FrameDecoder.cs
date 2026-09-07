@@ -39,11 +39,41 @@ internal sealed class Av1FrameDecodeResult
     /// <summary>Per-mi-position mode/skip/segment neighbor state (flat <c>[row * Frame.MiCols + col]</c>), consumed by the in-loop filter passes.</summary>
     public required int[] YModes { get; init; }
 
+    /// <summary>Per-mi-position chroma mode (<c>UV_PREDICTION_MODE</c>), redundantly written across every mi cell a block covers -- same convention as <see cref="YModes"/>.</summary>
+    public required int[] UvModes { get; init; }
+
     public required int[] MiSizes { get; init; }
 
     public required bool[] Skips { get; init; }
 
     public required int[] SegmentIds { get; init; }
+
+    /// <summary>Per-mi-position luma/chroma palette size (0 = no palette), redundantly written across every mi cell a block covers -- see <see cref="Av1TileDecoder"/>'s own palette-neighbor-context remarks.</summary>
+    public required int[] PaletteSizesY { get; init; }
+
+    public required int[] PaletteSizesUV { get; init; }
+
+    /// <summary>Per-mi-position palette color table, flat <c>[(row * Frame.MiCols + col) * 8 + slot]</c> -- only the first <see cref="PaletteSizesY"/>/<see cref="PaletteSizesUV"/> entries at a given position are meaningful.</summary>
+    public required int[] PaletteColorsYGrid { get; init; }
+
+    public required int[] PaletteColorsUGrid { get; init; }
+
+    /// <summary>Per-mi-position IntraBC usage/displacement-vector (1/8th-luma-sample units) -- see <see cref="Av1TileDecoder"/>'s own remarks on why <see cref="IsInters"/> is only ever true for an IntraBC block in this decoder.</summary>
+    public required bool[] IsInters { get; init; }
+
+    public required int[] MvRowsGrid { get; init; }
+
+    public required int[] MvColsGrid { get; init; }
+
+    /// <summary>Per-mi-position luma/chroma angle_delta (spec's <c>MAX_ANGLE_DELTA</c>-centered range), redundantly written across every mi cell a block covers -- 0 whenever the winning mode isn't directional or angle_delta isn't signaled at this block's size.</summary>
+    public required int[] AngleDeltaYGrid { get; init; }
+
+    public required int[] AngleDeltaUvGrid { get; init; }
+
+    /// <summary>Per-mi-position filter_intra usage/sub-mode, redundantly written across every mi cell a block covers -- <see cref="UseFilterIntraGrid"/> is only ever true when <see cref="YModes"/> at that position is <c>DC_PRED</c>.</summary>
+    public required bool[] UseFilterIntraGrid { get; init; }
+
+    public required int[] FilterIntraModeGrid { get; init; }
 
     /// <summary>Per-mi-position <c>DeltaLF</c> snapshot at block-decode time (spec's <c>DeltaLFs[row][col][i]</c>), one flat <c>[row * Frame.MiCols + col]</c> array per of the 4 <c>FRAME_LF_COUNT</c> slots.</summary>
     public required int[][] DeltaLfs { get; init; }
@@ -150,6 +180,10 @@ internal static class Av1FrameDecoder
         var mvRowsGrid = new int[frameSize];
         var mvColsGrid = new int[frameSize];
         var written = new bool[frameSize];
+        var angleDeltaYGrid = new int[frameSize];
+        var angleDeltaUvGrid = new int[frameSize];
+        var useFilterIntraGrid = new bool[frameSize];
+        var filterIntraModeGrid = new int[frameSize];
 
         // Reconstructed-plane buffers are allocated to the superblock-aligned canvas, not just
         // MiCols*4/MiRows*4: a coding/transform block chosen by decode_partition() is only guaranteed to
@@ -252,7 +286,8 @@ internal static class Av1FrameDecoder
                 paletteSizesY, paletteSizesUV, paletteColorsYGrid, paletteColorsUGrid,
                 isInters, mvRowsGrid, mvColsGrid, written,
                 planes, planeWidths, planeHeights,
-                deltaLfs, cdefIdx, loopfilterTxSizes, loopfilterTxSizeStrides, restorationUnits);
+                deltaLfs, cdefIdx, loopfilterTxSizes, loopfilterTxSizeStrides, restorationUnits,
+                angleDeltaYGrid, angleDeltaUvGrid, useFilterIntraGrid, filterIntraModeGrid);
 
             tileDecoder.DecodeTile();
 
@@ -273,6 +308,7 @@ internal static class Av1FrameDecoder
             PlaneWidths = planeWidths,
             PlaneHeights = planeHeights,
             YModes = yModes,
+            UvModes = uvModes,
             MiSizes = miSizes,
             Skips = skips,
             SegmentIds = segmentIds,
@@ -281,6 +317,17 @@ internal static class Av1FrameDecoder
             LoopfilterTxSizeStrides = loopfilterTxSizeStrides,
             CdefIdx = cdefIdx,
             RestorationUnits = restorationUnits,
+            PaletteSizesY = paletteSizesY,
+            PaletteSizesUV = paletteSizesUV,
+            PaletteColorsYGrid = paletteColorsYGrid,
+            PaletteColorsUGrid = paletteColorsUGrid,
+            IsInters = isInters,
+            MvRowsGrid = mvRowsGrid,
+            MvColsGrid = mvColsGrid,
+            AngleDeltaYGrid = angleDeltaYGrid,
+            AngleDeltaUvGrid = angleDeltaUvGrid,
+            UseFilterIntraGrid = useFilterIntraGrid,
+            FilterIntraModeGrid = filterIntraModeGrid,
         };
 
         Av1DeblockingFilter.Apply(result);
