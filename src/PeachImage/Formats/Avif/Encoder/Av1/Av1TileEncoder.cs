@@ -40,6 +40,30 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// </summary>
 internal static class Av1TileEncoder
 {
+    /// <summary>
+    /// Two-pass tile-encoder architecture, Stage 1b-ii (Round N+60 root-cause fix) -- the real, "currently
+    /// live" per-plane coefficient context a SEARCH/cost-estimation call should seed its own scratch trial
+    /// from, phase-aware. <see cref="TileState.YCoeffCtx"/>/<see cref="TileState.UCoeffCtx"/>/
+    /// <see cref="TileState.VCoeffCtx"/> only ever advance via real, bitstream-emitting commits (correctly
+    /// suppressed for the whole <see cref="Av1EncodePhase.Decide"/> pass) -- reading them directly for a cost
+    /// estimate during Decide would silently see an untouched, all-default context for every leaf after the
+    /// very first, rather than the real accumulated context every earlier leaf's own decide-tracked commit
+    /// already produced in <see cref="TileState.DecideYCoeffCtx"/>/etc. During <see cref="Av1EncodePhase.Fused"/>
+    /// and <see cref="Av1EncodePhase.Emit"/>, the real contexts are exactly what's live (real commits happen
+    /// in both), so this is a genuine no-op there -- only <see cref="Av1EncodePhase.Decide"/> needs the
+    /// substitution. Never used at an actual <c>WriteCoeffs</c> commit call site (real commits always target
+    /// <see cref="TileState.YCoeffCtx"/> directly, decide-tracking commits always target
+    /// <see cref="TileState.DecideYCoeffCtx"/> directly -- both already correct, unconditional on phase, since
+    /// each commit call is itself already gated to only fire in its own matching phase).
+    /// </summary>
+    private static Av1CoefficientWriter.PlaneContext LiveYCoeffCtx(TileState s) => s.Phase == Av1EncodePhase.Decide ? s.DecideYCoeffCtx : s.YCoeffCtx;
+
+    /// <summary>See <see cref="LiveYCoeffCtx"/>'s own remarks -- the U-plane counterpart.</summary>
+    private static Av1CoefficientWriter.PlaneContext LiveUCoeffCtx(TileState s) => s.Phase == Av1EncodePhase.Decide ? s.DecideUCoeffCtx! : s.UCoeffCtx!;
+
+    /// <summary>See <see cref="LiveYCoeffCtx"/>'s own remarks -- the V-plane counterpart.</summary>
+    private static Av1CoefficientWriter.PlaneContext LiveVCoeffCtx(TileState s) => s.Phase == Av1EncodePhase.Decide ? s.DecideVCoeffCtx! : s.VCoeffCtx!;
+
     // All 13 luma intra modes (everything but the chroma-only UV_CFL_PRED) -- Phase D's directional +
     // angle_delta search (see EncodeLeaf) tries every one of the 8 directional modes at every one of AV1's
     // 7 angle_delta values (-3..3, spec MAX_ANGLE_DELTA), not just angle_delta == 0 as this encoder did
@@ -268,6 +292,212 @@ internal static class Av1TileEncoder
         int[]? uPlane, int[]? vPlane, int chromaWidth, int chromaHeight,
         int[] reconY, int[]? reconU, int[]? reconV,
         bool monoChrome, int baseQIdx, bool lossless = false, bool chroma444 = false, int effort = 2, bool allowScreenContentTools = false, bool allowIntrabc = false, int trueWidth = 0, int trueHeight = 0, Action<Av1BlockDecisionRecord>? onLeafCommitted = null)
+    {
+        var state = BuildTileState(yPlane, yWidth, yHeight, uPlane, vPlane, chromaWidth, chromaHeight, reconY, reconU, reconV, monoChrome, baseQIdx, lossless, chroma444, effort, allowScreenContentTools, allowIntrabc, trueWidth, trueHeight, onLeafCommitted);
+
+        try
+        {
+            // Superblock size: 128x128 (sizeMi 32) for lossless, matching Av1SequenceHeaderWriter's
+            // use_128x128_superblock signaling (always exactly lossless -- see its own remarks) and
+            // Av1FrameEncoder's matching 128-pixel-multiple padding; 64x64 (sizeMi 16) otherwise, this
+            // encoder's original, still-current non-lossless configuration.
+            int sbSizeMi = lossless ? 32 : 16;
+            for (int r = 0; r < state.MiRows; r += sbSizeMi)
+            {
+                for (int c = 0; c < state.MiCols; c += sbSizeMi)
+                {
+                    // Real port of libaom's av1_set_cost_upd_freq (see TileState.CostCdf's own remarks):
+                    // every RD-search cost estimate for this superblock -- partition-type comparison and
+                    // every leaf's own real mode search alike -- reads this frozen snapshot, taken here,
+                    // once, reflecting everything committed by every earlier superblock but nothing from
+                    // this one yet (nothing below mutates Cdf until a leaf is actually committed).
+                    //
+                    // Two-pass tile-encoder architecture, Stage 1b-i (see TileState.DecideCdf's own
+                    // remarks): DecideCdf refreshed from Cdf first, then CostCdf from DecideCdf -- today a
+                    // pure pass-through (DecideCdf always exactly mirrors Cdf at this point, since decide
+                    // and commit still happen together per superblock), but this is the real plumbing
+                    // EmitTile reuses once DecideCdf's own refresh stops being a Cdf copy and becomes a
+                    // genuine, independent decide-time adaptation instead.
+                    state.DecideCdf.CopyFrom(state.Cdf);
+                    state.CostCdf.CopyFrom(state.DecideCdf);
+
+                    // Two-pass tile-encoder architecture, Stage 1b (Round N+57) -- see
+                    // TileState.CostCdfSnapshots's own remarks: an independent deep copy (not a reference),
+                    // captured here so EmitTile can re-derive this exact superblock's own CostCdf value
+                    // instead of reading DecideCdf's by-then-final, whole-frame-adapted state. Purely
+                    // additive today (this fused path never reads it back) -- kept for parity with
+                    // DecideTile below, which real EmitTile calls do consume.
+                    var costCdfSnapshot = new Av1CdfContext(baseQIdx);
+                    costCdfSnapshot.CopyFrom(state.CostCdf);
+                    state.CostCdfSnapshots.Add(costCdfSnapshot);
+
+                    ClearBlockDecodedFlags(state, r, c, sbSize4: sbSizeMi);
+
+                    // Decide phase runs to completion for this whole superblock's own subtree in one
+                    // recursive pass, before any of it is actually committed -- unlike the old, lazy
+                    // per-node DecidePartition (called on demand by EncodePartitionForced itself as it
+                    // walked down), RdPickPartition's own real bound-threading needs the whole recursive
+                    // decision tree available up front: a child's own inbound bound comes from its parent's
+                    // still-in-progress candidate comparison, not from anything EncodePartitionForced's own
+                    // separate, later, decision-agnostic walk could reconstruct after the fact.
+                    DecideSuperblockPartition(state, r, c, sbSizeMi);
+                    EncodePartitionForced(state, r, c, sizeMi: sbSizeMi);
+                }
+            }
+
+            return state.Symbols.Flush();
+        }
+        finally
+        {
+            ReturnTileStateBuffers(state);
+        }
+    }
+
+    /// <summary>
+    /// Two-pass tile-encoder architecture, Stage 1b-ii: a parallel, switchable path alongside the fused
+    /// <see cref="EncodeTile"/> above -- not yet called from any production code path (<see cref="Av1FrameEncoder"/>
+    /// still calls <see cref="EncodeTile"/> exclusively). Runs <see cref="DecideTile"/> to completion for the
+    /// WHOLE frame (zero real bitstream bytes written -- see <see cref="Av1EncodePhase"/>'s own remarks),
+    /// then <see cref="EmitTile"/> to completion for the whole frame (real bitstream bytes only). Exists so
+    /// this split can be verified byte-identical against <see cref="EncodeTile"/>'s own real output on real
+    /// images before anything production-facing switches over to it, per the project plan's own explicit
+    /// "build as a parallel, switchable path first" discipline.
+    /// </summary>
+    internal static byte[] EncodeTileTwoPass(
+        int[] yPlane, int yWidth, int yHeight,
+        int[]? uPlane, int[]? vPlane, int chromaWidth, int chromaHeight,
+        int[] reconY, int[]? reconU, int[]? reconV,
+        bool monoChrome, int baseQIdx, bool lossless = false, bool chroma444 = false, int effort = 2, bool allowScreenContentTools = false, bool allowIntrabc = false, int trueWidth = 0, int trueHeight = 0, Action<Av1BlockDecisionRecord>? onLeafCommitted = null)
+    {
+        var state = BuildTileState(yPlane, yWidth, yHeight, uPlane, vPlane, chromaWidth, chromaHeight, reconY, reconU, reconV, monoChrome, baseQIdx, lossless, chroma444, effort, allowScreenContentTools, allowIntrabc, trueWidth, trueHeight, onLeafCommitted);
+
+        try
+        {
+            int sbSizeMi = lossless ? 32 : 16;
+            DecideTile(state, baseQIdx, sbSizeMi);
+            EmitTile(state, sbSizeMi);
+            return state.Symbols.Flush();
+        }
+        finally
+        {
+            ReturnTileStateBuffers(state);
+        }
+    }
+
+    /// <summary>
+    /// Two-pass tile-encoder architecture, Stage 1b-ii -- the Decide pass: walks every superblock in the
+    /// frame exactly once, in the same order <see cref="EncodeTile"/>'s own fused loop already does, running
+    /// every real search (<see cref="DecideSuperblockPartition"/>/<see cref="EncodePartitionForced"/>, which
+    /// still recurses into <see cref="EncodeLeaf"/>/<see cref="EncodeRectangularLeaf"/>'s own unmodified
+    /// search+reconstruct logic) but writing zero real bitstream bytes -- <see cref="TileState.Phase"/> is
+    /// <see cref="Av1EncodePhase.Decide"/> throughout, which every dual-call site already gates correctly
+    /// (Rounds N+58/N+59). <see cref="TileState.DecideCdf"/> is seeded exactly once here, at the very start
+    /// (not per-superblock, unlike the fused loop's own <c>CopyFrom(Cdf)</c> refresh) -- see its own remarks
+    /// for why a per-superblock reset would be wrong once Decide is a genuine whole-frame pass: it would
+    /// silently discard every earlier superblock's own real decide-time CDF adaptation instead of building on
+    /// it. Real reconstruction (<c>ReconY</c>/<c>ReconU</c>/<c>ReconV</c>) still happens for real here,
+    /// unconditionally, exactly as it always has -- <see cref="EmitTile"/> depends on it already being final.
+    /// </summary>
+    private static void DecideTile(TileState state, int baseQIdx, int sbSizeMi)
+    {
+        state.Phase = Av1EncodePhase.Decide;
+        state.DecideCdf.CopyFrom(state.Cdf);
+
+        for (int r = 0; r < state.MiRows; r += sbSizeMi)
+        {
+            for (int c = 0; c < state.MiCols; c += sbSizeMi)
+            {
+                state.CostCdf.CopyFrom(state.DecideCdf);
+
+                var costCdfSnapshot = new Av1CdfContext(baseQIdx);
+                costCdfSnapshot.CopyFrom(state.CostCdf);
+                state.CostCdfSnapshots.Add(costCdfSnapshot);
+
+                ClearBlockDecodedFlags(state, r, c, sbSize4: sbSizeMi);
+                DecideSuperblockPartition(state, r, c, sbSizeMi);
+                EncodePartitionForced(state, r, c, sizeMi: sbSizeMi);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Two-pass tile-encoder architecture, Stage 1b-ii -- the Emit pass: walks every superblock a SECOND
+    /// time, in the identical order <see cref="DecideTile"/> just did, re-running the exact same
+    /// <see cref="EncodePartitionForced"/>/<see cref="EncodeLeaf"/>/<see cref="EncodeRectangularLeaf"/> logic
+    /// (unmodified -- <see cref="TileState.Phase"/> is <see cref="Av1EncodePhase.Emit"/> throughout, which
+    /// every dual-call site already gates to real-only) rather than replaying persisted decisions from grids.
+    /// This is deliberately a full re-run, not a grid-load-and-skip: every decided value (mode search,
+    /// filter_intra, palette, IntraBC candidate ranking, tx-depth/trellis) is a pure, deterministic function
+    /// of state that is either already final and unchanged (<c>ReconY</c>/<c>ReconU</c>/<c>ReconV</c>, real
+    /// source pixels, the immutable whole-frame <see cref="TileState.IntrabcHashTable"/>) or is explicitly
+    /// re-derived to match Decide's own point-in-time value exactly:
+    /// <list type="bullet">
+    /// <item><description><see cref="TileState.CostCdf"/> is refreshed from this superblock's own
+    /// <see cref="TileState.CostCdfSnapshots"/> entry (captured during Decide), not from
+    /// <see cref="TileState.DecideCdf"/> -- which by now holds its final, whole-frame-adapted state, not the
+    /// intermediate value Decide's own search actually read for this superblock. Every real RD comparison in
+    /// this file (mode search, palette, IntraBC ranking, tx-depth, <see cref="OptimizeCoeffTrellis"/>) reads
+    /// only <see cref="TileState.CostCdf"/>, never <see cref="TileState.Cdf"/> directly -- so this one
+    /// substitution is sufficient to make every comparison reproduce Decide's own answer exactly.</description></item>
+    /// <item><description><see cref="TileState.BlockDecoded"/> needs no special handling: its own addressing
+    /// is always superblock-local (<c>r &amp; SbMiMask</c>/<c>c &amp; SbMiMask</c>, see
+    /// <see cref="ClearBlockDecodedFlags"/>), so it never carries information across superblocks in the first
+    /// place -- the same per-superblock <see cref="ClearBlockDecodedFlags"/> call this loop already makes
+    /// resets it identically to how Decide's own loop did.</description></item>
+    /// <item><description><see cref="TileState.PositionsBySize"/>/<see cref="TileState.IntrabcSignatureIndex"/>
+    /// (IntraBC's causal candidate index, incrementally built by <see cref="RecordIntrabcHashEntry"/> as each
+    /// leaf commits) DO carry information across the whole frame and must be reset to empty before this pass
+    /// begins -- without this, every leaf's IntraBC search here would see the ENTIRE frame's positions
+    /// (already fully populated by Decide), including leaves that come later in bitstream order, which a real
+    /// decoder could never do.</description></item>
+    /// </list>
+    /// Real bitstream writes now fire for real (<see cref="Av1EncodePhase.Emit"/> unblocks them at every
+    /// gated call site); decide-tracking writes are correctly suppressed the same way.
+    /// </summary>
+    private static void EmitTile(TileState state, int sbSizeMi)
+    {
+        state.Phase = Av1EncodePhase.Emit;
+        state.PositionsBySize.Clear();
+        state.IntrabcSignatureIndex.Clear();
+
+        int superblockIndex = 0;
+        for (int r = 0; r < state.MiRows; r += sbSizeMi)
+        {
+            for (int c = 0; c < state.MiCols; c += sbSizeMi)
+            {
+                state.CostCdf.CopyFrom(state.CostCdfSnapshots[superblockIndex]);
+                superblockIndex++;
+
+                ClearBlockDecodedFlags(state, r, c, sbSize4: sbSizeMi);
+                EncodePartitionForced(state, r, c, sizeMi: sbSizeMi);
+            }
+        }
+    }
+
+    private static void ReturnTileStateBuffers(TileState state)
+    {
+        AvifBufferPool.SharedInt32.Return(state.Pred);
+        AvifBufferPool.SharedInt32.Return(state.BestPred);
+        AvifBufferPool.SharedInt32.Return(state.Residual);
+        AvifBufferPool.SharedInt32.Return(state.Coeff);
+        AvifBufferPool.SharedInt32.Return(state.Levels);
+        AvifBufferPool.SharedInt32.Return(state.ReconDequant);
+        AvifBufferPool.SharedInt32.Return(state.ReconResidual);
+        AvifBufferPool.SharedInt32.Return(state.CflLumaAc);
+        AvifBufferPool.SharedInt32.Return(state.LumaLevels);
+        AvifBufferPool.SharedInt32.Return(state.PaletteColorMap);
+        AvifBufferPool.SharedInt32.Return(state.PaletteColorMapUv);
+        AvifBufferPool.SharedInt32.Return(state.PaletteTrialColorMap);
+        AvifBufferPool.SharedInt32.Return(state.PaletteKMeansDataY);
+        AvifBufferPool.SharedInt32.Return(state.PaletteKMeansDataU);
+        AvifBufferPool.SharedInt32.Return(state.PaletteKMeansDataV);
+    }
+
+    private static TileState BuildTileState(
+        int[] yPlane, int yWidth, int yHeight,
+        int[]? uPlane, int[]? vPlane, int chromaWidth, int chromaHeight,
+        int[] reconY, int[]? reconU, int[]? reconV,
+        bool monoChrome, int baseQIdx, bool lossless, bool chroma444, int effort, bool allowScreenContentTools, bool allowIntrabc, int trueWidth, int trueHeight, Action<Av1BlockDecisionRecord>? onLeafCommitted)
     {
         int miCols = yWidth / 4;
         int miRows = yHeight / 4;
@@ -499,75 +729,7 @@ internal static class Av1TileEncoder
             state.IntrabcHashTable = new Av1IntrabcHashTable(yPlane, yWidth, yHeight, maxBlockSize);
         }
 
-        try
-        {
-            // Superblock size: 128x128 (sizeMi 32) for lossless, matching Av1SequenceHeaderWriter's
-            // use_128x128_superblock signaling (always exactly lossless -- see its own remarks) and
-            // Av1FrameEncoder's matching 128-pixel-multiple padding; 64x64 (sizeMi 16) otherwise, this
-            // encoder's original, still-current non-lossless configuration.
-            int sbSizeMi = lossless ? 32 : 16;
-            for (int r = 0; r < miRows; r += sbSizeMi)
-            {
-                for (int c = 0; c < miCols; c += sbSizeMi)
-                {
-                    // Real port of libaom's av1_set_cost_upd_freq (see TileState.CostCdf's own remarks):
-                    // every RD-search cost estimate for this superblock -- partition-type comparison and
-                    // every leaf's own real mode search alike -- reads this frozen snapshot, taken here,
-                    // once, reflecting everything committed by every earlier superblock but nothing from
-                    // this one yet (nothing below mutates Cdf until a leaf is actually committed).
-                    //
-                    // Two-pass tile-encoder architecture, Stage 1b-i (see TileState.DecideCdf's own
-                    // remarks): DecideCdf refreshed from Cdf first, then CostCdf from DecideCdf -- today a
-                    // pure pass-through (DecideCdf always exactly mirrors Cdf at this point, since decide
-                    // and commit still happen together per superblock), but this is the real plumbing a
-                    // future Stage 1b-ii reuses once DecideCdf's own refresh stops being a Cdf copy and
-                    // becomes a genuine, independent decide-time adaptation instead.
-                    state.DecideCdf.CopyFrom(state.Cdf);
-                    state.CostCdf.CopyFrom(state.DecideCdf);
-
-                    // Two-pass tile-encoder architecture, Stage 1b (Round N+57) -- see
-                    // TileState.CostCdfSnapshots's own remarks: an independent deep copy (not a reference),
-                    // captured here so a future EmitTile can re-derive this exact superblock's own CostCdf
-                    // value instead of reading DecideCdf's by-then-final, whole-frame-adapted state. Purely
-                    // additive today -- not yet read anywhere.
-                    var costCdfSnapshot = new Av1CdfContext(baseQIdx);
-                    costCdfSnapshot.CopyFrom(state.CostCdf);
-                    state.CostCdfSnapshots.Add(costCdfSnapshot);
-
-                    ClearBlockDecodedFlags(state, r, c, sbSize4: sbSizeMi);
-
-                    // Decide phase runs to completion for this whole superblock's own subtree in one
-                    // recursive pass, before any of it is actually committed -- unlike the old, lazy
-                    // per-node DecidePartition (called on demand by EncodePartitionForced itself as it
-                    // walked down), RdPickPartition's own real bound-threading needs the whole recursive
-                    // decision tree available up front: a child's own inbound bound comes from its parent's
-                    // still-in-progress candidate comparison, not from anything EncodePartitionForced's own
-                    // separate, later, decision-agnostic walk could reconstruct after the fact.
-                    DecideSuperblockPartition(state, r, c, sbSizeMi);
-                    EncodePartitionForced(state, r, c, sizeMi: sbSizeMi);
-                }
-            }
-
-            return symbols.Flush();
-        }
-        finally
-        {
-            AvifBufferPool.SharedInt32.Return(state.Pred);
-            AvifBufferPool.SharedInt32.Return(state.BestPred);
-            AvifBufferPool.SharedInt32.Return(state.Residual);
-            AvifBufferPool.SharedInt32.Return(state.Coeff);
-            AvifBufferPool.SharedInt32.Return(state.Levels);
-            AvifBufferPool.SharedInt32.Return(state.ReconDequant);
-            AvifBufferPool.SharedInt32.Return(state.ReconResidual);
-            AvifBufferPool.SharedInt32.Return(state.CflLumaAc);
-            AvifBufferPool.SharedInt32.Return(state.LumaLevels);
-            AvifBufferPool.SharedInt32.Return(state.PaletteColorMap);
-            AvifBufferPool.SharedInt32.Return(state.PaletteColorMapUv);
-            AvifBufferPool.SharedInt32.Return(state.PaletteTrialColorMap);
-            AvifBufferPool.SharedInt32.Return(state.PaletteKMeansDataY);
-            AvifBufferPool.SharedInt32.Return(state.PaletteKMeansDataU);
-            AvifBufferPool.SharedInt32.Return(state.PaletteKMeansDataV);
-        }
+        return state;
     }
 
     /// <summary>
@@ -2576,13 +2738,13 @@ internal static class Av1TileEncoder
                     // second, independent attempt. useAdaptiveCdf stays false here (the 128x128 case's own
                     // adaptive variant was tried and measured net-negative on its own, unrelated axis -- not
                     // re-tried for smaller sizes).
-                    cost = ComputeLosslessWholeLeafCostPerSubBlock(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels, ptype: 0, s.YCoeffCtx, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth: false, useRealBoundaryAvailability: false);
+                    cost = ComputeLosslessWholeLeafCostPerSubBlock(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels, ptype: 0, LiveYCoeffCtx(s), mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth: false, useRealBoundaryAvailability: false);
                 }
                 else
                 {
                     Av1IntraPrediction.BuildEdges(above, left, s.SourceY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
                     Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.EdgeMaxX, s.EdgeMaxY, x, y, bitDepth: 8);
-                    cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
+                    cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, LiveYCoeffCtx(s));
                 }
 
                 if (cost < bestCost)
@@ -2640,13 +2802,13 @@ internal static class Av1TileEncoder
                     // oversized case (this whole block is gated sizePixels <= 32), so this just brings
                     // filter_intra's own decision-phase estimate onto the same real, per-sub-block primitive
                     // the plain-mode loop above now uses uniformly.
-                    ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels, ptype: 0, s.YCoeffCtx, mode: Av1IntraMode.DcPred, angleDelta: 0, useFilterIntra: true, filterIntraMode: filterMode, filterTypeSmooth: false, useRealBoundaryAvailability: false, out filterResidualUnits512);
+                    ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels, ptype: 0, LiveYCoeffCtx(s), mode: Av1IntraMode.DcPred, angleDelta: 0, useFilterIntra: true, filterIntraMode: filterMode, filterTypeSmooth: false, useRealBoundaryAvailability: false, out filterResidualUnits512);
                 }
                 else
                 {
                     Av1IntraPrediction.BuildEdges(above, left, s.SourceY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
                     Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, Av1IntraMode.DcPred, availL, availU, useFilterIntra: true, filterIntraMode: filterMode, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.EdgeMaxX, s.EdgeMaxY, x, y, bitDepth: 8);
-                    ComputeCandidateCostPrecise(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx, out filterResidualUnits512);
+                    ComputeCandidateCostPrecise(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, LiveYCoeffCtx(s), out filterResidualUnits512);
                 }
 
                 long filterSignalingUnits512 = Av1SymbolEncoder.EstimateSymbolCostPrecise512ths(s.CostCdf.FilterIntra[bSize], 1) + Av1SymbolEncoder.EstimateSymbolCostPrecise512ths(s.CostCdf.FilterIntraMode, filterMode);
@@ -2823,7 +2985,7 @@ internal static class Av1TileEncoder
         var pred = s.Pred;
         var scratch = s.ScratchCoeffCtx;
         var trial = s.TrialSink;
-        scratch.SeedFrom(s.YCoeffCtx, x >> 2, wMi, y >> 2, hMi);
+        scratch.SeedFrom(LiveYCoeffCtx(s), x >> 2, wMi, y >> 2, hMi);
         trial.Reset();
 
         var residual = s.Residual;
@@ -3004,14 +3166,14 @@ internal static class Av1TileEncoder
                 long angleSignaling = directional ? Av1SymbolEncoder.EstimateSymbolCost(s.CostCdf.AngleDelta[mode - Av1IntraMode.VPred], angleDelta + MaxAngleDelta) : 0;
 
                 long uBound = bestCost == long.MaxValue ? long.MaxValue : (bestCost - modeSignaling - angleSignaling) * 512 - 256;
-                long costU = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceU!, s.ChromaWidth, s.ChromaHeight, r, c, x, y, widthPixels, ptype: 1, s.UCoeffCtx!, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability, out _, heightPixels: heightPixels, boundUnits512: uBound);
+                long costU = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceU!, s.ChromaWidth, s.ChromaHeight, r, c, x, y, widthPixels, ptype: 1, LiveUCoeffCtx(s), mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability, out _, heightPixels: heightPixels, boundUnits512: uBound);
                 if (costU == long.MaxValue)
                 {
                     continue;
                 }
 
                 long vBound = bestCost == long.MaxValue ? long.MaxValue : (bestCost - costU - modeSignaling - angleSignaling) * 512 - 256;
-                long costV = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceV!, s.ChromaWidth, s.ChromaHeight, r, c, x, y, widthPixels, ptype: 1, s.VCoeffCtx!, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability, out _, heightPixels: heightPixels, boundUnits512: vBound);
+                long costV = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceV!, s.ChromaWidth, s.ChromaHeight, r, c, x, y, widthPixels, ptype: 1, LiveVCoeffCtx(s), mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability, out _, heightPixels: heightPixels, boundUnits512: vBound);
                 if (costV == long.MaxValue)
                 {
                     continue;
@@ -3275,11 +3437,11 @@ internal static class Av1TileEncoder
         {
             Av1IntraPrediction.BuildEdges(above, left, s.SourceU!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: 8);
             Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: 8);
-            long cost = ComputeCandidateCost(s, s.SourceU!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.UCoeffCtx!);
+            long cost = ComputeCandidateCost(s, s.SourceU!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, LiveUCoeffCtx(s));
 
             Av1IntraPrediction.BuildEdges(above, left, s.SourceV!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: 8);
             Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: 8);
-            cost += ComputeCandidateCost(s, s.SourceV!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.VCoeffCtx!);
+            cost += ComputeCandidateCost(s, s.SourceV!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, LiveVCoeffCtx(s));
             return cost;
         }
 
@@ -3404,7 +3566,7 @@ internal static class Av1TileEncoder
             }
         }
 
-        long residualBits = ComputePaletteResidualCost(s, s.SourceY, s.YWidth, ptype: 0, x, y, w, h, trialMap, w, trialColors, s.YCoeffCtx, out bool allZero);
+        long residualBits = ComputePaletteResidualCost(s, s.SourceY, s.YWidth, ptype: 0, x, y, w, h, trialMap, w, trialColors, LiveYCoeffCtx(s), out bool allZero);
         long totalBits = headerBits + (allZero ? 0 : residualBits);
         long totalRd = Av1RdCost.CombineCost(0, totalBits, 1.0);
 
@@ -3697,8 +3859,8 @@ internal static class Av1TileEncoder
             }
         }
 
-        long residualBitsU = ComputePaletteResidualCost(s, s.SourceU!, s.ChromaWidth, ptype: 1, x, y, w, h, s.PaletteTrialColorMap, w, trialU, s.UCoeffCtx!, out bool allZeroU);
-        long residualBitsV = ComputePaletteResidualCost(s, s.SourceV!, s.ChromaWidth, ptype: 1, x, y, w, h, s.PaletteTrialColorMap, w, trialV, s.VCoeffCtx!, out bool allZeroV);
+        long residualBitsU = ComputePaletteResidualCost(s, s.SourceU!, s.ChromaWidth, ptype: 1, x, y, w, h, s.PaletteTrialColorMap, w, trialU, LiveUCoeffCtx(s), out bool allZeroU);
+        long residualBitsV = ComputePaletteResidualCost(s, s.SourceV!, s.ChromaWidth, ptype: 1, x, y, w, h, s.PaletteTrialColorMap, w, trialV, LiveVCoeffCtx(s), out bool allZeroV);
         long totalBits = headerBits + (allZeroU ? 0 : residualBitsU) + (allZeroV ? 0 : residualBitsV);
         long totalRd = Av1RdCost.CombineCost(0, totalBits, 1.0);
 
@@ -5142,14 +5304,14 @@ internal static class Av1TileEncoder
                     // avoid. useAdaptiveCdf: true only for the estimate call, matching the common (non-
                     // oversized) branch's own identical reasoning below.
                     long oversizedUBound = bestCost == long.MaxValue ? long.MaxValue : (bestCost - oversizedModeSignaling - oversizedAngleSignaling) * 512 - 256;
-                    long oversizedCostU = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceU!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, s.UCoeffCtx!, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability, out _, useAdaptiveCdf: !useRealBoundaryAvailability, boundUnits512: oversizedUBound);
+                    long oversizedCostU = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceU!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, LiveUCoeffCtx(s), mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability, out _, useAdaptiveCdf: !useRealBoundaryAvailability, boundUnits512: oversizedUBound);
                     if (oversizedCostU == long.MaxValue)
                     {
                         continue;
                     }
 
                     long oversizedVBound = bestCost == long.MaxValue ? long.MaxValue : (bestCost - oversizedCostU - oversizedModeSignaling - oversizedAngleSignaling) * 512 - 256;
-                    long oversizedCostV = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceV!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, s.VCoeffCtx!, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability, out _, useAdaptiveCdf: !useRealBoundaryAvailability, boundUnits512: oversizedVBound);
+                    long oversizedCostV = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceV!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, LiveVCoeffCtx(s), mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability, out _, useAdaptiveCdf: !useRealBoundaryAvailability, boundUnits512: oversizedVBound);
                     if (oversizedCostV == long.MaxValue)
                     {
                         continue;
@@ -5207,13 +5369,13 @@ internal static class Av1TileEncoder
                         // estimate below uses adaptive CDF, per its own load-bearing finding).
                         if (s.Lossless)
                         {
-                            costU = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceU!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, s.UCoeffCtx!, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: true, out _, useAdaptiveCdf: false, boundUnits512: uBoundUnits512);
+                            costU = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceU!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, LiveUCoeffCtx(s), mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: true, out _, useAdaptiveCdf: false, boundUnits512: uBoundUnits512);
                         }
                         else
                         {
                             Av1IntraPrediction.BuildEdges(above, left, s.ReconU!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: 8);
                             Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: 8);
-                            costU = ComputeCandidateCostPrecise(s, s.SourceU!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.UCoeffCtx!, out _, uBoundUnits512);
+                            costU = ComputeCandidateCostPrecise(s, s.SourceU!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, LiveUCoeffCtx(s), out _, uBoundUnits512);
                         }
 
                         if (costU == long.MaxValue)
@@ -5230,13 +5392,13 @@ internal static class Av1TileEncoder
 
                         if (s.Lossless)
                         {
-                            costV = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceV!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, s.VCoeffCtx!, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: true, out _, useAdaptiveCdf: false, boundUnits512: vBoundUnits512);
+                            costV = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceV!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, LiveVCoeffCtx(s), mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: true, out _, useAdaptiveCdf: false, boundUnits512: vBoundUnits512);
                         }
                         else
                         {
                             Av1IntraPrediction.BuildEdges(above, left, s.ReconV!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: 8);
                             Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: 8);
-                            costV = ComputeCandidateCostPrecise(s, s.SourceV!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.VCoeffCtx!, out _, vBoundUnits512);
+                            costV = ComputeCandidateCostPrecise(s, s.SourceV!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, LiveVCoeffCtx(s), out _, vBoundUnits512);
                         }
 
                         if (costV == long.MaxValue)
@@ -5271,14 +5433,14 @@ internal static class Av1TileEncoder
                         // graphic/icon corpus file stayed near-neutral either way, isolating this specific gap
                         // rather than a broader structural problem with the estimate itself.
                         long uBound = bestCost == long.MaxValue ? long.MaxValue : ((bestCost - modeSignaling - angleSignaling) * 512) - 256;
-                        costU = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceU!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, s.UCoeffCtx!, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: false, out _, useAdaptiveCdf: true, boundUnits512: uBound);
+                        costU = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceU!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, LiveUCoeffCtx(s), mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: false, out _, useAdaptiveCdf: true, boundUnits512: uBound);
                         if (costU == long.MaxValue)
                         {
                             continue;
                         }
 
                         long vBound = bestCost == long.MaxValue ? long.MaxValue : ((bestCost - costU - modeSignaling - angleSignaling) * 512) - 256;
-                        costV = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceV!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, s.VCoeffCtx!, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: false, out _, useAdaptiveCdf: true, boundUnits512: vBound);
+                        costV = ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceV!, s.ChromaWidth, s.ChromaHeight, r, c, cx, cy, chromaSizePixels, ptype: 1, LiveVCoeffCtx(s), mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: false, out _, useAdaptiveCdf: true, boundUnits512: vBound);
                         if (costV == long.MaxValue)
                         {
                             continue;
@@ -5366,7 +5528,7 @@ internal static class Av1TileEncoder
         int[] lumaAcU = s.CflLumaAc;
         long lumaAvgU = ComputeCflLumaAc(s.ReconY, s.YWidth, lumaX, lumaY, chromaSizePixels, log2Size, subX, lumaAcU);
 
-        long costU = TryCflPlane(s, s.ReconU!, s.SourceU!, s.UCoeffCtx!, cx, cy, chromaSizePixels, log2Size, availL, availU, haveAboveRight, haveBelowLeft, filterTypeSmooth, above, left, pred, lumaAcU, lumaAvgU, out alphaU);
+        long costU = TryCflPlane(s, s.ReconU!, s.SourceU!, LiveUCoeffCtx(s), cx, cy, chromaSizePixels, log2Size, availL, availU, haveAboveRight, haveBelowLeft, filterTypeSmooth, above, left, pred, lumaAcU, lumaAvgU, out alphaU);
 
         // U's own AC buffer is fully consumed (every read of it happens inside TryCflPlane's own
         // alpha-candidate loop, via ApplyCflAlpha) before V starts, so reusing the same TileState.CflLumaAc
@@ -5377,7 +5539,7 @@ internal static class Av1TileEncoder
         // AC values from the second alpha candidate onward.
         int[] lumaAcV = s.CflLumaAc;
         long lumaAvgV = ComputeCflLumaAc(s.ReconY, s.YWidth, lumaX, lumaY, chromaSizePixels, log2Size, subX, lumaAcV);
-        long costV = TryCflPlane(s, s.ReconV!, s.SourceV!, s.VCoeffCtx!, cx, cy, chromaSizePixels, log2Size, availL, availU, haveAboveRight, haveBelowLeft, filterTypeSmooth, above, left, pred, lumaAcV, lumaAvgV, out alphaV);
+        long costV = TryCflPlane(s, s.ReconV!, s.SourceV!, LiveVCoeffCtx(s), cx, cy, chromaSizePixels, log2Size, availL, availU, haveAboveRight, haveBelowLeft, filterTypeSmooth, above, left, pred, lumaAcV, lumaAvgV, out alphaV);
 
         if (alphaU == 0 && alphaV == 0)
         {
@@ -5729,13 +5891,13 @@ internal static class Av1TileEncoder
                 long residualUnits512;
                 if (s.Lossless)
                 {
-                    ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels, ptype: 0, s.YCoeffCtx, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: true, out residualUnits512, boundUnits512: boundUnits512);
+                    ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels, ptype: 0, LiveYCoeffCtx(s), mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: true, out residualUnits512, boundUnits512: boundUnits512);
                 }
                 else
                 {
                     Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
                     Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, x, y, bitDepth: 8);
-                    ComputeCandidateCostPrecise(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx, out residualUnits512, boundUnits512);
+                    ComputeCandidateCostPrecise(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, LiveYCoeffCtx(s), out residualUnits512, boundUnits512);
                 }
 
                 long cost = (long)Math.Round((residualUnits512 + signalingUnits512) / 512.0, MidpointRounding.AwayFromZero);
@@ -5934,13 +6096,13 @@ internal static class Av1TileEncoder
                 long filterResidualUnits512;
                 if (s.Lossless)
                 {
-                    ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels, ptype: 0, s.YCoeffCtx, mode: Av1IntraMode.DcPred, angleDelta: 0, useFilterIntra: true, filterIntraMode: filterMode, filterTypeSmooth, useRealBoundaryAvailability: true, out filterResidualUnits512, boundUnits512: filterBoundUnits512);
+                    ComputeLosslessWholeLeafCostPerSubBlockPrecise(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels, ptype: 0, LiveYCoeffCtx(s), mode: Av1IntraMode.DcPred, angleDelta: 0, useFilterIntra: true, filterIntraMode: filterMode, filterTypeSmooth, useRealBoundaryAvailability: true, out filterResidualUnits512, boundUnits512: filterBoundUnits512);
                 }
                 else
                 {
                     Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
                     Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, Av1IntraMode.DcPred, availL, availU, useFilterIntra: true, filterIntraMode: filterMode, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, x, y, bitDepth: 8);
-                    ComputeCandidateCostPrecise(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx, out filterResidualUnits512, filterBoundUnits512);
+                    ComputeCandidateCostPrecise(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, LiveYCoeffCtx(s), out filterResidualUnits512, filterBoundUnits512);
                 }
 
                 long cost = (long)Math.Round((filterResidualUnits512 + filterSignalingUnits512) / 512.0, MidpointRounding.AwayFromZero);
@@ -6142,7 +6304,7 @@ internal static class Av1TileEncoder
                 long bestTxTypeCost = long.MaxValue;
                 foreach (int candidateTxType in txTypeCandidates)
                 {
-                    long txTypeCost = ComputeTxTypeCost(s, earlyResidual, earlySse, sizePixels, ptype: 0, x, y, s.YCoeffCtx, candidateTxType);
+                    long txTypeCost = ComputeTxTypeCost(s, earlyResidual, earlySse, sizePixels, ptype: 0, x, y, LiveYCoeffCtx(s), candidateTxType);
                     if (txTypeCost < bestTxTypeCost)
                     {
                         bestTxTypeCost = txTypeCost;
@@ -6157,7 +6319,7 @@ internal static class Av1TileEncoder
                 // sizePixels == 32: TX_SET_DCTONLY forces DctDct with no real search (see the tx-type
                 // symbol-write remarks below) -- costA still needs computing directly (not skipped) so the
                 // tx-depth comparison against candidate B remains a real, comparable cost.
-                costA = ComputeTxTypeCost(s, earlyResidual, earlySse, sizePixels, ptype: 0, x, y, s.YCoeffCtx, Av1TxType.DctDct);
+                costA = ComputeTxTypeCost(s, earlyResidual, earlySse, sizePixels, ptype: 0, x, y, LiveYCoeffCtx(s), Av1TxType.DctDct);
             }
 
             // Candidate B (tx_depth 1, one uniform quad-split down -- project plan Phase 4's own
@@ -6222,7 +6384,7 @@ internal static class Av1TileEncoder
                     int bestSubTxType = Av1TxType.DctDct;
                     foreach (int candidateTxType in subTxTypeCandidates)
                     {
-                        long subCost = ComputeTxTypeCost(s, subResidual, subSse, halfSize, ptype: 0, x + subX, y + subY, s.YCoeffCtx, candidateTxType);
+                        long subCost = ComputeTxTypeCost(s, subResidual, subSse, halfSize, ptype: 0, x + subX, y + subY, LiveYCoeffCtx(s), candidateTxType);
                         if (subCost < bestSubCost)
                         {
                             bestSubCost = subCost;
@@ -6243,7 +6405,7 @@ internal static class Av1TileEncoder
                 int[] earlyCoeff = s.Coeff;
                 Av1ForwardTransform.Forward2D(earlyResidual, earlyCoeff, sizePixels, bestTxType);
                 Av1ForwardQuantizer.Quantize(earlyCoeff, s.LumaLevels, sizePixels, s.BaseQIdx);
-                OptimizeCoeffTrellis(s, earlyCoeff, s.LumaLevels, sizePixels, ptype: 0, c, r, s.YCoeffCtx, txType: bestTxType);
+                OptimizeCoeffTrellis(s, earlyCoeff, s.LumaLevels, sizePixels, ptype: 0, c, r, LiveYCoeffCtx(s), txType: bestTxType);
 
                 // Write the prediction into the reconstruction buffer before Reconstruct() adds the
                 // residual -- matches Av1TileDecoder's own predict-then-reconstruct-in-place ordering.
@@ -6296,7 +6458,7 @@ internal static class Av1TileEncoder
                     int subTxType = subTxTypes[k];
                     Av1ForwardTransform.Forward2D(subResidualCommit, s.Coeff, halfSize, subTxType);
                     Av1ForwardQuantizer.Quantize(s.Coeff, s.Levels, halfSize, s.BaseQIdx);
-                    OptimizeCoeffTrellis(s, s.Coeff, s.Levels, halfSize, ptype: 0, subC, subR, s.YCoeffCtx, txType: subTxType);
+                    OptimizeCoeffTrellis(s, s.Coeff, s.Levels, halfSize, ptype: 0, subC, subR, LiveYCoeffCtx(s), txType: subTxType);
                     Array.Copy(s.Levels, 0, s.LumaLevels, k * halfArea, halfArea);
 
                     for (int i = 0; i < halfSize; i++)
@@ -9188,7 +9350,7 @@ internal static class Av1TileEncoder
     {
         var pred = s.BestPred;
         Av1InterPrediction.PredictIntrabc(pred, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, mvRow, mvCol, subX: 0, subY: 0, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
-        return ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
+        return ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, LiveYCoeffCtx(s));
     }
 
     /// <summary>
@@ -9222,7 +9384,7 @@ internal static class Av1TileEncoder
     /// </summary>
     private static long ComputeIntrabcRealResidualCost(TileState s, int x, int y, int mvRow, int mvCol, bool hasChroma, int sizePixels, long boundUnits512)
     {
-        long lumaUnits512 = ComputeIntrabcRealPlaneUnits512(s, s.SourceY, s.ReconY, s.YWidth, s.YCoeffCtx, ptype: 0, x, y, sizePixels, sizePixels, mvRow, mvCol, subsamplingX: 0, subsamplingY: 0, s.EdgeMaxX, s.EdgeMaxY, boundUnits512);
+        long lumaUnits512 = ComputeIntrabcRealPlaneUnits512(s, s.SourceY, s.ReconY, s.YWidth, LiveYCoeffCtx(s), ptype: 0, x, y, sizePixels, sizePixels, mvRow, mvCol, subsamplingX: 0, subsamplingY: 0, s.EdgeMaxX, s.EdgeMaxY, boundUnits512);
         if (lumaUnits512 == long.MaxValue)
         {
             return long.MaxValue;
@@ -9239,14 +9401,14 @@ internal static class Av1TileEncoder
         int cy = s.Chroma444 ? y : y / 2;
 
         long uBound = boundUnits512 == long.MaxValue ? long.MaxValue : boundUnits512 - lumaUnits512;
-        long uUnits512 = ComputeIntrabcRealPlaneUnits512(s, s.SourceU!, s.ReconU!, s.ChromaWidth, s.UCoeffCtx!, ptype: 1, cx, cy, chromaSize, chromaSize, mvRow, mvCol, chromaSub, chromaSub, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, uBound);
+        long uUnits512 = ComputeIntrabcRealPlaneUnits512(s, s.SourceU!, s.ReconU!, s.ChromaWidth, LiveUCoeffCtx(s), ptype: 1, cx, cy, chromaSize, chromaSize, mvRow, mvCol, chromaSub, chromaSub, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, uBound);
         if (uUnits512 == long.MaxValue)
         {
             return long.MaxValue;
         }
 
         long vBound = boundUnits512 == long.MaxValue ? long.MaxValue : boundUnits512 - lumaUnits512 - uUnits512;
-        long vUnits512 = ComputeIntrabcRealPlaneUnits512(s, s.SourceV!, s.ReconV!, s.ChromaWidth, s.VCoeffCtx!, ptype: 1, cx, cy, chromaSize, chromaSize, mvRow, mvCol, chromaSub, chromaSub, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, vBound);
+        long vUnits512 = ComputeIntrabcRealPlaneUnits512(s, s.SourceV!, s.ReconV!, s.ChromaWidth, LiveVCoeffCtx(s), ptype: 1, cx, cy, chromaSize, chromaSize, mvRow, mvCol, chromaSub, chromaSub, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, vBound);
         if (vUnits512 == long.MaxValue)
         {
             return long.MaxValue;
@@ -10558,7 +10720,12 @@ internal static class Av1TileEncoder
                     Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
                     if (!s.Lossless)
                     {
-                        OptimizeCoeffTrellis(s, coeff, levels, 4, ptype: 1, chromaC4, chromaR4, ctx);
+                        // Two-pass tile-encoder architecture, Stage 1b-ii (Round N+60 root-cause fix) -- see
+                        // LiveYCoeffCtx's own remarks: this is a SEARCH call (trellis optimization), not a
+                        // commit, so it must read whichever context is actually "live" for the current phase
+                        // (decideCtx during Decide, since real ctx never advances then) -- not always the real
+                        // ctx this loop's own tuple happens to destructure per plane.
+                        OptimizeCoeffTrellis(s, coeff, levels, 4, ptype: 1, chromaC4, chromaR4, s.Phase == Av1EncodePhase.Decide ? decideCtx : ctx);
                     }
 
                     for (int i = 0; i < 4; i++)
@@ -10682,7 +10849,11 @@ internal static class Av1TileEncoder
             Av1ForwardTransform.Forward2D(residual, coeff, chromaBlockSizePixels, uvTxType);
             var levels = s.Levels;
             Av1ForwardQuantizer.Quantize(coeff, levels, chromaBlockSizePixels, s.BaseQIdx);
-            OptimizeCoeffTrellis(s, coeff, levels, chromaBlockSizePixels, ptype: 1, chromaC4, chromaR4, ctx);
+
+            // Two-pass tile-encoder architecture, Stage 1b-ii (Round N+60 root-cause fix) -- see
+            // LiveYCoeffCtx's own remarks: a SEARCH call, must read whichever context is actually live for
+            // the current phase, not always the real ctx this loop's own tuple happens to destructure.
+            OptimizeCoeffTrellis(s, coeff, levels, chromaBlockSizePixels, ptype: 1, chromaC4, chromaR4, s.Phase == Av1EncodePhase.Decide ? decideCtx : ctx);
 
             for (int i = 0; i < chromaBlockSizePixels; i++)
             {
