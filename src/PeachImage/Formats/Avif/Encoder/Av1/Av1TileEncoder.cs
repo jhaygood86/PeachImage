@@ -350,6 +350,11 @@ internal static class Av1TileEncoder
             // snapshot.
             CostCdfSnapshots = [],
 
+            // Two-pass tile-encoder architecture, Stage 1b-ii -- see Av1EncodePhase's own remarks. Explicit
+            // here (matching the field's own default) rather than left implicit, since a future
+            // DecideTile/EmitTile reusing this same construction sets this to Decide/Emit instead.
+            Phase = Av1EncodePhase.Fused,
+
             Symbols = symbols,
             YModes = new int[miCols * miRows],
             UvModes = new int[miCols * miRows],
@@ -565,10 +570,42 @@ internal static class Av1TileEncoder
         }
     }
 
+    /// <summary>
+    /// Two-pass tile-encoder architecture, Stage 1b-ii (project plan's own "Two-pass tile-encoder
+    /// architecture" section) -- read from <see cref="TileState.Phase"/>, never threaded as a parameter:
+    /// every function that needs to know the current phase already receives <c>TileState s</c>, so gating
+    /// on <c>s.Phase</c> avoids touching the signature (and every call site) of the ~10 functions and ~40
+    /// dual real/decide write-call-site pairs this stage's gating needs to guard.
+    ///
+    /// <para><see cref="Fused"/> is today's real, only-ever-used value: every search section and every
+    /// real/decide write-call-site pair runs unconditionally, exactly matching this project's current
+    /// single-pass encode -- a genuine no-op until something sets <see cref="TileState.Phase"/> to anything
+    /// else. <see cref="Decide"/> and <see cref="Emit"/> are the two real phases a future <c>DecideTile</c>/
+    /// <c>EmitTile</c> split uses: search sections and decide-tracking writes run only when
+    /// <c>Phase != Emit</c> (true for both <see cref="Fused"/> and <see cref="Decide"/>); real bitstream
+    /// writes run only when <c>Phase != Decide</c> (true for both <see cref="Fused"/> and <see cref="Emit"/>).
+    /// This means every existing dual-call site's own gating condition is written the same way regardless of
+    /// which of the three values is live, and <see cref="Fused"/> always satisfies both conditions --
+    /// verified as a true no-op by construction, not just by testing.</para>
+    /// </summary>
+    private enum Av1EncodePhase
+    {
+        Fused,
+        Decide,
+        Emit,
+    }
+
     private sealed class TileState
     {
         /// <summary>Diagnostic-only hook -- see <see cref="EncodeTile"/>'s own <c>onLeafCommitted</c> parameter remarks. Always <see langword="null"/> in production.</summary>
         public Action<Av1BlockDecisionRecord>? OnLeafCommitted;
+
+        /// <summary>Two-pass tile-encoder architecture, Stage 1b-ii -- see <see cref="Av1EncodePhase"/>'s own
+        /// remarks. Defaults to <see cref="Av1EncodePhase.Fused"/> (today's only real value); explicitly
+        /// initialized in <see cref="EncodeTile"/> rather than relying on the default, so a future
+        /// <c>DecideTile</c>/<c>EmitTile</c> reusing the same <see cref="TileState"/> construction path has one
+        /// obvious place to set it.</summary>
+        public Av1EncodePhase Phase = Av1EncodePhase.Fused;
 
         public required int[] SourceY;
         public required int[]? SourceU;
@@ -1196,10 +1233,16 @@ internal static class Av1TileEncoder
         // real, persistent partitionCdf the way the ordinary branch's WriteSymbol call does.
         if (hasRows && hasCols)
         {
-            s.Symbols.WriteSymbol(partitionCdf, decidedType);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                s.Symbols.WriteSymbol(partitionCdf, decidedType);
+            }
 
             // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks.
-            s.DecideCommitSink.WriteSymbol(decidePartitionCdf, decidedType);
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                s.DecideCommitSink.WriteSymbol(decidePartitionCdf, decidedType);
+            }
         }
         else if (hasCols)
         {
@@ -3994,13 +4037,19 @@ internal static class Av1TileEncoder
                     Array.Copy(pred, i * 4, recon, ((subY + i) * planeWidth) + subX, 4);
                 }
 
-                Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype, subC, subR, realCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype, subC, subR, realCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks. Same arguments as the real commit just above, targeting the decide-time
                 // counterparts instead -- levels/positions are identical since this is the same leaf's
                 // own already-computed residual, not a separate re-derivation.
-                Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype, subC, subR, decideCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype, subC, subR, decideCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
+                }
 
                 Av1LocalReconstructor.Reconstruct(recon, planeWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
                 SetBlockDecoded(s, blockDecodedPlane, subR & s.SbMiMask, subC & s.SbMiMask, true);
@@ -6463,19 +6512,33 @@ internal static class Av1TileEncoder
         // which needed it too -- see that computation's own remarks); `usedIntrabc && intrabcExactCandidate`
         // (not the bare candidate flag) is what actually matters here now that a found exact-match candidate
         // isn't an automatic, unconditional win any more.
-        s.Symbols.WriteSymbol(s.Cdf.Skip[skipCtx], (paletteAllZeroResidual || (usedIntrabc && intrabcExactCandidate)) ? 1 : 0);
+        // Two-pass tile-encoder architecture, Stage 1b-ii -- see Av1EncodePhase's own remarks.
+        if (s.Phase != Av1EncodePhase.Decide)
+        {
+            s.Symbols.WriteSymbol(s.Cdf.Skip[skipCtx], (paletteAllZeroResidual || (usedIntrabc && intrabcExactCandidate)) ? 1 : 0);
+        }
 
         // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks
         // (same rationale, applied to every mode-info symbol below).
-        s.DecideCommitSink.WriteSymbol(s.DecideCdf.Skip[skipCtx], (paletteAllZeroResidual || (usedIntrabc && intrabcExactCandidate)) ? 1 : 0);
+        if (s.Phase != Av1EncodePhase.Emit)
+        {
+            s.DecideCommitSink.WriteSymbol(s.DecideCdf.Skip[skipCtx], (paletteAllZeroResidual || (usedIntrabc && intrabcExactCandidate)) ? 1 : 0);
+        }
 
         // use_intrabc (spec §5.11.7): structurally present whenever this frame allows it (tied to lossless
         // -- see Av1FrameHeaderWriter), read/written unconditionally for every leaf regardless of outcome,
         // exactly like paletteStructurallyPresent's has_palette_y/has_palette_uv bits.
         if (intrabcStructurallyPresent)
         {
-            s.Symbols.WriteSymbol(s.Cdf.Intrabc, usedIntrabc ? 1 : 0);
-            s.DecideCommitSink.WriteSymbol(s.DecideCdf.Intrabc, usedIntrabc ? 1 : 0);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                s.Symbols.WriteSymbol(s.Cdf.Intrabc, usedIntrabc ? 1 : 0);
+            }
+
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                s.DecideCommitSink.WriteSymbol(s.DecideCdf.Intrabc, usedIntrabc ? 1 : 0);
+            }
         }
 
         if (usedIntrabc)
@@ -6493,11 +6556,17 @@ internal static class Av1TileEncoder
             {
                 // reset_block_context(bw4, bh4) (spec §5.11.5): this leaf is skip = 1 (an exact match has
                 // zero residual by construction), so none of the coefficient-writing paths run.
-                s.YCoeffCtx.Reset(c, sizeMi, r, sizeMi);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    s.YCoeffCtx.Reset(c, sizeMi, r, sizeMi);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks. Same reset as the real one just above.
-                s.DecideYCoeffCtx.Reset(c, sizeMi, r, sizeMi);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    s.DecideYCoeffCtx.Reset(c, sizeMi, r, sizeMi);
+                }
 
                 // Reconstruction is exact by construction (FindIntrabcMatch only ever returns a source
                 // whose pixels -- luma and, when hasChroma, chroma -- already verified byte-identical to
@@ -6519,13 +6588,19 @@ internal static class Av1TileEncoder
                     int intrabcChromaN = s.Chroma444 ? sizeMi : sizeMi / 2;
                     int intrabcChromaR4Base = s.Chroma444 ? r : r / 2;
                     int intrabcChromaC4Base = s.Chroma444 ? c : c / 2;
-                    s.UCoeffCtx!.Reset(intrabcChromaC4Base, intrabcChromaN, intrabcChromaR4Base, intrabcChromaN);
-                    s.VCoeffCtx!.Reset(intrabcChromaC4Base, intrabcChromaN, intrabcChromaR4Base, intrabcChromaN);
+                    if (s.Phase != Av1EncodePhase.Decide)
+                    {
+                        s.UCoeffCtx!.Reset(intrabcChromaC4Base, intrabcChromaN, intrabcChromaR4Base, intrabcChromaN);
+                        s.VCoeffCtx!.Reset(intrabcChromaC4Base, intrabcChromaN, intrabcChromaR4Base, intrabcChromaN);
+                    }
 
                     // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                     // remarks. Same resets as the real ones just above.
-                    s.DecideUCoeffCtx!.Reset(intrabcChromaC4Base, intrabcChromaN, intrabcChromaR4Base, intrabcChromaN);
-                    s.DecideVCoeffCtx!.Reset(intrabcChromaC4Base, intrabcChromaN, intrabcChromaR4Base, intrabcChromaN);
+                    if (s.Phase != Av1EncodePhase.Emit)
+                    {
+                        s.DecideUCoeffCtx!.Reset(intrabcChromaC4Base, intrabcChromaN, intrabcChromaR4Base, intrabcChromaN);
+                        s.DecideVCoeffCtx!.Reset(intrabcChromaC4Base, intrabcChromaN, intrabcChromaR4Base, intrabcChromaN);
+                    }
 
                     int intrabcChromaX = s.Chroma444 ? x : x / 2;
                     int intrabcChromaY = s.Chroma444 ? y : y / 2;
@@ -6554,8 +6629,15 @@ internal static class Av1TileEncoder
         }
         else
         {
-        s.Symbols.WriteSymbol(s.Cdf.IntraFrameYMode[yModeCtx0][yModeCtx1], writtenYMode);
-        s.DecideCommitSink.WriteSymbol(s.DecideCdf.IntraFrameYMode[yModeCtx0][yModeCtx1], writtenYMode);
+        if (s.Phase != Av1EncodePhase.Decide)
+        {
+            s.Symbols.WriteSymbol(s.Cdf.IntraFrameYMode[yModeCtx0][yModeCtx1], writtenYMode);
+        }
+
+        if (s.Phase != Av1EncodePhase.Emit)
+        {
+            s.DecideCommitSink.WriteSymbol(s.DecideCdf.IntraFrameYMode[yModeCtx0][yModeCtx1], writtenYMode);
+        }
 
         // intra_angle_info_y() (spec §5.11.42): structurally present only when this leaf's size is >= 8x8
         // (Av1TileDecoder.IntraAngleInfoY's own _miSize >= Block8x8 gate) -- no longer always true now that
@@ -6566,8 +6648,15 @@ internal static class Av1TileEncoder
         // search's own bestMode was.
         if (sizeMi >= 2 && Av1IntraMode.IsDirectional(writtenYMode))
         {
-            s.Symbols.WriteSymbol(s.Cdf.AngleDelta[writtenYMode - Av1IntraMode.VPred], bestAngleDelta + MaxAngleDelta);
-            s.DecideCommitSink.WriteSymbol(s.DecideCdf.AngleDelta[writtenYMode - Av1IntraMode.VPred], bestAngleDelta + MaxAngleDelta);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                s.Symbols.WriteSymbol(s.Cdf.AngleDelta[writtenYMode - Av1IntraMode.VPred], bestAngleDelta + MaxAngleDelta);
+            }
+
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                s.DecideCommitSink.WriteSymbol(s.DecideCdf.AngleDelta[writtenYMode - Av1IntraMode.VPred], bestAngleDelta + MaxAngleDelta);
+            }
         }
 
         if (hasChroma)
@@ -6599,11 +6688,17 @@ internal static class Av1TileEncoder
             // value it just decoded, which is DC_PRED whenever palette overrode it here, regardless of what
             // this encoder's own pre-palette-decision bestMode search happened to prefer.
             var uvModeCdf = cflAllowed ? s.Cdf.UvModeCflAllowed[writtenYMode] : s.Cdf.UvModeCflNotAllowed[writtenYMode];
-            s.Symbols.WriteSymbol(uvModeCdf, writtenUvMode);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                s.Symbols.WriteSymbol(uvModeCdf, writtenUvMode);
+            }
 
             // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks.
             var decideUvModeCdf = cflAllowed ? s.DecideCdf.UvModeCflAllowed[writtenYMode] : s.DecideCdf.UvModeCflNotAllowed[writtenYMode];
-            s.DecideCommitSink.WriteSymbol(decideUvModeCdf, writtenUvMode);
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                s.DecideCommitSink.WriteSymbol(decideUvModeCdf, writtenUvMode);
+            }
 
             // read_cfl_alphas() (spec §5.11.45): structurally present, immediately after uv_mode and before
             // intra_angle_info_uv(), whenever uv_mode == UV_CFL_PRED (Av1TileDecoder's own read order at
@@ -6614,11 +6709,17 @@ internal static class Av1TileEncoder
             // uv_mode to DC_PRED, regardless of what bestUvMode the raw search preferred.
             if (writtenUvMode == Av1IntraMode.UvCflPred)
             {
-                WriteCflAlphas(s.Symbols, s.Cdf, bestAlphaU, bestAlphaV);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    WriteCflAlphas(s.Symbols, s.Cdf, bestAlphaU, bestAlphaV);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks.
-                WriteCflAlphas(s.DecideCommitSink, s.DecideCdf, bestAlphaU, bestAlphaV);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    WriteCflAlphas(s.DecideCommitSink, s.DecideCdf, bestAlphaU, bestAlphaV);
+                }
             }
 
             // intra_angle_info_uv() (spec §5.11.43): structurally present whenever this leaf's size is
@@ -6631,11 +6732,17 @@ internal static class Av1TileEncoder
             // Gated on writtenUvMode for the same palette-override reason as above.
             if (sizeMi >= 2 && Av1IntraMode.IsDirectional(writtenUvMode))
             {
-                s.Symbols.WriteSymbol(s.Cdf.AngleDelta[writtenUvMode - Av1IntraMode.VPred], bestUvAngleDelta + MaxAngleDelta);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    s.Symbols.WriteSymbol(s.Cdf.AngleDelta[writtenUvMode - Av1IntraMode.VPred], bestUvAngleDelta + MaxAngleDelta);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks.
-                s.DecideCommitSink.WriteSymbol(s.DecideCdf.AngleDelta[writtenUvMode - Av1IntraMode.VPred], bestUvAngleDelta + MaxAngleDelta);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    s.DecideCommitSink.WriteSymbol(s.DecideCdf.AngleDelta[writtenUvMode - Av1IntraMode.VPred], bestUvAngleDelta + MaxAngleDelta);
+                }
             }
         }
 
@@ -6649,17 +6756,31 @@ internal static class Av1TileEncoder
             if (writtenYMode == Av1IntraMode.DcPred)
             {
                 int paletteModeCtx = GetPaletteModeCtx(s, r, c, availU, availL);
-                s.Symbols.WriteSymbol(s.Cdf.PaletteYMode[bsizeCtx][paletteModeCtx], usedPalette ? 1 : 0);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    s.Symbols.WriteSymbol(s.Cdf.PaletteYMode[bsizeCtx][paletteModeCtx], usedPalette ? 1 : 0);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks.
-                s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteYMode[bsizeCtx][paletteModeCtx], usedPalette ? 1 : 0);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteYMode[bsizeCtx][paletteModeCtx], usedPalette ? 1 : 0);
+                }
 
                 if (usedPalette)
                 {
-                    s.Symbols.WriteSymbol(s.Cdf.PaletteYSize[bsizeCtx], nY - 2);
-                    s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteYSize[bsizeCtx], nY - 2);
-                    WritePaletteColorsY(s, s.PaletteColorsY, nY, r, c, availU, availL);
+                    if (s.Phase != Av1EncodePhase.Decide)
+                    {
+                        s.Symbols.WriteSymbol(s.Cdf.PaletteYSize[bsizeCtx], nY - 2);
+                        WritePaletteColorsY(s, s.PaletteColorsY, nY, r, c, availU, availL);
+                    }
+
+                    if (s.Phase != Av1EncodePhase.Emit)
+                    {
+                        s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteYSize[bsizeCtx], nY - 2);
+                    }
+
                     paletteSizeY = nY;
                 }
             }
@@ -6677,17 +6798,31 @@ internal static class Av1TileEncoder
                 // is false whenever no Y palette was written (paletteSizeY stays 0), so this is equivalent
                 // without needing to re-derive it from paletteSizeY.
                 int paletteUvModeCtx = usedPalette ? 1 : 0;
-                s.Symbols.WriteSymbol(s.Cdf.PaletteUvMode[paletteUvModeCtx], usedPalette ? 1 : 0);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    s.Symbols.WriteSymbol(s.Cdf.PaletteUvMode[paletteUvModeCtx], usedPalette ? 1 : 0);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks.
-                s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteUvMode[paletteUvModeCtx], usedPalette ? 1 : 0);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteUvMode[paletteUvModeCtx], usedPalette ? 1 : 0);
+                }
 
                 if (usedPalette)
                 {
-                    s.Symbols.WriteSymbol(s.Cdf.PaletteUvSize[bsizeCtx], nUv - 2);
-                    s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteUvSize[bsizeCtx], nUv - 2);
-                    WritePaletteColorsUv(s, s.PaletteColorsU, s.PaletteColorsV, nUv, r, c, availU, availL);
+                    if (s.Phase != Av1EncodePhase.Decide)
+                    {
+                        s.Symbols.WriteSymbol(s.Cdf.PaletteUvSize[bsizeCtx], nUv - 2);
+                        WritePaletteColorsUv(s, s.PaletteColorsU, s.PaletteColorsV, nUv, r, c, availU, availL);
+                    }
+
+                    if (s.Phase != Av1EncodePhase.Emit)
+                    {
+                        s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteUvSize[bsizeCtx], nUv - 2);
+                    }
+
                     paletteSizeUV = nUv;
                 }
             }
@@ -6701,15 +6836,28 @@ internal static class Av1TileEncoder
         // already (see the search above), so no separate re-check of those two conditions is needed here.
         if (!usedPalette && bestMode == Av1IntraMode.DcPred && sizePixels <= 32)
         {
-            s.Symbols.WriteSymbol(s.Cdf.FilterIntra[bSize], bestUseFilterIntra ? 1 : 0);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                s.Symbols.WriteSymbol(s.Cdf.FilterIntra[bSize], bestUseFilterIntra ? 1 : 0);
+            }
 
             // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks.
-            s.DecideCommitSink.WriteSymbol(s.DecideCdf.FilterIntra[bSize], bestUseFilterIntra ? 1 : 0);
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                s.DecideCommitSink.WriteSymbol(s.DecideCdf.FilterIntra[bSize], bestUseFilterIntra ? 1 : 0);
+            }
 
             if (bestUseFilterIntra)
             {
-                s.Symbols.WriteSymbol(s.Cdf.FilterIntraMode, bestFilterIntraMode);
-                s.DecideCommitSink.WriteSymbol(s.DecideCdf.FilterIntraMode, bestFilterIntraMode);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    s.Symbols.WriteSymbol(s.Cdf.FilterIntraMode, bestFilterIntraMode);
+                }
+
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    s.DecideCommitSink.WriteSymbol(s.DecideCdf.FilterIntraMode, bestFilterIntraMode);
+                }
             }
         }
 
@@ -6728,10 +6876,16 @@ internal static class Av1TileEncoder
             int onscreenHeight = Math.Min(sizePixels, (s.TrueMiRows - r) * 4);
 
             var colorMap = s.PaletteColorMap;
-            WriteColorMapTokens(s, colorMap, sizePixels, sizePixels, onscreenWidth, onscreenHeight, nY, s.Cdf.PaletteYColorIndex);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                WriteColorMapTokens(s, colorMap, sizePixels, sizePixels, onscreenWidth, onscreenHeight, nY, s.Cdf.PaletteYColorIndex);
+            }
 
             // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks.
-            WriteColorMapTokens(s.DecideCommitSink, colorMap, sizePixels, sizePixels, onscreenWidth, onscreenHeight, nY, s.DecideCdf.PaletteYColorIndex);
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                WriteColorMapTokens(s.DecideCommitSink, colorMap, sizePixels, sizePixels, onscreenWidth, onscreenHeight, nY, s.DecideCdf.PaletteYColorIndex);
+            }
 
             CopyColorMapToFrameGrid(s.PaletteColorMapYGrid, s.YWidth, colorMap, sizePixels, x, y, onscreenWidth, onscreenHeight);
 
@@ -6760,11 +6914,17 @@ internal static class Av1TileEncoder
                 int chromaSubX = s.Chroma444 ? 0 : 1;
                 int chromaOnscreenWidth = Math.Max(1, Math.Min(chromaSizePixels, ((s.TrueMiCols - c) * 4) >> chromaSubX));
                 int chromaOnscreenHeight = Math.Max(1, Math.Min(chromaSizePixels, ((s.TrueMiRows - r) * 4) >> chromaSubX));
-                WriteColorMapTokens(s, s.PaletteColorMapUv, chromaSizePixels, chromaSizePixels, chromaOnscreenWidth, chromaOnscreenHeight, nUv, s.Cdf.PaletteUvColorIndex);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    WriteColorMapTokens(s, s.PaletteColorMapUv, chromaSizePixels, chromaSizePixels, chromaOnscreenWidth, chromaOnscreenHeight, nUv, s.Cdf.PaletteUvColorIndex);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks.
-                WriteColorMapTokens(s.DecideCommitSink, s.PaletteColorMapUv, chromaSizePixels, chromaSizePixels, chromaOnscreenWidth, chromaOnscreenHeight, nUv, s.DecideCdf.PaletteUvColorIndex);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    WriteColorMapTokens(s.DecideCommitSink, s.PaletteColorMapUv, chromaSizePixels, chromaSizePixels, chromaOnscreenWidth, chromaOnscreenHeight, nUv, s.DecideCdf.PaletteUvColorIndex);
+                }
 
                 CopyColorMapToFrameGrid(s.PaletteColorMapUvGrid, s.ChromaWidth, s.PaletteColorMapUv, chromaSizePixels, chromaX, chromaY, chromaOnscreenWidth, chromaOnscreenHeight);
 
@@ -6859,10 +7019,16 @@ internal static class Av1TileEncoder
             int onscreenHeight = Math.Min(sizePixels, (s.TrueMiRows - r) * 4);
 
             var colorMapY = s.PaletteColorMap;
-            WriteColorMapTokens(s, colorMapY, sizePixels, sizePixels, onscreenWidth, onscreenHeight, nY, s.Cdf.PaletteYColorIndex);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                WriteColorMapTokens(s, colorMapY, sizePixels, sizePixels, onscreenWidth, onscreenHeight, nY, s.Cdf.PaletteYColorIndex);
+            }
 
             // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks.
-            WriteColorMapTokens(s.DecideCommitSink, colorMapY, sizePixels, sizePixels, onscreenWidth, onscreenHeight, nY, s.DecideCdf.PaletteYColorIndex);
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                WriteColorMapTokens(s.DecideCommitSink, colorMapY, sizePixels, sizePixels, onscreenWidth, onscreenHeight, nY, s.DecideCdf.PaletteYColorIndex);
+            }
 
             CopyColorMapToFrameGrid(s.PaletteColorMapYGrid, s.YWidth, colorMapY, sizePixels, x, y, onscreenWidth, onscreenHeight);
 
@@ -6870,11 +7036,17 @@ internal static class Av1TileEncoder
             if (hasChroma)
             {
                 colorMapUv = s.PaletteColorMapUv;
-                WriteColorMapTokens(s, colorMapUv, sizePixels, sizePixels, onscreenWidth, onscreenHeight, nUv, s.Cdf.PaletteUvColorIndex);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    WriteColorMapTokens(s, colorMapUv, sizePixels, sizePixels, onscreenWidth, onscreenHeight, nUv, s.Cdf.PaletteUvColorIndex);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks.
-                WriteColorMapTokens(s.DecideCommitSink, colorMapUv, sizePixels, sizePixels, onscreenWidth, onscreenHeight, nUv, s.DecideCdf.PaletteUvColorIndex);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    WriteColorMapTokens(s.DecideCommitSink, colorMapUv, sizePixels, sizePixels, onscreenWidth, onscreenHeight, nUv, s.DecideCdf.PaletteUvColorIndex);
+                }
                 CopyColorMapToFrameGrid(s.PaletteColorMapUvGrid, s.ChromaWidth, colorMapUv, sizePixels, x, y, onscreenWidth, onscreenHeight);
             }
 
@@ -7022,11 +7194,17 @@ internal static class Av1TileEncoder
                     // but is genuinely wrong once VDct/HDct (Av1TxClass.ClassVert/ClassHoriz) become reachable --
                     // see Av1CoefficientWriter's own class remarks for the full account of the resulting
                     // corruption this fixes.
-                    Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, sizePixels, ptype: 0, c, r, s.YCoeffCtx, writeLumaTxType, txType: bestTxType);
+                    if (s.Phase != Av1EncodePhase.Decide)
+                    {
+                        Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, sizePixels, ptype: 0, c, r, s.YCoeffCtx, writeLumaTxType, txType: bestTxType);
+                    }
 
                     // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                     // remarks. Same arguments as the real commit just above.
-                    Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, sizePixels, ptype: 0, c, r, s.DecideYCoeffCtx, decideWriteLumaTxType, txType: bestTxType);
+                    if (s.Phase != Av1EncodePhase.Emit)
+                    {
+                        Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, sizePixels, ptype: 0, c, r, s.DecideYCoeffCtx, decideWriteLumaTxType, txType: bestTxType);
+                    }
 
                     MarkLumaBlockDecoded(s, r, c, sizeMi, sizeMi);
 
@@ -7085,11 +7263,17 @@ internal static class Av1TileEncoder
                         // sub-block was already marked true during the early real-reconstruction loop above
                         // -- required there for sub-block 1-3's own progressive neighbor prediction within
                         // this same leaf -- so it isn't repeated here.)
-                        Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, s.Levels, halfSizeWrite, ptype: 0, subC, subR, s.YCoeffCtx, writeSubLumaTxType, blockSize: sizePixels, txType: subTxType);
+                        if (s.Phase != Av1EncodePhase.Decide)
+                        {
+                            Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, s.Levels, halfSizeWrite, ptype: 0, subC, subR, s.YCoeffCtx, writeSubLumaTxType, blockSize: sizePixels, txType: subTxType);
+                        }
 
                         // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's
                         // own remarks. Same arguments as the real commit just above.
-                        Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, s.Levels, halfSizeWrite, ptype: 0, subC, subR, s.DecideYCoeffCtx, decideWriteSubLumaTxType, blockSize: sizePixels, txType: subTxType);
+                        if (s.Phase != Av1EncodePhase.Emit)
+                        {
+                            Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, s.Levels, halfSizeWrite, ptype: 0, subC, subR, s.DecideYCoeffCtx, decideWriteSubLumaTxType, blockSize: sizePixels, txType: subTxType);
+                        }
 
                         // Two-pass tile-encoder architecture, Stage 1a -- see TileState.TxTypeGrid's own
                         // remarks. chosenTxDepth == 1: tx_type genuinely differs per sub-block, so this
@@ -7577,30 +7761,57 @@ internal static class Av1TileEncoder
 
         // skip: true only for a fully palette-covered, zero-residual leaf, exactly mirroring EncodeLeaf's
         // own Skip[skipCtx] write.
-        s.Symbols.WriteSymbol(s.Cdf.Skip[skipCtx], paletteAllZeroResidual ? 1 : 0);
+        if (s.Phase != Av1EncodePhase.Decide)
+        {
+            s.Symbols.WriteSymbol(s.Cdf.Skip[skipCtx], paletteAllZeroResidual ? 1 : 0);
+        }
 
         // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks.
-        s.DecideCommitSink.WriteSymbol(s.DecideCdf.Skip[skipCtx], paletteAllZeroResidual ? 1 : 0);
+        if (s.Phase != Av1EncodePhase.Emit)
+        {
+            s.DecideCommitSink.WriteSymbol(s.DecideCdf.Skip[skipCtx], paletteAllZeroResidual ? 1 : 0);
+        }
 
         // use_intrabc (spec §5.11.7): structurally present whenever the frame allows it (tied to lossless AND
         // real content-based IntraBC detection, same as EncodeLeaf's intrabcStructurallyPresent), regardless
         // of this leaf's shape -- always 0 here.
         if (s.Lossless && s.AllowIntrabc)
         {
-            s.Symbols.WriteSymbol(s.Cdf.Intrabc, 0);
-            s.DecideCommitSink.WriteSymbol(s.DecideCdf.Intrabc, 0);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                s.Symbols.WriteSymbol(s.Cdf.Intrabc, 0);
+            }
+
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                s.DecideCommitSink.WriteSymbol(s.DecideCdf.Intrabc, 0);
+            }
         }
 
-        s.Symbols.WriteSymbol(s.Cdf.IntraFrameYMode[yModeCtx0][yModeCtx1], writtenYMode);
-        s.DecideCommitSink.WriteSymbol(s.DecideCdf.IntraFrameYMode[yModeCtx0][yModeCtx1], writtenYMode);
+        if (s.Phase != Av1EncodePhase.Decide)
+        {
+            s.Symbols.WriteSymbol(s.Cdf.IntraFrameYMode[yModeCtx0][yModeCtx1], writtenYMode);
+        }
+
+        if (s.Phase != Av1EncodePhase.Emit)
+        {
+            s.DecideCommitSink.WriteSymbol(s.DecideCdf.IntraFrameYMode[yModeCtx0][yModeCtx1], writtenYMode);
+        }
 
         // intra_angle_info_y() (spec §5.11.42): gated on writtenYMode, not bestMode -- never fires when
         // palette overrides y_mode to DC_PRED, regardless of what the raw search's own bestMode was,
         // mirroring EncodeLeaf's own identical writtenYMode-gated write exactly.
         if (angleDeltaAllowed && Av1IntraMode.IsDirectional(writtenYMode))
         {
-            s.Symbols.WriteSymbol(s.Cdf.AngleDelta[writtenYMode - Av1IntraMode.VPred], bestAngleDelta + MaxAngleDelta);
-            s.DecideCommitSink.WriteSymbol(s.DecideCdf.AngleDelta[writtenYMode - Av1IntraMode.VPred], bestAngleDelta + MaxAngleDelta);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                s.Symbols.WriteSymbol(s.Cdf.AngleDelta[writtenYMode - Av1IntraMode.VPred], bestAngleDelta + MaxAngleDelta);
+            }
+
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                s.DecideCommitSink.WriteSymbol(s.DecideCdf.AngleDelta[writtenYMode - Av1IntraMode.VPred], bestAngleDelta + MaxAngleDelta);
+            }
         }
 
         if (hasChroma)
@@ -7611,11 +7822,17 @@ internal static class Av1TileEncoder
             // SearchRectUvMode ran (which needs it too, for its own uv_mode signaling-cost term) -- reused
             // here rather than recomputed, since bSize/Chroma444 can't have changed in between.
             var uvModeCdf = cflAllowed ? s.Cdf.UvModeCflAllowed[writtenYMode] : s.Cdf.UvModeCflNotAllowed[writtenYMode];
-            s.Symbols.WriteSymbol(uvModeCdf, writtenUvMode);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                s.Symbols.WriteSymbol(uvModeCdf, writtenUvMode);
+            }
 
             // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks.
             var decideUvModeCdf = cflAllowed ? s.DecideCdf.UvModeCflAllowed[writtenYMode] : s.DecideCdf.UvModeCflNotAllowed[writtenYMode];
-            s.DecideCommitSink.WriteSymbol(decideUvModeCdf, writtenUvMode);
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                s.DecideCommitSink.WriteSymbol(decideUvModeCdf, writtenUvMode);
+            }
 
             // intra_angle_info_uv() (spec §5.11.43): structurally present whenever this leaf's angle-delta
             // gate allows it and the searched uv_mode is directional, mirroring EncodeLeaf's own identical
@@ -7623,11 +7840,17 @@ internal static class Av1TileEncoder
             // reason as writtenYMode's own intra_angle_info_y write above.
             if (angleDeltaAllowed && Av1IntraMode.IsDirectional(writtenUvMode))
             {
-                s.Symbols.WriteSymbol(s.Cdf.AngleDelta[writtenUvMode - Av1IntraMode.VPred], bestUvAngleDelta + MaxAngleDelta);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    s.Symbols.WriteSymbol(s.Cdf.AngleDelta[writtenUvMode - Av1IntraMode.VPred], bestUvAngleDelta + MaxAngleDelta);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks.
-                s.DecideCommitSink.WriteSymbol(s.DecideCdf.AngleDelta[writtenUvMode - Av1IntraMode.VPred], bestUvAngleDelta + MaxAngleDelta);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    s.DecideCommitSink.WriteSymbol(s.DecideCdf.AngleDelta[writtenUvMode - Av1IntraMode.VPred], bestUvAngleDelta + MaxAngleDelta);
+                }
             }
         }
 
@@ -7650,17 +7873,30 @@ internal static class Av1TileEncoder
             if (writtenYMode == Av1IntraMode.DcPred)
             {
                 int paletteModeCtx = GetPaletteModeCtx(s, r, c, availU, availL);
-                s.Symbols.WriteSymbol(s.Cdf.PaletteYMode[bsizeCtx][paletteModeCtx], usedPalette ? 1 : 0);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    s.Symbols.WriteSymbol(s.Cdf.PaletteYMode[bsizeCtx][paletteModeCtx], usedPalette ? 1 : 0);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks.
-                s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteYMode[bsizeCtx][paletteModeCtx], usedPalette ? 1 : 0);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteYMode[bsizeCtx][paletteModeCtx], usedPalette ? 1 : 0);
+                }
 
                 if (usedPalette)
                 {
-                    s.Symbols.WriteSymbol(s.Cdf.PaletteYSize[bsizeCtx], nY - 2);
-                    s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteYSize[bsizeCtx], nY - 2);
-                    WritePaletteColorsY(s, s.PaletteColorsY, nY, r, c, availU, availL);
+                    if (s.Phase != Av1EncodePhase.Decide)
+                    {
+                        s.Symbols.WriteSymbol(s.Cdf.PaletteYSize[bsizeCtx], nY - 2);
+                        WritePaletteColorsY(s, s.PaletteColorsY, nY, r, c, availU, availL);
+                    }
+
+                    if (s.Phase != Av1EncodePhase.Emit)
+                    {
+                        s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteYSize[bsizeCtx], nY - 2);
+                    }
                 }
             }
 
@@ -7674,17 +7910,30 @@ internal static class Av1TileEncoder
             if (hasChroma && writtenUvMode == Av1IntraMode.DcPred)
             {
                 int paletteUvModeCtx = usedPalette ? 1 : 0;
-                s.Symbols.WriteSymbol(s.Cdf.PaletteUvMode[paletteUvModeCtx], usedPalette ? 1 : 0);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    s.Symbols.WriteSymbol(s.Cdf.PaletteUvMode[paletteUvModeCtx], usedPalette ? 1 : 0);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks.
-                s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteUvMode[paletteUvModeCtx], usedPalette ? 1 : 0);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteUvMode[paletteUvModeCtx], usedPalette ? 1 : 0);
+                }
 
                 if (usedPalette)
                 {
-                    s.Symbols.WriteSymbol(s.Cdf.PaletteUvSize[bsizeCtx], nUv - 2);
-                    s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteUvSize[bsizeCtx], nUv - 2);
-                    WritePaletteColorsUv(s, s.PaletteColorsU, s.PaletteColorsV, nUv, r, c, availU, availL);
+                    if (s.Phase != Av1EncodePhase.Decide)
+                    {
+                        s.Symbols.WriteSymbol(s.Cdf.PaletteUvSize[bsizeCtx], nUv - 2);
+                        WritePaletteColorsUv(s, s.PaletteColorsU, s.PaletteColorsV, nUv, r, c, availU, availL);
+                    }
+
+                    if (s.Phase != Av1EncodePhase.Emit)
+                    {
+                        s.DecideCommitSink.WriteSymbol(s.DecideCdf.PaletteUvSize[bsizeCtx], nUv - 2);
+                    }
                 }
             }
         }
@@ -7699,15 +7948,28 @@ internal static class Av1TileEncoder
         // see the real search above) rather than an unconditional 0.
         if (!usedPalette && bestMode == Av1IntraMode.DcPred && Math.Max(widthPixels, heightPixels) <= 32)
         {
-            s.Symbols.WriteSymbol(s.Cdf.FilterIntra[bSize], bestUseFilterIntra ? 1 : 0);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                s.Symbols.WriteSymbol(s.Cdf.FilterIntra[bSize], bestUseFilterIntra ? 1 : 0);
+            }
 
             // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks.
-            s.DecideCommitSink.WriteSymbol(s.DecideCdf.FilterIntra[bSize], bestUseFilterIntra ? 1 : 0);
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                s.DecideCommitSink.WriteSymbol(s.DecideCdf.FilterIntra[bSize], bestUseFilterIntra ? 1 : 0);
+            }
 
             if (bestUseFilterIntra)
             {
-                s.Symbols.WriteSymbol(s.Cdf.FilterIntraMode, bestFilterIntraMode);
-                s.DecideCommitSink.WriteSymbol(s.DecideCdf.FilterIntraMode, bestFilterIntraMode);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    s.Symbols.WriteSymbol(s.Cdf.FilterIntraMode, bestFilterIntraMode);
+                }
+
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    s.DecideCommitSink.WriteSymbol(s.DecideCdf.FilterIntraMode, bestFilterIntraMode);
+                }
             }
         }
 
@@ -7767,10 +8029,16 @@ internal static class Av1TileEncoder
             // SearchLosslessYPalette/SearchLosslessUvPalette already built the winning candidate's own color
             // map directly into PaletteColorMap/PaletteColorMapUv as a side effect of finding it -- no
             // rebuild needed (see EncodeLeaf's identical remark).
-            WriteColorMapTokens(s, s.PaletteColorMap, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nY, s.Cdf.PaletteYColorIndex);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                WriteColorMapTokens(s, s.PaletteColorMap, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nY, s.Cdf.PaletteYColorIndex);
+            }
 
             // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks.
-            WriteColorMapTokens(s.DecideCommitSink, s.PaletteColorMap, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nY, s.DecideCdf.PaletteYColorIndex);
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                WriteColorMapTokens(s.DecideCommitSink, s.PaletteColorMap, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nY, s.DecideCdf.PaletteYColorIndex);
+            }
 
             CopyColorMapToFrameGrid(s.PaletteColorMapYGrid, s.YWidth, s.PaletteColorMap, widthPixels, x, y, onscreenWidth, onscreenHeight);
 
@@ -7785,11 +8053,17 @@ internal static class Av1TileEncoder
 
             if (hasChroma)
             {
-                WriteColorMapTokens(s, s.PaletteColorMapUv, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nUv, s.Cdf.PaletteUvColorIndex);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    WriteColorMapTokens(s, s.PaletteColorMapUv, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nUv, s.Cdf.PaletteUvColorIndex);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks.
-                WriteColorMapTokens(s.DecideCommitSink, s.PaletteColorMapUv, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nUv, s.DecideCdf.PaletteUvColorIndex);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    WriteColorMapTokens(s.DecideCommitSink, s.PaletteColorMapUv, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nUv, s.DecideCdf.PaletteUvColorIndex);
+                }
 
                 CopyColorMapToFrameGrid(s.PaletteColorMapUvGrid, s.ChromaWidth, s.PaletteColorMapUv, widthPixels, x, y, onscreenWidth, onscreenHeight);
 
@@ -7817,20 +8091,32 @@ internal static class Av1TileEncoder
             int onscreenWidth = Math.Min(widthPixels, (s.TrueMiCols - c) * 4);
             int onscreenHeight = Math.Min(heightPixels, (s.TrueMiRows - r) * 4);
 
-            WriteColorMapTokens(s, s.PaletteColorMap, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nY, s.Cdf.PaletteYColorIndex);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                WriteColorMapTokens(s, s.PaletteColorMap, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nY, s.Cdf.PaletteYColorIndex);
+            }
 
             // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks.
-            WriteColorMapTokens(s.DecideCommitSink, s.PaletteColorMap, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nY, s.DecideCdf.PaletteYColorIndex);
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                WriteColorMapTokens(s.DecideCommitSink, s.PaletteColorMap, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nY, s.DecideCdf.PaletteYColorIndex);
+            }
 
             CopyColorMapToFrameGrid(s.PaletteColorMapYGrid, s.YWidth, s.PaletteColorMap, widthPixels, x, y, onscreenWidth, onscreenHeight);
 
             if (hasChroma)
             {
-                WriteColorMapTokens(s, s.PaletteColorMapUv, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nUv, s.Cdf.PaletteUvColorIndex);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    WriteColorMapTokens(s, s.PaletteColorMapUv, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nUv, s.Cdf.PaletteUvColorIndex);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks.
-                WriteColorMapTokens(s.DecideCommitSink, s.PaletteColorMapUv, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nUv, s.DecideCdf.PaletteUvColorIndex);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    WriteColorMapTokens(s.DecideCommitSink, s.PaletteColorMapUv, widthPixels, heightPixels, onscreenWidth, onscreenHeight, nUv, s.DecideCdf.PaletteUvColorIndex);
+                }
 
                 CopyColorMapToFrameGrid(s.PaletteColorMapUvGrid, s.ChromaWidth, s.PaletteColorMapUv, widthPixels, x, y, onscreenWidth, onscreenHeight);
             }
@@ -7905,11 +8191,17 @@ internal static class Av1TileEncoder
                     Array.Copy(pred, i * 4, s.ReconY, ((subY + i) * s.YWidth) + subX, 4);
                 }
 
-                Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks. Same arguments as the real commit just above.
-                Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype: 0, subC, subR, s.DecideYCoeffCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype: 0, subC, subR, s.DecideYCoeffCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
+                }
 
                 Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
                 SetBlockDecoded(s, 0, subBlockMiRow, subBlockMiCol, true);
@@ -7995,11 +8287,17 @@ internal static class Av1TileEncoder
 
                         int chromaBlockSizeArg = (nW * nH > 1) ? widthPixels : 0;
                         int chromaBlockHeightArg = (nW * nH > 1) ? heightPixels : 0;
-                        Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 1, subC, subR, ctx, writeLumaTxType: null, blockSize: chromaBlockSizeArg, blockHeight: chromaBlockHeightArg);
+                        if (s.Phase != Av1EncodePhase.Decide)
+                        {
+                            Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 1, subC, subR, ctx, writeLumaTxType: null, blockSize: chromaBlockSizeArg, blockHeight: chromaBlockHeightArg);
+                        }
 
                         // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's
                         // own remarks. Same arguments as the real commit just above.
-                        Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype: 1, subC, subR, decideCtx, writeLumaTxType: null, blockSize: chromaBlockSizeArg, blockHeight: chromaBlockHeightArg);
+                        if (s.Phase != Av1EncodePhase.Emit)
+                        {
+                            Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype: 1, subC, subR, decideCtx, writeLumaTxType: null, blockSize: chromaBlockSizeArg, blockHeight: chromaBlockHeightArg);
+                        }
 
                         Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
                         SetBlockDecoded(s, planeIndex, subBlockMiRow, subBlockMiCol, true);
@@ -9092,11 +9390,17 @@ internal static class Av1TileEncoder
                     Array.Copy(pred, i * 4, s.ReconY, ((subY + i) * s.YWidth) + subX, 4);
                 }
 
-                Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: sizePixels);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: sizePixels);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks. Same arguments as the real commit just above.
-                Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype: 0, subC, subR, s.DecideYCoeffCtx, writeLumaTxType: null, blockSize: sizePixels);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype: 0, subC, subR, s.DecideYCoeffCtx, writeLumaTxType: null, blockSize: sizePixels);
+                }
 
                 Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
 
@@ -9171,11 +9475,17 @@ internal static class Av1TileEncoder
                     }
 
                     int chromaBlockSizeArg = chromaN > 1 ? chromaSize : 0;
-                    Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null, blockSize: chromaBlockSizeArg);
+                    if (s.Phase != Av1EncodePhase.Decide)
+                    {
+                        Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null, blockSize: chromaBlockSizeArg);
+                    }
 
                     // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                     // remarks. Same arguments as the real commit just above.
-                    Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype: 1, chromaC4, chromaR4, decideCtx, writeLumaTxType: null, blockSize: chromaBlockSizeArg);
+                    if (s.Phase != Av1EncodePhase.Emit)
+                    {
+                        Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype: 1, chromaC4, chromaR4, decideCtx, writeLumaTxType: null, blockSize: chromaBlockSizeArg);
+                    }
 
                     Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, subCx, subCy, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
                 }
@@ -9555,10 +9865,17 @@ internal static class Av1TileEncoder
     /// <summary>Write-side mirror of <c>Av1TileDecoder.ReadMv</c>.</summary>
     private static void WriteMv(TileState s, int mvRow, int mvCol, int predMvRow, int predMvCol)
     {
-        WriteMv(s, s.Symbols, s.Cdf, mvRow, mvCol, predMvRow, predMvCol);
+        // Two-pass tile-encoder architecture, Stage 1b-ii -- see Av1EncodePhase's own remarks.
+        if (s.Phase != Av1EncodePhase.Decide)
+        {
+            WriteMv(s, s.Symbols, s.Cdf, mvRow, mvCol, predMvRow, predMvCol);
+        }
 
         // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks.
-        WriteMv(s, s.DecideCommitSink, s.DecideCdf, mvRow, mvCol, predMvRow, predMvCol);
+        if (s.Phase != Av1EncodePhase.Emit)
+        {
+            WriteMv(s, s.DecideCommitSink, s.DecideCdf, mvRow, mvCol, predMvRow, predMvCol);
+        }
     }
 
     /// <summary>
@@ -9763,17 +10080,23 @@ internal static class Av1TileEncoder
             _ => s.Cdf.Tx8x8[ctx],
         };
 
-        s.Symbols.WriteSymbol(cdf, txDepth);
+        if (s.Phase != Av1EncodePhase.Decide)
+        {
+            s.Symbols.WriteSymbol(cdf, txDepth);
+        }
 
         // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks.
-        var decideCdf = maxTxDepth switch
+        if (s.Phase != Av1EncodePhase.Emit)
         {
-            4 => s.DecideCdf.Tx64x64[ctx],
-            3 => s.DecideCdf.Tx32x32[ctx],
-            2 => s.DecideCdf.Tx16x16[ctx],
-            _ => s.DecideCdf.Tx8x8[ctx],
-        };
-        s.DecideCommitSink.WriteSymbol(decideCdf, txDepth);
+            var decideCdf = maxTxDepth switch
+            {
+                4 => s.DecideCdf.Tx64x64[ctx],
+                3 => s.DecideCdf.Tx32x32[ctx],
+                2 => s.DecideCdf.Tx16x16[ctx],
+                _ => s.DecideCdf.Tx8x8[ctx],
+            };
+            s.DecideCommitSink.WriteSymbol(decideCdf, txDepth);
+        }
     }
 
     private static int GetPaletteModeCtx(TileState s, int r, int c, bool availU, bool availL)
@@ -10234,11 +10557,17 @@ internal static class Av1TileEncoder
                     // (x4, y4) = (chromaC4, chromaR4), not (chromaR4, chromaC4) -- see EncodeLeaf's luma call
                     // site for why the argument order matters here (x4 = column, y4 = row) even though it's
                     // unobservable on any square/single-superblock chroma grid.
-                    Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null, blockSize: blockSizeArg);
+                    if (s.Phase != Av1EncodePhase.Decide)
+                    {
+                        Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null, blockSize: blockSizeArg);
+                    }
 
                     // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                     // remarks. Same arguments as the real commit just above.
-                    Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype: 1, chromaC4, chromaR4, decideCtx, writeLumaTxType: null, blockSize: blockSizeArg);
+                    if (s.Phase != Av1EncodePhase.Emit)
+                    {
+                        Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype: 1, chromaC4, chromaR4, decideCtx, writeLumaTxType: null, blockSize: blockSizeArg);
+                    }
 
                     Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, s.Lossless, uvTxType);
                     SetBlockDecoded(s, planeIndex, subBlockChromaRow, subBlockChromaCol, true);
@@ -10348,11 +10677,17 @@ internal static class Av1TileEncoder
                 Array.Copy(pred, i * chromaBlockSizePixels, recon, ((cy + i) * s.ChromaWidth) + cx, chromaBlockSizePixels);
             }
 
-            Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, chromaBlockSizePixels, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null);
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, chromaBlockSizePixels, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null);
+            }
 
             // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own remarks.
             // Same arguments as the real commit just above.
-            Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, chromaBlockSizePixels, ptype: 1, chromaC4, chromaR4, decideCtx, writeLumaTxType: null);
+            if (s.Phase != Av1EncodePhase.Emit)
+            {
+                Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, chromaBlockSizePixels, ptype: 1, chromaC4, chromaR4, decideCtx, writeLumaTxType: null);
+            }
 
             Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, chromaBlockSizePixels, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: false, uvTxType);
 
@@ -10462,11 +10797,17 @@ internal static class Av1TileEncoder
                 // shortcut, see WriteCoeffs's remarks), but exactly 4 for a genuine 4x4 leaf (n == 1), where
                 // it deliberately *does* take that shortcut -- WriteCoeffs's own blockSize == size check
                 // handles both correctly without this call site needing to special-case n == 1 itself.
-                Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: blockSize);
+                if (s.Phase != Av1EncodePhase.Decide)
+                {
+                    Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: blockSize);
+                }
 
                 // Two-pass tile-encoder architecture, Stage 1b -- see TileState.DecideYCoeffCtx's own
                 // remarks. Same arguments as the real commit just above.
-                Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype: 0, subC, subR, s.DecideYCoeffCtx, writeLumaTxType: null, blockSize: blockSize);
+                if (s.Phase != Av1EncodePhase.Emit)
+                {
+                    Av1CoefficientWriter.WriteCoeffs(s.DecideCommitSink, s.DecideCdf, levels, 4, ptype: 0, subC, subR, s.DecideYCoeffCtx, writeLumaTxType: null, blockSize: blockSize);
+                }
 
                 Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
                 SetBlockDecoded(s, 0, subBlockMiRow, subBlockMiCol, true);
