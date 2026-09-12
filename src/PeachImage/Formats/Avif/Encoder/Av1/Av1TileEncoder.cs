@@ -1246,13 +1246,25 @@ internal static class Av1TileEncoder
         }
         else if (hasCols)
         {
-            var splitOrHorzCdf = BuildSplitOrHorzCdf(partitionCdf, bSize);
-            s.Symbols.WriteSymbol(splitOrHorzCdf, decidedType == Av1PartitionType.Split ? 1 : 0);
+            // Two-pass tile-encoder architecture, Stage 1b-ii -- see Av1EncodePhase's own remarks. A fresh,
+            // non-persistent local CDF (BuildSplitOrHorzCdf's own remarks) -- real-only, no decide-tracking
+            // counterpart needed (nothing persistent to adapt), but still a real bitstream write that must
+            // not fire during a genuine Decide-only pass.
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                var splitOrHorzCdf = BuildSplitOrHorzCdf(partitionCdf, bSize);
+                s.Symbols.WriteSymbol(splitOrHorzCdf, decidedType == Av1PartitionType.Split ? 1 : 0);
+            }
         }
         else if (hasRows)
         {
-            var splitOrVertCdf = BuildSplitOrVertCdf(partitionCdf, bSize);
-            s.Symbols.WriteSymbol(splitOrVertCdf, decidedType == Av1PartitionType.Split ? 1 : 0);
+            // Two-pass tile-encoder architecture, Stage 1b-ii -- see Av1EncodePhase's own remarks. Same
+            // rationale as the split_or_horz branch above.
+            if (s.Phase != Av1EncodePhase.Decide)
+            {
+                var splitOrVertCdf = BuildSplitOrVertCdf(partitionCdf, bSize);
+                s.Symbols.WriteSymbol(splitOrVertCdf, decidedType == Av1PartitionType.Split ? 1 : 0);
+            }
         }
 
         // else: neither hasRows nor hasCols -- partition is forced to Split with no symbol read/written at
