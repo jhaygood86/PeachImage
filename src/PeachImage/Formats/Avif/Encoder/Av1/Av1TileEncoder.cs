@@ -345,6 +345,11 @@ internal static class Av1TileEncoder
             // baseQIdx; values irrelevant until the first real refresh, which happens before any read).
             DecideCdf = new Av1CdfContext(baseQIdx),
 
+            // Two-pass tile-encoder architecture, Stage 1b (Round N+57) -- see TileState.CostCdfSnapshots's
+            // own remarks. Empty until the top-level superblock loop below appends this frame's first
+            // snapshot.
+            CostCdfSnapshots = [],
+
             Symbols = symbols,
             YModes = new int[miCols * miRows],
             UvModes = new int[miCols * miRows],
@@ -514,6 +519,16 @@ internal static class Av1TileEncoder
                     // becomes a genuine, independent decide-time adaptation instead.
                     state.DecideCdf.CopyFrom(state.Cdf);
                     state.CostCdf.CopyFrom(state.DecideCdf);
+
+                    // Two-pass tile-encoder architecture, Stage 1b (Round N+57) -- see
+                    // TileState.CostCdfSnapshots's own remarks: an independent deep copy (not a reference),
+                    // captured here so a future EmitTile can re-derive this exact superblock's own CostCdf
+                    // value instead of reading DecideCdf's by-then-final, whole-frame-adapted state. Purely
+                    // additive today -- not yet read anywhere.
+                    var costCdfSnapshot = new Av1CdfContext(baseQIdx);
+                    costCdfSnapshot.CopyFrom(state.CostCdf);
+                    state.CostCdfSnapshots.Add(costCdfSnapshot);
+
                     ClearBlockDecodedFlags(state, r, c, sbSize4: sbSizeMi);
 
                     // Decide phase runs to completion for this whole superblock's own subtree in one
@@ -740,6 +755,39 @@ internal static class Av1TileEncoder
         /// <see cref="CostCdf"/>'s own refresh call site again.
         /// </summary>
         public required Av1CdfContext DecideCdf;
+
+        /// <summary>
+        /// Two-pass tile-encoder architecture, Stage 1b (Round N+57 correction/prerequisite): a real,
+        /// independent deep copy of <see cref="CostCdf"/>, captured once per top-level superblock
+        /// (immediately after that superblock's own <c>CostCdf.CopyFrom(DecideCdf)</c> refresh in
+        /// <see cref="EncodeTile"/>'s top-level loop), in superblock visitation order.
+        ///
+        /// <para>Found necessary by direct source reading of <see cref="OptimizeCoeffTrellis"/>: contrary to
+        /// this project's own plan doc's original claim that coefficient quantization has "no CDF-dependent
+        /// RDO/trellis step," trellis's own per-candidate cost comparison (<c>GetCost</c>'s
+        /// <see cref="Av1CoefficientWriter.WriteCoeffs"/> call) reads <see cref="CostCdf"/> directly, and its
+        /// result (a mutation of the real <c>levels[]</c> array that becomes the final committed bitstream
+        /// content) is therefore a genuine function of whichever <see cref="CostCdf"/> snapshot was live at
+        /// the time. Once a future Stage 1b-ii's real <c>DecideTile</c> completes for the WHOLE frame before
+        /// <c>EmitTile</c> ever runs, <see cref="DecideCdf"/> (and therefore a freshly-rederived
+        /// <see cref="CostCdf"/>) will hold its final, whole-frame-adapted state throughout all of
+        /// <c>EmitTile</c> -- not the intermediate, per-superblock-in-time state Decide actually used for a
+        /// given superblock. Naively re-deriving <see cref="CostCdf"/> from <see cref="DecideCdf"/> during
+        /// Emit and re-running trellis against it could therefore silently pick a *different* final
+        /// coefficient level than Decide did for the exact same leaf -- the same class of byte-exactness bug
+        /// this file's own Stage-1b remarks already identified for the tx-depth comparison, just not
+        /// previously checked against this specific function. This snapshot list is the fix: <c>EmitTile</c>
+        /// re-derives <see cref="CostCdf"/> for a given superblock by loading
+        /// <c>CostCdfSnapshots[supeblockIndex]</c> instead of copying from <see cref="DecideCdf"/>, making a
+        /// recomputed trellis call during Emit read the exact same probabilities Decide's own trellis call
+        /// did, and therefore reach the exact same answer.</para>
+        ///
+        /// <para>Purely additive today (Stage 1b prerequisite, not yet Stage 1b-ii's real cutover): populated
+        /// by the existing fused per-superblock loop, not yet read anywhere -- a true no-op relative to
+        /// today's still-fused single-pass encode, verified the same way as every other Stage 1a/1b
+        /// prerequisite before it.</para>
+        /// </summary>
+        public required List<Av1CdfContext> CostCdfSnapshots;
 
         public required Av1SymbolEncoder Symbols;
         public required int[] YModes;
