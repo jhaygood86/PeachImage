@@ -100,21 +100,93 @@ internal sealed class Av1CdfContext
     public readonly ushort[][][] MvBit = [Clone(Av1CdfTables.DefaultMvBit), Clone(Av1CdfTables.DefaultMvBit)];
 
     /// <summary>
-    /// Overwrites this context's coefficient-related tables (<see cref="TxbSkip"/>, <see cref="EobPt16"/>/
-    /// <see cref="EobPt32"/>/<see cref="EobPt64"/>/<see cref="EobPt128"/>/<see cref="EobPt256"/>/
-    /// <see cref="EobPt512"/>/<see cref="EobPt1024"/>, <see cref="EobExtra"/>, <see cref="DcSign"/>,
-    /// <see cref="CoeffBaseEob"/>, <see cref="CoeffBase"/>, <see cref="CoeffBr"/> -- the exact set
-    /// <c>Av1CoefficientWriter.WriteCoeffs</c> reads) with <paramref name="other"/>'s current values,
-    /// in place -- never reallocating any array, only copying elements, so this is safe to call once per RD
-    /// candidate without allocating. Every OTHER table (partition/mode/palette/MV/etc.) is deliberately left
-    /// untouched: nothing outside coefficient coding ever reads a <see cref="Av1CdfContext"/> used this way
-    /// (see <c>Av1TileEncoder.TileState.ScratchCdf</c>'s own remarks for the one call site that needs this),
-    /// so copying them would be pure waste. Requires <paramref name="other"/> to have been constructed with
-    /// the same <c>baseQIdx</c>-derived shape as this instance (both this project's own two constructions
-    /// always are, see <c>Av1TileEncoder.EncodeTile</c>'s <c>ScratchCdf</c> initializer) -- a shape mismatch
-    /// would throw, not silently corrupt, since every copy below is a same-length array copy.
+    /// Overwrites every one of this context's tables with <paramref name="other"/>'s current values, in
+    /// place -- never reallocating any array, only copying elements, so this is safe to call once per RD
+    /// candidate (<c>Av1TileEncoder.TileState.ScratchCdf</c>'s own real per-candidate use, see its remarks)
+    /// or once per superblock (<c>TileState.CostCdf</c>'s own real, once-per-superblock snapshot use) without
+    /// allocating.
+    ///
+    /// <para><b>This used to copy only the coefficient-related tables</b> (<see cref="TxbSkip"/>,
+    /// <see cref="EobPt16"/>/<see cref="EobPt32"/>/<see cref="EobPt64"/>/<see cref="EobPt128"/>/
+    /// <see cref="EobPt256"/>/<see cref="EobPt512"/>/<see cref="EobPt1024"/>, <see cref="EobExtra"/>,
+    /// <see cref="DcSign"/>, <see cref="CoeffBaseEob"/>, <see cref="CoeffBase"/>, <see cref="CoeffBr"/> --
+    /// the exact set <c>Av1CoefficientWriter.WriteCoeffs</c> reads), on the claim that "nothing outside
+    /// coefficient coding ever reads a <see cref="Av1CdfContext"/> used this way". That claim was false: a
+    /// direct audit found <c>Av1TileEncoder</c>'s own decision-phase/mode-search cost estimators reading
+    /// <c>TileState.CostCdf</c>'s <see cref="PartitionW8"/>-<see cref="PartitionW128"/>,
+    /// <see cref="UvModeCflAllowed"/>/<see cref="UvModeCflNotAllowed"/>, <see cref="AngleDelta"/>,
+    /// <see cref="PaletteYSize"/>/<see cref="PaletteYMode"/>/<see cref="PaletteYColorIndex"/>/
+    /// <see cref="PaletteUvSize"/>/<see cref="PaletteUvMode"/>/<see cref="PaletteUvColorIndex"/>,
+    /// <see cref="IntraFrameYMode"/>, <see cref="FilterIntra"/>/<see cref="FilterIntraMode"/>, and
+    /// <see cref="MvJoint"/>/<see cref="MvSign"/>/<see cref="MvClass"/>/<see cref="MvClass0Bit"/>/
+    /// <see cref="MvBit"/> extensively -- every one of them left permanently at this context's own
+    /// construction-time (fully default, never-adapted) values for the whole encode, since nothing ever
+    /// refreshed them after the very first superblock. Every real cost comparison built on top of any of
+    /// these (which candidate mode/angle_delta/palette-size/mv wins) was therefore silently scored against
+    /// probabilities that never reflected anything this encoder had actually already written, for the
+    /// entire life of every one of these tables -- a real, long-standing quality bug (worse candidate
+    /// choices than a correctly-adapted cost model would make), not merely a missed optimization. Found via
+    /// a genuine round-trip pixel-correctness investigation (a `uv_mode` decision/commit mismatch traced to
+    /// exactly this staleness) even though, on its own, a stale *cost estimate* cannot itself desync a
+    /// decoder (whatever candidate wins still gets written through the real, correctly-adapting
+    /// <c>TileState.Cdf</c>) -- fixed regardless, since the doc comment's own claim was simply wrong and the
+    /// quality impact alone easily justifies it.</para>
     /// </summary>
     public void CopyFrom(Av1CdfContext other)
+    {
+        Copy(IntraFrameYMode, other.IntraFrameYMode);
+        Copy(UvModeCflNotAllowed, other.UvModeCflNotAllowed);
+        Copy(UvModeCflAllowed, other.UvModeCflAllowed);
+        Copy(AngleDelta, other.AngleDelta);
+        Copy(PartitionW8, other.PartitionW8);
+        Copy(PartitionW16, other.PartitionW16);
+        Copy(PartitionW32, other.PartitionW32);
+        Copy(PartitionW64, other.PartitionW64);
+        Copy(PartitionW128, other.PartitionW128);
+        Copy(SegmentId, other.SegmentId);
+        Copy(Tx8x8, other.Tx8x8);
+        Copy(Tx16x16, other.Tx16x16);
+        Copy(Tx32x32, other.Tx32x32);
+        Copy(Tx64x64, other.Tx64x64);
+        Copy(FilterIntraMode, other.FilterIntraMode);
+        Copy(FilterIntra, other.FilterIntra);
+        Copy(Skip, other.Skip);
+        Copy(DeltaQ, other.DeltaQ);
+        Copy(DeltaLf, other.DeltaLf);
+        Copy(DeltaLfMulti, other.DeltaLfMulti);
+        Copy(CflSign, other.CflSign);
+        Copy(CflAlpha, other.CflAlpha);
+        Copy(IntraTxTypeSet1, other.IntraTxTypeSet1);
+        Copy(IntraTxTypeSet2, other.IntraTxTypeSet2);
+        Copy(InterTxTypeSet1, other.InterTxTypeSet1);
+        Copy(InterTxTypeSet3, other.InterTxTypeSet3);
+        Copy(UseWiener, other.UseWiener);
+        Copy(UseSgrproj, other.UseSgrproj);
+        Copy(RestorationType, other.RestorationType);
+        Copy(PaletteYSize, other.PaletteYSize);
+        Copy(PaletteUvSize, other.PaletteUvSize);
+        Copy(PaletteYMode, other.PaletteYMode);
+        Copy(PaletteUvMode, other.PaletteUvMode);
+        Copy(PaletteYColorIndex, other.PaletteYColorIndex);
+        Copy(PaletteUvColorIndex, other.PaletteUvColorIndex);
+        Copy(Intrabc, other.Intrabc);
+        Copy(MvJoint, other.MvJoint);
+        Copy(MvClass, other.MvClass);
+        Copy(MvClass0Bit, other.MvClass0Bit);
+        Copy(MvSign, other.MvSign);
+        Copy(MvBit, other.MvBit);
+
+        CopyCoefficientTables(other);
+    }
+
+    /// <summary>The coefficient-related tables alone (<see cref="TxbSkip"/>, <see cref="EobPt16"/>/
+    /// <see cref="EobPt32"/>/<see cref="EobPt64"/>/<see cref="EobPt128"/>/<see cref="EobPt256"/>/
+    /// <see cref="EobPt512"/>/<see cref="EobPt1024"/>, <see cref="EobExtra"/>, <see cref="DcSign"/>,
+    /// <see cref="CoeffBaseEob"/>, <see cref="CoeffBase"/>, <see cref="CoeffBr"/>) -- <see cref="CopyFrom"/>
+    /// now copies these too (folded into its own full-context copy above); kept as its own method only
+    /// because <see cref="CopyFrom"/>'s own body reads more clearly listing the non-coefficient tables
+    /// first, then delegating the coefficient set's own already-existing per-field copy list here.</summary>
+    private void CopyCoefficientTables(Av1CdfContext other)
     {
         Copy(TxbSkip, other.TxbSkip);
         Copy(EobPt16, other.EobPt16);

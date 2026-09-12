@@ -259,7 +259,7 @@ internal static class Av1IntraPrediction
         }
         else if (Av1IntraMode.IsDirectional(mode))
         {
-            PredictDirectional(pred, w, h, aboveRow, leftCol, mode, angleDelta, haveLeft, haveAbove, enableIntraEdgeFilter, filterTypeSmooth, maxX, maxY, x, y);
+            PredictDirectional(pred, w, h, aboveRow, leftCol, mode, angleDelta, haveLeft, haveAbove, enableIntraEdgeFilter, filterTypeSmooth, maxX, maxY, x, y, bitDepth);
         }
         else if (mode is Av1IntraMode.SmoothPred or Av1IntraMode.SmoothVPred or Av1IntraMode.SmoothHPred)
         {
@@ -465,7 +465,8 @@ internal static class Av1IntraPrediction
         int maxX,
         int maxY,
         int x,
-        int y)
+        int y,
+        int bitDepth)
     {
         const int angleStep = 3;
         int pAngle = ModeToAngle[mode] + (angleDelta * angleStep);
@@ -502,14 +503,14 @@ internal static class Av1IntraPrediction
             int numPxAbove = w + (pAngle < 90 ? h : 0);
             if (upsampleAbove == 1)
             {
-                EdgeUpsample(aboveRow, numPxAbove);
+                EdgeUpsample(aboveRow, numPxAbove, bitDepth);
             }
 
             upsampleLeft = EdgeUpsampleSelect(w, h, filterType, pAngle - 180) ? 1 : 0;
             int numPxLeft = h + (pAngle > 180 ? w : 0);
             if (upsampleLeft == 1)
             {
-                EdgeUpsample(leftCol, numPxLeft);
+                EdgeUpsample(leftCol, numPxLeft, bitDepth);
             }
         }
 
@@ -734,8 +735,16 @@ internal static class Av1IntraPrediction
         return filterType == 0 ? blkWh <= 16 : blkWh <= 8;
     }
 
-    /// <summary><c>Intra edge upsample process</c> (spec §7.11.2.11).</summary>
-    private static void EdgeUpsample(Av1EdgeArray buf, int numPx)
+    /// <summary>
+    /// <c>Intra edge upsample process</c> (spec §7.11.2.11). The interpolated sample is passed through
+    /// <c>Clip1</c> before being written back -- unlike <see cref="EdgeFilter"/>'s smoothing kernels (whose
+    /// taps are all non-negative and sum to 16, so a weighted average of in-range samples can never leave
+    /// range), this kernel's <c>-1, 9, 9, -1</c> taps are a sharpening filter that can genuinely overshoot
+    /// past 0 or the bit-depth maximum on an extreme (e.g. saturated or near-saturated) edge, matching
+    /// libaom's own real <c>av1_upsample_intra_edge_c</c>/<c>av1_highbd_upsample_intra_edge_c</c>, which both
+    /// clip (<c>clip_pixel</c>/<c>clip_pixel_highbd</c>) for exactly this reason.
+    /// </summary>
+    private static void EdgeUpsample(Av1EdgeArray buf, int numPx, int bitDepth)
     {
         // numPx maxes out around w+h (largest transform side sum, 128), so this is always well within a
         // safe stackalloc bound.
@@ -752,7 +761,7 @@ internal static class Av1IntraPrediction
         for (int i = 0; i < numPx; i++)
         {
             int s = -dup[i] + (9 * dup[i + 1]) + (9 * dup[i + 2]) - dup[i + 3];
-            s = Round2(s, 4);
+            s = Clip1(Round2(s, 4), bitDepth);
             buf[(2 * i) - 1] = s;
             buf[2 * i] = dup[i + 2];
         }

@@ -19,8 +19,27 @@ internal static class Av1FrameEncoder
     /// is ignored entirely and every block is coded via AV1's lossless Walsh-Hadamard path instead of DCT_DCT
     /// quantization (<c>base_q_idx</c> forced to 0, AV1's coded-lossless trigger, rather than derived from
     /// <paramref name="quality"/>).
+    ///
+    /// <para><paramref name="colorPrimaries"/>/<paramref name="transferCharacteristics"/>/
+    /// <paramref name="chromaSamplePosition"/> are pure CICP (H.273) bitstream tagging -- see
+    /// <see cref="Av1SequenceHeaderWriter.ColorPrimaries"/>'s own remarks for why these are safe to vary
+    /// independently of actual pixel conversion, which always stays BT.601 (non-lossless) or the identity
+    /// matrix (lossless).</para>
+    ///
+    /// <para><paramref name="enableScreenContentTools"/>/<paramref name="enableIntrabc"/> are a real,
+    /// caller-settable override of the internal content-based auto-detection (<see cref="Av1ScreenContentEstimator"/>),
+    /// mirroring real aomenc's own <c>--enable-palette</c>/<c>--enable-intrabc</c> -- both default to
+    /// <see langword="true"/> (auto-detect, unchanged from this method's own pre-existing behavior). Setting
+    /// <paramref name="enableScreenContentTools"/> to <see langword="false"/> disables both palette and
+    /// IntraBC together (this encoder's own screen-content-tools frame flag structurally gates both --
+    /// spec requires it for <c>allow_intrabc</c> to be read at all, and it's palette's own real, direct gate
+    /// too), skipping the estimator and any real trial-encode cost entirely. <paramref name="enableIntrabc"/>
+    /// set to <see langword="false"/> disables only IntraBC specifically, leaving palette's own real
+    /// content-based decision untouched -- there is no equivalent independent "palette only" override in the
+    /// other direction, since this encoder's own palette search has no gate separate from the shared
+    /// screen-content-tools frame flag IntraBC also needs.</para>
     /// </summary>
-    public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality, bool lossless = false, int effort = 2, Action<Av1BlockDecisionRecord>? onLeafCommitted = null)
+    public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality, bool lossless = false, int effort = 2, Action<Av1BlockDecisionRecord>? onLeafCommitted = null, int colorPrimaries = Av1SequenceHeaderWriter.ColorPrimaries, int transferCharacteristics = Av1SequenceHeaderWriter.TransferCharacteristics, int chromaSamplePosition = Av1SequenceHeaderWriter.ChromaSamplePosition, bool enableScreenContentTools = true, bool enableIntrabc = true)
     {
         // Lossless uses 128x128 superblocks (Av1SequenceHeaderWriter/Av1TileEncoder), so the coded canvas
         // must pad to a 128-pixel multiple instead of 64 -- same "every superblock fully in-bounds" reason
@@ -95,14 +114,32 @@ internal static class Av1FrameEncoder
         // heuristic only decides which candidates are even worth *trying*, never the final answer by itself.
         bool heuristicScreenContentTools = false;
         bool heuristicIntrabc = false;
-        if (lossless)
+        if (enableScreenContentTools)
         {
-            (heuristicScreenContentTools, heuristicIntrabc) = Av1ScreenContentEstimator.Estimate(yPlane, paddedWidth, width, height);
-        }
+            if (lossless)
+            {
+                (heuristicScreenContentTools, heuristicIntrabc) = Av1ScreenContentEstimator.Estimate(yPlane, paddedWidth, width, height);
+            }
+            else
+            {
+                // Non-lossless screen-content support (project plan Phase 4): both palette (exact-match only,
+                // Av1TileEncoder.EncodeLeaf's own paletteSearchEnabled/paletteAllZeroResidual restriction) and
+                // IntraBC (exact-match only, that same method's intrabcStructurallyPresent/intrabcApproxCandidate
+                // remarks) now reuse this same real, content-based estimator -- unlike the lossless case, which
+                // only ever needed one Estimate() call since both tools share identical eligibility there,
+                // heuristicScreenContentTools here must reflect EITHER tool wanting it (spec requires
+                // allow_screen_content_tools for allow_intrabc to be read at all, and it's palette's own real,
+                // direct gate too -- Av1TileDecoder.AllowPalette/IntraFrameModeInfo), not just IntraBC's own
+                // stricter threshold.
+                (bool estimatorScreenContentTools, heuristicIntrabc) = Av1ScreenContentEstimator.Estimate(yPlane, paddedWidth, width, height);
+                heuristicScreenContentTools = estimatorScreenContentTools || heuristicIntrabc;
+            }
 
-        var reconY = new int[paddedWidth * paddedHeight];
-        int[]? reconU = monoChrome ? null : new int[paddedChromaWidth * paddedChromaHeight];
-        int[]? reconV = monoChrome ? null : new int[paddedChromaWidth * paddedChromaHeight];
+            if (!enableIntrabc)
+            {
+                heuristicIntrabc = false;
+            }
+        }
 
         // The bitstream's own signaled frame size: TRUE (unpadded) dimensions for lossless -- confirmed via
         // this project's own libaom byte-exact comparison harness that real encoders never round
@@ -120,63 +157,144 @@ internal static class Av1FrameEncoder
         int headerWidth = lossless ? width : paddedWidth;
         int headerHeight = lossless ? height : paddedHeight;
 
-        byte[] EncodeTileTrial(bool trialScreenContentTools, bool trialIntrabc) => Av1TileEncoder.EncodeTile(
-            yPlane, paddedWidth, paddedHeight,
-            uPlane, vPlane, paddedChromaWidth, paddedChromaHeight,
-            reconY, reconU, reconV,
-            monoChrome, baseQIdx, lossless, chroma444, effort, trialScreenContentTools, trialIntrabc,
-            trueWidth: headerWidth, trueHeight: headerHeight);
+        // onLeafCommitted's own records are captured PER TRIAL (a local list per call, never the caller's own
+        // hook passed straight through to EncodeTile) and only the records belonging to whichever trial's
+        // BYTES actually win get kept/forwarded to the caller at the very end. This used to instead run one
+        // extra, separate "diagnostic-only" re-encode after the real winning trial was already decided, on
+        // the assumption that an identically-configured re-encode is deterministic and would exactly
+        // reproduce the winning trial's own real decisions -- confirmed FALSE via a real round-trip
+        // investigation (project plan's own "round N+10 through N+14" history): two separate EncodeTile
+        // calls with identical settings and identical source pixels measurably diverged partway through
+        // (matching for the first several dozen leaf-level symbol writes, then genuinely disagreeing),
+        // meaning the discarded "diagnostic" re-encode's own captured records did NOT reliably describe what
+        // was actually in the real, shipped bitstream -- exactly the kind of bug this project's own
+        // structural decision-log tooling exists to catch, just turned against its own data source instead
+        // of against aomenc's.
+        //
+        // Real root cause, found and fixed this round: reconY/U/V used to be allocated ONCE, outside this
+        // closure, and shared (mutated in place) across every trial below -- IntraBC's own copy-source search
+        // (FindIntrabcMatch/FindApproximateIntrabcMatch) reads ReconY/U/V directly for causality/match-finding,
+        // and a leaf whose own current trial hadn't actually reconstructed a given position yet could still
+        // read whatever an EARLIER, DIFFERENT trial's own reconstruction had left behind there (screen-
+        // content-tools/IntraBC on vs. off trials don't necessarily commit every leaf in the same shape or
+        // order, so "this trial's own raster order already passed this position" and "this trial's own
+        // reconstruction actually wrote real content there" are not the same guarantee once a stale array is
+        // shared). That let a real IntraBC candidate get chosen based on pixel data that wasn't actually part
+        // of ITS OWN trial's real, self-consistent reconstruction -- reproducing byte-for-byte (a valid, self-
+        // consistent bitstream by construction, since WriteMv only ever writes real diff bits against a real
+        // predictor) but decoding to a genuinely different MV/pixel content than what the encoder's own
+        // decision was actually based on, a real encoder/decoder desync confirmed via direct instrumented
+        // encoder-side/decoder-side MV tracing (temporary, removed after use) on a `checkerboard 256x256`
+        // repro. Fixed by giving every trial its own fresh, zero-initialized reconY/U/V, allocated here
+        // (trivially cheap relative to a real full-image encode) instead of sharing one mutable set across
+        // trials -- each trial is now fully self-contained, with no possible cross-trial leakage, matching the
+        // same "only ever run the hook against the SAME trial whose bytes are kept" principle the comment
+        // above already established for onLeafCommitted itself.
+        (byte[] Bytes, List<Av1BlockDecisionRecord>? Leaves, int[] ReconY, int[]? ReconU, int[]? ReconV) EncodeTileTrial(bool trialScreenContentTools, bool trialIntrabc)
+        {
+            // Seeded from the real (already edge-replicated, via PadPlane) source planes, not zero-filled --
+            // a real gap found and fixed this round: a lossless leaf whose own coding-block node falls
+            // entirely beyond the frame's TRUE (unpadded) mi bounds is never visited by EncodeTile's own real
+            // per-leaf commit loop at all (TileState's own TrueMiCols/TrueMiRows gate, `r >= s.TrueMiRows ||
+            // c >= s.TrueMiCols` -- see its own remarks), so a zero-filled buffer left that true-edge-overhang
+            // padding region at literal 0 forever -- wrong real content for any neighbor read (BuildEdges' own
+            // edge-replication clamp, SearchUvMode's boundary context, palette's own neighbor search) that
+            // legitimately reaches into it. libaom's own real encoder replicates the same edge pixels into its
+            // own padded working buffer up front for the identical reason -- not a PeachImage-specific choice.
+            //
+            // Full-plane, not padding-only: a first attempt seeded only the padding region specifically,
+            // reasoning that pre-filling the *interior* (not-yet-committed-by-this-trial) region with real
+            // source content -- content no real decoder could ever have, since decoders never see source
+            // pixels -- risked breaking encoder/decoder symmetry for any interior neighbor read that
+            // legitimately (by real AV1's own progressive-reconstruction order) or illegitimately (a latent
+            // bug) reaches a position before this trial's own raster commit order has actually reached it.
+            // That reasoning was correct in kind but wrong in scope: direct investigation (this round) found
+            // the actual illegitimate reader responsible for round-tripping pixel corruption on a real corpus
+            // file (`colors_text_wcg_sdr_rec2020`) was IntraBC's own approximate-match search family
+            // (FindApproximateIntrabcMatchViaMotionSearch/ViaMeshSearch, and ConsiderCandidatePixels in
+            // FindApproximateIntrabcMatch itself) -- unlike FindIntrabcMatch's own exact-match search, none of
+            // these validated IsSourceFootprintWritten before scoring/accepting a candidate (a real,
+            // independently-existing gap, not introduced by this fix -- a stale doc comment elsewhere in this
+            // file incorrectly claimed this check already existed here). Now fixed at its own real source (see
+            // those methods' own remarks) -- every IntraBC candidate is validated as genuinely already
+            // committed by this trial before its content is ever read for scoring or acceptance, regardless of
+            // what a not-yet-committed position's own Recon content happens to hold. With that real gap closed,
+            // full-plane source-seeding is safe: every position a real commit touches gets overwritten with the
+            // exact same value regardless (lossless is zero-distortion -- every real leaf-commit write already
+            // `Array.Copy`s straight from SourceY/U/V into ReconY/U/V, confirmed by direct source reading, not
+            // assumed), and every other real reader of not-yet-committed Recon content is already properly
+            // gated by explicit availability flags (availU/availL/haveAboveRight/haveBelowLeft/GetBlockDecoded),
+            // never reading raw Recon content for a position those flags mark unavailable.
+            var trialReconY = (int[])yPlane.Clone();
+            int[]? trialReconU = monoChrome ? null : (int[])uPlane!.Clone();
+            int[]? trialReconV = monoChrome ? null : (int[])vPlane!.Clone();
 
-        void EncodeTileTrialWithHook(bool trialScreenContentTools, bool trialIntrabc, Action<Av1BlockDecisionRecord> hook) => Av1TileEncoder.EncodeTile(
-            yPlane, paddedWidth, paddedHeight,
-            uPlane, vPlane, paddedChromaWidth, paddedChromaHeight,
-            reconY, reconU, reconV,
-            monoChrome, baseQIdx, lossless, chroma444, effort, trialScreenContentTools, trialIntrabc,
-            trueWidth: headerWidth, trueHeight: headerHeight, onLeafCommitted: hook);
+            List<Av1BlockDecisionRecord>? leaves = onLeafCommitted is null ? null : [];
+            byte[] bytes = Av1TileEncoder.EncodeTile(
+                yPlane, paddedWidth, paddedHeight,
+                uPlane, vPlane, paddedChromaWidth, paddedChromaHeight,
+                trialReconY, trialReconU, trialReconV,
+                monoChrome, baseQIdx, lossless, chroma444, effort, trialScreenContentTools, trialIntrabc,
+                trueWidth: headerWidth, trueHeight: headerHeight, onLeafCommitted: leaves is null ? null : leaves.Add);
+            return (bytes, leaves, trialReconY, trialReconU, trialReconV);
+        }
 
         bool allowScreenContentTools = heuristicScreenContentTools;
         bool allowIntrabc = heuristicIntrabc;
-        byte[] tileBytes = EncodeTileTrial(allowScreenContentTools, allowIntrabc);
+        var trial = EncodeTileTrial(allowScreenContentTools, allowIntrabc);
+        byte[] tileBytes = trial.Bytes;
+        List<Av1BlockDecisionRecord>? winningLeaves = trial.Leaves;
+        int[] reconY = trial.ReconY;
+        int[]? reconU = trial.ReconU;
+        int[]? reconV = trial.ReconV;
 
         // The real trial itself: the heuristic above only gates whether this ever runs at all (an image the
         // heuristic already ruled out as screen-content-like never pays this extra encode cost) -- once it
         // says yes, don't just trust it. Try genuinely turning the tools back off (and, separately, IntraBC
         // off while keeping palette on) and keep whichever REAL committed byte count is actually smaller.
-        // reconY/U/V are safe to reuse across trials: every candidate here is lossless-only, and lossless
-        // never reads them again after EncodeTile returns (deblocking/CDEF below are non-lossless-only), so
-        // each trial's full reconstruction simply overwrites whatever the previous one left behind.
-        if (lossless && heuristicScreenContentTools)
+        // Each trial gets its own fresh reconY/U/V (see EncodeTileTrial's own remarks) -- reconY/U/V here are
+        // reassigned to whichever trial's own arrays actually won, in lockstep with tileBytes/winningLeaves,
+        // purely so the non-lossless deblocking/CDEF code below (the only remaining reader of these names)
+        // keeps working unchanged; lossless itself never reads reconY/U/V again after this point regardless
+        // of which trial's own arrays end up referenced here.
+        // Applies equally to lossless and non-lossless now: both palette (exact-match only for non-lossless)
+        // and IntraBC (exact-match only for non-lossless) share this same real trial-comparison structure.
+        if (heuristicScreenContentTools)
         {
-            byte[] withoutToolsBytes = EncodeTileTrial(false, false);
-            if (withoutToolsBytes.Length < tileBytes.Length)
+            var withoutTools = EncodeTileTrial(false, false);
+            if (withoutTools.Bytes.Length < tileBytes.Length)
             {
-                tileBytes = withoutToolsBytes;
+                tileBytes = withoutTools.Bytes;
+                winningLeaves = withoutTools.Leaves;
+                reconY = withoutTools.ReconY;
+                reconU = withoutTools.ReconU;
+                reconV = withoutTools.ReconV;
                 allowScreenContentTools = false;
                 allowIntrabc = false;
             }
 
             if (heuristicIntrabc)
             {
-                byte[] withoutIntrabcBytes = EncodeTileTrial(true, false);
-                if (withoutIntrabcBytes.Length < tileBytes.Length)
+                var withoutIntrabc = EncodeTileTrial(true, false);
+                if (withoutIntrabc.Bytes.Length < tileBytes.Length)
                 {
-                    tileBytes = withoutIntrabcBytes;
+                    tileBytes = withoutIntrabc.Bytes;
+                    winningLeaves = withoutIntrabc.Leaves;
+                    reconY = withoutIntrabc.ReconY;
+                    reconU = withoutIntrabc.ReconU;
+                    reconV = withoutIntrabc.ReconV;
                     allowScreenContentTools = true;
                     allowIntrabc = false;
                 }
             }
         }
 
-        // Diagnostic-only (project plan's Phase 1/Step 6 structural decision-log tool): a real, deterministic
-        // re-encode using the now-finalized allowScreenContentTools/allowIntrabc, purely to drive
-        // onLeafCommitted -- tileBytes itself (the real output) already came from the trial process above and
-        // is never replaced by this. Reusing reconY/U/V here is exactly as safe as the trial process's own
-        // reuse just above (see its remarks): this call fully overwrites every pixel it needs before reading
-        // any of them back. Never runs when onLeafCommitted is null (every production call site), so this
-        // adds zero cost/risk outside the harness that actually passes a hook.
-        if (onLeafCommitted is not null)
+        if (onLeafCommitted is not null && winningLeaves is not null)
         {
-            EncodeTileTrialWithHook(allowScreenContentTools, allowIntrabc, onLeafCommitted);
+            foreach (var leaf in winningLeaves)
+            {
+                onLeafCommitted(leaf);
+            }
         }
 
         // Deblocking (spec §7.14) is a lossy-only tool -- codedLossless's own short-circuit means
@@ -186,11 +304,19 @@ internal static class Av1FrameEncoder
         // is written, so the header can signal the real, chosen level -- Av1TileEncoder.EncodeTile already
         // finished producing every pixel these buffers will ever hold, so nothing about the tile's own
         // (already-flushed) bitstream depends on this running afterward.
-        int loopFilterLevel = 0;
+        //
+        // Also skipped whenever allowIntrabc: real AV1 forbids both loop_filter_params() and cdef_params()
+        // on any frame using IntraBC, regardless of losslessness (Av1FrameHeaderWriter.Write's own
+        // `!lossless && !allowIntrabc` gates already correctly discard whatever this search would have
+        // chosen), so running these real, non-trivial per-frame searches here would be pure wasted work for
+        // an IntraBc-enabled non-lossless frame -- not a correctness fix (the header-writer gate alone
+        // already prevents any bitstream desync), purely avoiding paying for a result that could never be
+        // used.
+        int loopFilterLevel0 = 0, loopFilterLevel1 = 0, loopFilterLevelU = 0, loopFilterLevelV = 0;
         var cdefChoice = Av1CdefChoice.Off;
-        if (!lossless)
+        if (!lossless && !allowIntrabc)
         {
-            loopFilterLevel = Av1InLoopFilterSearch.SearchAndApply(
+            (loopFilterLevel0, loopFilterLevel1, loopFilterLevelU, loopFilterLevelV) = Av1InLoopFilterSearch.SearchAndApply(
                 reconY, reconU, reconV,
                 yPlane, uPlane, vPlane,
                 paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
@@ -198,7 +324,7 @@ internal static class Av1FrameEncoder
 
             // CDEF (spec §7.15) runs after deblocking, per spec's own filter ordering (Av1FrameDecoder.
             // DecodeTileGroup applies them in exactly this order) -- reconY/U/V already reflect the chosen
-            // deblocking level at this point, so Av1CdefSearch starts from that, not the pre-deblock
+            // deblocking levels at this point, so Av1CdefSearch starts from that, not the pre-deblock
             // reconstruction. Updates reconY/U/V in place with the winning candidate's content (see
             // Av1CdefSearch.SearchAndApply's own buffer-ownership remarks for why it copies rather than
             // reassigning these arrays).
@@ -206,13 +332,15 @@ internal static class Av1FrameEncoder
                 reconY, reconU, reconV,
                 yPlane, uPlane, vPlane,
                 paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
-                monoChrome, baseQIdx, loopFilterLevel);
+                monoChrome, baseQIdx, loopFilterLevel0, loopFilterLevel1, loopFilterLevelU, loopFilterLevelV);
         }
 
-        byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(headerWidth, headerHeight, monoChrome, chroma444, enableCdef: !lossless, use128x128Superblock: lossless, enableRestoration: lossless);
+        byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(headerWidth, headerHeight, monoChrome, chroma444, enableCdef: !lossless, use128x128Superblock: lossless, enableRestoration: lossless, colorPrimaries, transferCharacteristics, chromaSamplePosition);
 
         var frameHeaderWriter = new Av1BitWriter();
-        Av1FrameHeaderWriter.Write(frameHeaderWriter, headerWidth, headerHeight, monoChrome, baseQIdx, lossless, loopFilterLevel, enableCdef: !lossless, cdefChoice, allowScreenContentTools, allowIntrabc, reducedTxSet: !lossless);
+        // `false` unconditionally, matching real aomenc's own observed default -- see
+        // Av1TileEncoder.TileState.ReducedTxSet's own remarks. Inert for lossless either way.
+        Av1FrameHeaderWriter.Write(frameHeaderWriter, headerWidth, headerHeight, monoChrome, baseQIdx, lossless, loopFilterLevel0, enableCdef: !lossless, cdefChoice, allowScreenContentTools, allowIntrabc, reducedTxSet: false, loopFilterLevel1, loopFilterLevelU, loopFilterLevelV);
         byte[] frameHeaderPayload = frameHeaderWriter.ToArray();
 
         // A single combined OBU_FRAME (spec's frame_obu(): frame_header_obu() + byte_alignment() +

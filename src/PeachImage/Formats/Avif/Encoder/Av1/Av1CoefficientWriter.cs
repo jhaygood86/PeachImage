@@ -3,13 +3,19 @@ using PeachImage.Formats.Avif.Decoding.Av1;
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
 /// <summary>
-/// Writes one square DCT_DCT transform block's quantized coefficients -- the write-side mirror of
-/// <see cref="Av1TileDecoder"/>'s private <c>Coeffs()</c> (spec §5.11.39), restricted to this encoder's v1
-/// scope: always <c>Av1TxType.DctDct</c> (so <see cref="Av1TxClass"/> is always <c>Class2D</c>, letting the
-/// context derivations below skip the horizontal-/vertical-only branches <c>Coeffs()</c> otherwise needs),
-/// square tx sizes only, and <c>tx_mode = TX_MODE_LARGEST</c> (so the transform block always exactly equals
-/// the coding block -- <c>Coeffs()</c>'s luma <c>all_zero</c> context reduces to a constant 0 under that
-/// condition; see <see cref="WriteCoeffs"/>).
+/// Writes one square transform block's quantized coefficients -- the write-side mirror of
+/// <see cref="Av1TileDecoder"/>'s private <c>Coeffs()</c> (spec §5.11.39). Square tx sizes only, and
+/// <c>tx_mode = TX_MODE_LARGEST</c> (so the transform block always exactly equals the coding block --
+/// <c>Coeffs()</c>'s luma <c>all_zero</c> context reduces to a constant 0 under that condition; see
+/// <see cref="WriteCoeffs"/>). <c>WriteCoeffs</c>'s own <c>txType</c> parameter defaults to <c>Av1TxType.DctDct</c> (this
+/// project's own v1 scope for every call site except the real, non-lossless luma search once it's allowed
+/// to pick <see cref="Av1TxType.VDct"/>/<see cref="Av1TxType.HDct"/> -- project plan Phase 4's "full
+/// transform-type search") -- the scan-order lookup and per-position context derivation both now key off
+/// this real value (via <see cref="Av1TxClass.Get"/>), not a hardcoded <c>Class2D</c> assumption: a real
+/// bug found and fixed during that same round (Round N+43's own severe-corruption regression) once
+/// <c>Av1TxType.VDct</c>/<c>HDct</c> actually became reachable, since those two types are
+/// <see cref="Av1TxClass.ClassVert"/>/<see cref="Av1TxClass.ClassHoriz"/>, not <see cref="Av1TxClass.Class2D"/>
+/// like every type this writer previously ever saw.
 ///
 /// <para>Unlike the decoder, this encoder already knows every coefficient in the block before writing any
 /// of them (the whole block was quantized upfront by <see cref="Av1ForwardQuantizer"/>), so the "neighbor
@@ -122,7 +128,7 @@ internal static class Av1CoefficientWriter
     /// passes <see langword="false"/> so a candidate that might not even be chosen never leaves a trace in
     /// context state a later, real leaf could read.</para>
     /// </summary>
-    public static int WriteCoeffs(IAv1SymbolSink s, Av1CdfContext cdf, int[] quantLevels, int size, int ptype, int x4, int y4, PlaneContext planeCtx, Action? writeLumaTxType = null, int blockSize = 0, bool updateContext = true, int blockHeight = 0)
+    public static int WriteCoeffs(IAv1SymbolSink s, Av1CdfContext cdf, int[] quantLevels, int size, int ptype, int x4, int y4, PlaneContext planeCtx, Action? writeLumaTxType = null, int blockSize = 0, bool updateContext = true, int blockHeight = 0, int txType = Av1TxType.DctDct)
     {
         int txSz = Av1ForwardTransform.SizeToTxSz(size);
         int txSzCtx = (Av1CoeffTables.TxSizeSqr[txSz] + Av1CoeffTables.TxSizeSqrUp[txSz] + 1) >> 1;
@@ -131,7 +137,7 @@ internal static class Av1CoefficientWriter
         int effectiveBlockWidth = blockSize > 0 ? blockSize : size;
         int effectiveBlockHeight = blockHeight > 0 ? blockHeight : effectiveBlockWidth;
 
-        int[] scan = Av1ScanTables.GetScan(txSz, Av1TxType.DctDct);
+        int[] scan = Av1ScanTables.GetScan(txSz, txType);
 
         int eob = 0;
         for (int c = 0; c < size * size; c++)
@@ -164,7 +170,7 @@ internal static class Av1CoefficientWriter
         if (!allZero)
         {
             writeLumaTxType?.Invoke();
-            WriteEobPt(s, cdf, txSz, txSzCtx, ptype, eob);
+            WriteEobPt(s, cdf, txSz, txSzCtx, ptype, eob, txType);
 
             for (int c = eob - 1; c >= 0; c--)
             {
@@ -184,14 +190,14 @@ internal static class Av1CoefficientWriter
                 }
                 else
                 {
-                    int ctx = GetCoeffBaseCtx(txSz, quantLevels, pos);
+                    int ctx = GetCoeffBaseCtx(txSz, quantLevels, pos, txType);
                     int symbol = Math.Min(cappedLevel, Av1CoeffTables.NumBaseLevels + 1);
                     s.WriteSymbol(cdf.CoeffBase[txSzCtx][ptype][ctx], symbol);
                 }
 
                 if (cappedLevel > Av1CoeffTables.NumBaseLevels)
                 {
-                    int brCtx = GetCoeffBrCtx(txSz, quantLevels, pos);
+                    int brCtx = GetCoeffBrCtx(txSz, quantLevels, pos, txType);
                     var brCdf = cdf.CoeffBr[Math.Min(txSzCtx, Av1TxSize.Tx32x32)][ptype][brCtx];
 
                     // The base symbol read on the decode side is always exactly NumBaseLevels + 1 (3) once
@@ -274,11 +280,24 @@ internal static class Av1CoefficientWriter
         return eob;
     }
 
-    /// <summary>Write-side of <c>Coeffs()</c>'s <c>eob_pt</c>/<c>eob_extra</c>/literal encoding: given the target <paramref name="eob"/>, determines and writes the bucket symbol plus refinement bits.</summary>
-    private static void WriteEobPt(IAv1SymbolSink s, Av1CdfContext cdf, int txSz, int txSzCtx, int ptype, int eob)
+    /// <summary>
+    /// Write-side of <c>Coeffs()</c>'s <c>eob_pt</c>/<c>eob_extra</c>/literal encoding: given the target
+    /// <paramref name="eob"/>, determines and writes the bucket symbol plus refinement bits.
+    /// <paramref name="txType"/> selects the same real, separately-adapted <c>[ptype][ctx]</c> CDF slot
+    /// <see cref="Decoding.Av1.Av1TileDecoder.ReadEobPt"/> reads from (<c>ctx = 0</c> for
+    /// <see cref="Av1TxClass.Class2D"/>, <c>1</c> otherwise) -- a real bug, found and fixed this round
+    /// (Round N+43's own severe-corruption regression): every call site before V_DCT/H_DCT became reachable
+    /// was always Class2D, so the previously-hardcoded <c>[ptype][0]</c> here happened to always agree with
+    /// the decoder's own real ctx=0 case, silently masking that this method never actually computed it.
+    /// Once a ClassVert/ClassHoriz block reached this method, the encoder kept adapting/reading CDF slot 0
+    /// while the decoder read/adapted slot 1 -- two independently-adapted probability tables diverging from
+    /// the very first such block, desyncing the arithmetic decoder for the rest of the tile.
+    /// </summary>
+    private static void WriteEobPt(IAv1SymbolSink s, Av1CdfContext cdf, int txSz, int txSzCtx, int ptype, int eob, int txType)
     {
         _ = txSzCtx;
         int eobMultisize = Math.Min(Av1TxDimensions.WidthLog2[txSz], 5) + Math.Min(Av1TxDimensions.HeightLog2[txSz], 5) - 4;
+        int ctx = Av1TxClass.Get(txType) == Av1TxClass.Class2D ? 0 : 1;
 
         int k; // eobPt
         int offset;
@@ -303,11 +322,11 @@ internal static class Av1CoefficientWriter
         int symbol = k - 1;
         var eobCdf = eobMultisize switch
         {
-            0 => cdf.EobPt16[ptype][0],
-            1 => cdf.EobPt32[ptype][0],
-            2 => cdf.EobPt64[ptype][0],
-            3 => cdf.EobPt128[ptype][0],
-            4 => cdf.EobPt256[ptype][0],
+            0 => cdf.EobPt16[ptype][ctx],
+            1 => cdf.EobPt32[ptype][ctx],
+            2 => cdf.EobPt64[ptype][ctx],
+            3 => cdf.EobPt128[ptype][ctx],
+            4 => cdf.EobPt256[ptype][ctx],
             5 => cdf.EobPt512[ptype],
             _ => cdf.EobPt1024[ptype],
         };
@@ -328,7 +347,7 @@ internal static class Av1CoefficientWriter
         }
     }
 
-    /// <summary><c>get_coeff_base_ctx()</c>'s <c>isEob</c> branch (spec §8.3.2), Class2D-only.</summary>
+    /// <summary><c>get_coeff_base_ctx()</c>'s <c>isEob</c> branch (spec §8.3.2) -- unlike the non-eob branch below, this one never reads <c>Av1TxClass</c> at all in the real spec (confirmed directly from <see cref="Decoding.Av1.Av1TileDecoder.GetCoeffBaseCtx"/>'s own identical branch), so it's already correct for every transform class, not a Class2D-only shortcut.</summary>
     private static int GetCoeffBaseEobCtx(int txSz, int c)
     {
         int adjTxSz = Av1CoeffTables.AdjustedTxSize[txSz];
@@ -353,22 +372,32 @@ internal static class Av1CoefficientWriter
         return Av1CoeffTables.SigCoefContexts - 1;
     }
 
-    /// <summary><c>get_coeff_base_ctx()</c>'s non-eob branch (spec §8.3.2), Class2D-only -- <paramref name="quantLevels"/> is this encoder's own already-complete block, standing in for the decoder's progressively-built <c>_quant</c>.</summary>
-    private static int GetCoeffBaseCtx(int txSz, int[] quantLevels, int pos)
+    /// <summary>
+    /// <c>get_coeff_base_ctx()</c>'s non-eob branch (spec §8.3.2) -- <paramref name="quantLevels"/> is this
+    /// encoder's own already-complete block, standing in for the decoder's progressively-built <c>_quant</c>.
+    /// Ported from <see cref="Decoding.Av1.Av1TileDecoder.GetCoeffBaseCtx"/>'s own identical, real,
+    /// already-proven non-eob branch (not Class2D-only, despite this project's own earlier v1 scope note --
+    /// see the class remarks -- <see cref="Av1TxClass.ClassVert"/>/<see cref="Av1TxClass.ClassHoriz"/> both
+    /// need the real <c>CoeffBasePosCtxOffset</c> branch, only reachable now that <see cref="Av1TxType.VDct"/>/
+    /// <see cref="Av1TxType.HDct"/> can actually be selected, project plan Phase 4's own "full transform-type
+    /// search").
+    /// </summary>
+    private static int GetCoeffBaseCtx(int txSz, int[] quantLevels, int pos, int txType)
     {
         int adjTxSz = Av1CoeffTables.AdjustedTxSize[txSz];
         int bwl = Av1TxDimensions.WidthLog2[adjTxSz];
         int width = 1 << bwl;
         int height = Av1TxDimensions.Height[adjTxSz];
 
+        int txClass = Av1TxClass.Get(txType);
         int row = pos >> bwl;
         int col = pos - (row << bwl);
         int mag = 0;
 
         for (int idx = 0; idx < Av1CoeffTables.SigRefDiffOffsetNum; idx++)
         {
-            int refRow = row + Av1CoeffTables.SigRefDiffOffset[Av1TxClass.Class2D][idx][0];
-            int refCol = col + Av1CoeffTables.SigRefDiffOffset[Av1TxClass.Class2D][idx][1];
+            int refRow = row + Av1CoeffTables.SigRefDiffOffset[txClass][idx][0];
+            int refCol = col + Av1CoeffTables.SigRefDiffOffset[txClass][idx][1];
             if (refRow >= 0 && refCol >= 0 && refRow < height && refCol < width)
             {
                 mag += Math.Min(Math.Abs(quantLevels[(refRow << bwl) + refCol]), 3);
@@ -377,16 +406,27 @@ internal static class Av1CoefficientWriter
 
         int ctx = Math.Min((mag + 1) >> 1, 4);
 
-        if (row == 0 && col == 0)
+        if (txClass == Av1TxClass.Class2D)
         {
-            return 0;
+            if (row == 0 && col == 0)
+            {
+                return 0;
+            }
+
+            return ctx + Av1CoeffTables.CoeffBaseCtxOffset[txSz][Math.Min(row, 4)][Math.Min(col, 4)];
         }
 
-        return ctx + Av1CoeffTables.CoeffBaseCtxOffset[txSz][Math.Min(row, 4)][Math.Min(col, 4)];
+        int posIdx = txClass == Av1TxClass.ClassVert ? row : col;
+        return ctx + Av1CoeffTables.CoeffBasePosCtxOffset[Math.Min(posIdx, 2)];
     }
 
-    /// <summary><c>get_coeff_br_ctx()</c> (spec §8.3.2), Class2D-only.</summary>
-    private static int GetCoeffBrCtx(int txSz, int[] quantLevels, int pos)
+    /// <summary>
+    /// <c>get_coeff_br_ctx()</c> (spec §8.3.2). Ported from
+    /// <see cref="Decoding.Av1.Av1TileDecoder.GetCoeffBrCtx"/>'s own identical, real, already-proven
+    /// per-class branch (not Class2D-only -- see <see cref="GetCoeffBaseCtx(int, int[], int, int)"/>'s own
+    /// identical remarks for why this matters now).
+    /// </summary>
+    private static int GetCoeffBrCtx(int txSz, int[] quantLevels, int pos, int txType)
     {
         int adjTxSz = Av1CoeffTables.AdjustedTxSize[txSz];
         int bwl = Av1TxDimensions.WidthLog2[adjTxSz];
@@ -395,11 +435,12 @@ internal static class Av1CoefficientWriter
         int row = pos >> bwl;
         int col = pos - (row << bwl);
         int mag = 0;
+        int txClass = Av1TxClass.Get(txType);
 
         for (int idx = 0; idx < 3; idx++)
         {
-            int refRow = row + Av1CoeffTables.MagRefOffsetWithTxClass[Av1TxClass.Class2D][idx][0];
-            int refCol = col + Av1CoeffTables.MagRefOffsetWithTxClass[Av1TxClass.Class2D][idx][1];
+            int refRow = row + Av1CoeffTables.MagRefOffsetWithTxClass[txClass][idx][0];
+            int refCol = col + Av1CoeffTables.MagRefOffsetWithTxClass[txClass][idx][1];
             if (refRow >= 0 && refCol >= 0 && refRow < txh && refCol < (1 << bwl))
             {
                 mag += Math.Min(Math.Abs(quantLevels[(refRow * txw) + refCol]), Av1CoeffTables.CoeffBaseRange + Av1CoeffTables.NumBaseLevels + 1);
@@ -413,7 +454,17 @@ internal static class Av1CoefficientWriter
             return mag;
         }
 
-        return row < 2 && col < 2 ? mag + 7 : mag + 14;
+        if (txClass == Av1TxClass.Class2D)
+        {
+            return row < 2 && col < 2 ? mag + 7 : mag + 14;
+        }
+
+        if (txClass == Av1TxClass.ClassHoriz)
+        {
+            return col == 0 ? mag + 7 : mag + 14;
+        }
+
+        return row == 0 ? mag + 7 : mag + 14;
     }
 
     /// <summary><c>dc_sign</c>'s CDF context derivation (spec §8.3.2).</summary>

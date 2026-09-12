@@ -109,8 +109,12 @@ internal static class Av1SequenceHeaderWriter
 
     // Informational tagging only -- Av1YuvToRgbConverter (and its forward-direction counterpart,
     // Av1RgbToYuvConverter) only ever consult MatrixCoefficients/ColorRange for actual pixel math, never
-    // ColorPrimaries/TransferCharacteristics, so those two are cosmetic. MatrixCoefficients must match
-    // Av1RgbToYuvConverter's forward matrix exactly when not using the identity path below.
+    // ColorPrimaries/TransferCharacteristics/ChromaSamplePosition, so those three are cosmetic and safe to
+    // expose as caller-settable (see AvifEncoderOptions.ColorPrimaries/TransferCharacteristics/
+    // ChromaSamplePosition) -- these defaults are what every caller got before that surface existed.
+    // MatrixCoefficients is NOT independently settable: it must match Av1RgbToYuvConverter's forward matrix
+    // exactly (this encoder only ever implements the BT.601 and identity matrices below), so it stays a
+    // fixed, derived-from-chroma444 value, not a public option.
     public const int ColorPrimaries = 1; // CP_BT_709
     public const int TransferCharacteristics = 13; // TC_SRGB
     public const int MatrixCoefficients = 6; // MC_BT_601 / SMPTE170M
@@ -157,7 +161,13 @@ internal static class Av1SequenceHeaderWriter
     /// site). Must stay <see langword="false"/> for non-lossless, where it would make <c>lr_params()</c> a
     /// real, decoder-read syntax element this encoder doesn't implement writing.
     /// </param>
-    public static byte[] Write(int width, int height, bool monoChrome, bool chroma444 = false, bool enableCdef = false, bool use128x128Superblock = false, bool enableRestoration = false)
+    /// <param name="colorPrimaries">CICP <c>color_primaries</c> (H.273), from <see cref="AvifEncoderOptions.ColorPrimaries"/>. Cosmetic tagging only -- see <see cref="ColorPrimaries"/>'s own remarks.</param>
+    /// <param name="transferCharacteristics">CICP <c>transfer_characteristics</c> (H.273), from <see cref="AvifEncoderOptions.TransferCharacteristics"/>. Cosmetic tagging only -- see <see cref="ColorPrimaries"/>'s own remarks.</param>
+    /// <param name="chromaSamplePosition">
+    /// <c>chroma_sample_position</c>, from <see cref="AvifEncoderOptions.ChromaSamplePosition"/>. Only ever
+    /// actually written to the bitstream for the non-chroma444 (4:2:0) case -- see <see cref="WriteColorConfig"/>.
+    /// </param>
+    public static byte[] Write(int width, int height, bool monoChrome, bool chroma444 = false, bool enableCdef = false, bool use128x128Superblock = false, bool enableRestoration = false, int colorPrimaries = ColorPrimaries, int transferCharacteristics = TransferCharacteristics, int chromaSamplePosition = ChromaSamplePosition)
     {
         var writer = new Av1BitWriter();
 
@@ -202,7 +212,7 @@ internal static class Av1SequenceHeaderWriter
         // decoder-read syntax element this encoder doesn't implement writing.
         writer.WriteFlag(enableRestoration); // enable_restoration
 
-        WriteColorConfig(writer, monoChrome, chroma444);
+        WriteColorConfig(writer, monoChrome, chroma444, colorPrimaries, transferCharacteristics, chromaSamplePosition);
 
         writer.WriteFlag(false); // film_grain_params_present
 
@@ -216,11 +226,18 @@ internal static class Av1SequenceHeaderWriter
 
     /// <summary>
     /// <c>color_config()</c> (spec §5.5.2), write-side mirror of the private method in
-    /// <see cref="Av1SequenceHeader"/>. Mirrors that method's exact branch order, not just "skip 2 bits for
-    /// 4:4:4" -- the identity-matrix branch skips <c>color_range</c> too, and skips it *before* any
-    /// profile/subsampling branching would otherwise happen, per spec.
+    /// <see cref="Av1SequenceHeader"/>. Mirrors that method's exact branch order and, since
+    /// <paramref name="colorPrimaries"/>/<paramref name="transferCharacteristics"/> are caller-settable (see
+    /// <see cref="AvifEncoderOptions"/>), its exact three-way identity-matrix condition too -- the identity
+    /// path is only reachable when <em>all three</em> of colorPrimaries/transferCharacteristics/
+    /// matrixCoefficients match (CP_BT_709/TC_SRGB/MC_IDENTITY exactly), not merely whenever
+    /// matrixCoefficients happens to be identity, the way this collapsed when those two were still fixed
+    /// constants. Getting this branch choice wrong for a caller-supplied non-default primaries/transfer pair
+    /// would desync any real decoder (including this project's own <see cref="Av1SequenceHeader"/>), since
+    /// the identity branch skips <c>color_range</c>/<c>chroma_sample_position</c> bits the general branch
+    /// always writes.
     /// </summary>
-    private static void WriteColorConfig(Av1BitWriter writer, bool monoChrome, bool chroma444)
+    private static void WriteColorConfig(Av1BitWriter writer, bool monoChrome, bool chroma444, int colorPrimaries, int transferCharacteristics, int chromaSamplePosition)
     {
         writer.WriteFlag(false); // high_bitdepth (8-bit only in v1)
 
@@ -239,8 +256,8 @@ internal static class Av1SequenceHeaderWriter
         // monochrome path below always keeps writing MatrixCoefficients (BT.601) -- the identity path is
         // reachable only for a real, non-monochrome 4:4:4-lossless encode.
         int matrixCoefficients = (!monoChrome && chroma444) ? MatrixCoefficientsIdentity : MatrixCoefficients;
-        writer.WriteBits(ColorPrimaries, 8);
-        writer.WriteBits(TransferCharacteristics, 8);
+        writer.WriteBits((uint)colorPrimaries, 8);
+        writer.WriteBits((uint)transferCharacteristics, 8);
         writer.WriteBits((uint)matrixCoefficients, 8);
 
         if (monoChrome)
@@ -251,10 +268,10 @@ internal static class Av1SequenceHeaderWriter
             return;
         }
 
-        // ColorPrimaries/TransferCharacteristics are the fixed CP_BT_709/TC_SRGB constants above, so the
-        // decoder's three-way check (colorPrimaries==CpBt709 && transferCharacteristics==TcSrgb &&
-        // matrixCoefficients==McIdentity) collapses to just the matrix-coefficients comparison here.
-        if (matrixCoefficients == MatrixCoefficientsIdentity)
+        // Real three-way check, matching Av1SequenceHeader.ParseColorConfig exactly -- see this method's own
+        // remarks above for why this can no longer be collapsed to a matrix-only comparison.
+        bool identityBranch = colorPrimaries == 1 && transferCharacteristics == 13 && matrixCoefficients == MatrixCoefficientsIdentity;
+        if (identityBranch)
         {
             // Decoder's identity-matrix special case (spec §5.5.2): color_range is implicitly full-range and
             // NOT read; subsampling_x/y are implicitly false (4:4:4); chroma_sample_position is not read
@@ -264,9 +281,14 @@ internal static class Av1SequenceHeaderWriter
         else
         {
             writer.WriteFlag(ColorRangeFull); // color_range
-            // seq_profile == 0 forces subsampling_x = subsampling_y = true; no bits read for them here, unlike
-            // the general form Av1SequenceHeader.ParseColorConfig handles for other profiles.
-            writer.WriteBits(ChromaSamplePosition, 2);
+            // seq_profile == 0 forces subsampling_x = subsampling_y = true; seq_profile == 1 (chroma444)
+            // forces both false. chroma_sample_position is only read when both are true (never true for
+            // chroma444/profile 1), matching Av1SequenceHeader.ParseColorConfig's own subsamplingX &&
+            // subsamplingY gate exactly.
+            if (!chroma444)
+            {
+                writer.WriteBits((uint)chromaSamplePosition, 2);
+            }
         }
 
         writer.WriteFlag(false); // separate_uv_delta_q -- read unconditionally for non-monochrome either way

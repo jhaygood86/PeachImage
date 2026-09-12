@@ -573,7 +573,7 @@ internal sealed class Av1TileDecoder
     /// <summary><c>NS(n)</c> (spec §4.10.7), reading via the arithmetic-coded literal primitives since this is invoked from within tile data.</summary>
     private int ReadNs(int n)
     {
-        int w = FloorLog2(n) + 1;
+        int w = Av1CdfAdaptation.FloorLog2((uint)n) + 1;
         int m = (1 << w) - n;
         int v = (int)_s.ReadLiteral(w - 1);
         if (v < m)
@@ -583,18 +583,6 @@ internal sealed class Av1TileDecoder
 
         int extraBit = (int)_s.ReadLiteral(1);
         return (v << 1) - m + extraBit;
-    }
-
-    private static int FloorLog2(int x)
-    {
-        int s = 0;
-        while (x != 0)
-        {
-            x >>= 1;
-            s++;
-        }
-
-        return s - 1;
     }
 
     /// <summary><c>inverse_recenter(r, v)</c> (spec §5.9.29).</summary>
@@ -937,14 +925,18 @@ internal sealed class Av1TileDecoder
         _useIntrabc = _frame.AllowIntrabc && _s.ReadSymbol(_cdf.Intrabc) != 0;
         if (_useIntrabc)
         {
-            // This decoder's IntraBC support targets this project's own lossless-only encoder use case
-            // (project plan Phase C): a non-lossless IntraBC block would need the spec's separate
-            // is_inter/inter_tx_type transform-type/tx-set selection (TransformType/GetTxSet below only
-            // implement the intra_tx_type path) and the variable transform-partition tree (see
+            // This decoder's IntraBC support for a non-lossless segment (project plan Phase 4) is exact-match
+            // only: a real, residual-bearing (non-skip) non-lossless IntraBC block would need the spec's
+            // separate is_inter/inter_tx_type transform-type/tx-set selection (TransformType/GetTxSet below
+            // only implement the intra_tx_type path) and the variable transform-partition tree (see
             // ReadBlockTxSize) -- neither is implemented, so fail loudly rather than silently desyncing.
-            if (!_lossless)
+            // `_skip` was already read above (ReadSkip, before this bit in real bitstream order too -- see
+            // Av1TileEncoder.EncodeLeaf's own matching write order), so it's already the real, final value:
+            // an exact-match IntraBC leaf always writes skip=1 (zero residual by construction, see that
+            // method's own remarks), so this narrower guard rejects only the genuinely unimplemented case.
+            if (!_lossless && !_skip)
             {
-                throw new AvifUnsupportedFeatureException("AV1 IntraBC in a non-lossless segment is not supported.");
+                throw new AvifUnsupportedFeatureException("AV1 IntraBC with a real residual (non-skip) in a non-lossless segment is not supported.");
             }
 
             // spec §5.11.7's use_intrabc branch: forces is_inter=1, YMode/UVMode=DC_PRED, no palette/
@@ -969,6 +961,8 @@ internal sealed class Av1TileDecoder
         _angleDeltaUv = 0;
         _cflAlphaU = 0;
         _cflAlphaV = 0;
+        _mvRow = 0;
+        _mvCol = 0;
 
         int aboveMode = Av1BlockTables.IntraModeContext[_availU ? _yModes[((_miRow - 1) * _miCols) + _miCol] : Av1IntraMode.DcPred];
         int leftMode = Av1BlockTables.IntraModeContext[_availL ? _yModes[(_miRow * _miCols) + _miCol - 1] : Av1IntraMode.DcPred];

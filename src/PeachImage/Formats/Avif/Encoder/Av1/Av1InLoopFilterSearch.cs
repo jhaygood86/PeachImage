@@ -12,11 +12,20 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// four fixed 6-bit literals, spec §5.9.11 -- signaling any of the 64 possible values costs exactly the same
 /// 12-24 bits regardless of which one is chosen), so unlike <see cref="Av1RdCost"/>'s mode/partition search
 /// this is a pure <c>min D</c> search: try each candidate level, filter a scratch copy of the local
-/// reconstruction, measure distortion against the true source, keep the best. This encoder searches one
-/// level shared across all four <c>loop_filter_level</c> slots (Y-vertical, Y-horizontal, U, V) rather than
-/// tuning luma/chroma independently -- a v1 simplification; per-plane search is a natural follow-up once this
-/// is proven out. CDEF (a further, separate in-loop filter) is not implemented yet -- see the project plan's
-/// later Phase 2 sub-step.</para>
+/// reconstruction, measure distortion against the true source, keep the best.</para>
+///
+/// <para><b>Real per-plane/per-direction search (project plan Phase 4)</b>: confirmed directly from libaom
+/// source (<c>av1/encoder/picklpf.c</c>'s own real <c>av1_pick_filter_level</c>) that real aomenc, at this
+/// project's own tested settings (cpu-used=2, all-intra -- <c>lpf_pick</c> stays at its default
+/// <c>LPF_PICK_FROM_FULL_IMAGE</c> there, only escalating to the dual-only variant at speed &gt;= 4), always
+/// searches four genuinely independent levels, not one shared value: a first joint pass finds a shared
+/// vertical/horizontal baseline, then vertical and horizontal are each independently refined (holding the
+/// other at its current value), then U and V are each searched independently (holding both Y levels at their
+/// already-finalized values) -- this method now mirrors that same real order and dependency structure. This
+/// is a pure search-quality improvement, not a bitstream-correctness one: any of the 64^4 possible level
+/// combinations round-trips correctly regardless of how good a choice it is (see the class remarks above),
+/// so a real, measured distortion improvement is this change's own real verification, not decode-conformance
+/// (which stays trivially satisfied either way).</para>
 /// </summary>
 internal static class Av1InLoopFilterSearch
 {
@@ -26,18 +35,20 @@ internal static class Av1InLoopFilterSearch
     private static readonly int[] CandidateLevels = [0, 4, 8, 12, 16, 24, 32, 48, 63];
 
     /// <summary>
-    /// Searches <see cref="CandidateLevels"/> for the deblocking level that minimizes squared error against
-    /// the true source (<paramref name="sourceY"/>/<paramref name="sourceU"/>/<paramref name="sourceV"/>,
-    /// already-padded pre-encode YUV -- comparing against the padded frame rather than cropping to the true
-    /// unpadded region is a deliberate simplification: the padding region is a near-flat edge replication
-    /// (see <c>Av1FrameEncoder.PadPlane</c>), so it rarely swings the winning level either way), applies the
-    /// winner in place to <paramref name="reconY"/>/<paramref name="reconU"/>/<paramref name="reconV"/> (so
-    /// they reflect the same final pixels a real decoder will reconstruct, matching every other caller's
+    /// Searches <see cref="CandidateLevels"/> for the four independent deblocking levels (Y-vertical,
+    /// Y-horizontal, U, V) that minimize squared error against the true source
+    /// (<paramref name="sourceY"/>/<paramref name="sourceU"/>/<paramref name="sourceV"/>, already-padded
+    /// pre-encode YUV -- comparing against the padded frame rather than cropping to the true unpadded region
+    /// is a deliberate simplification: the padding region is a near-flat edge replication (see
+    /// <c>Av1FrameEncoder.PadPlane</c>), so it rarely swings the winning level either way), applies the
+    /// winning combination in place to <paramref name="reconY"/>/<paramref name="reconU"/>/<paramref name="reconV"/>
+    /// (so they reflect the same final pixels a real decoder will reconstruct, matching every other caller's
     /// expectation of those buffers -- see <c>Av1TileEncoder.EncodeTile</c>'s own remarks on that contract),
-    /// and returns the winning level for <see cref="Av1FrameHeaderWriter.Write"/>'s <c>loopFilterLevel</c>
-    /// parameter to actually signal.
+    /// and returns the four winning levels for <see cref="Av1FrameHeaderWriter.Write"/>'s own
+    /// <c>loopFilterLevel0</c>/<c>loopFilterLevel1</c>/<c>loopFilterLevelU</c>/<c>loopFilterLevelV</c>
+    /// parameters to actually signal.
     /// </summary>
-    public static int SearchAndApply(
+    public static (int Level0, int Level1, int LevelU, int LevelV) SearchAndApply(
         int[] reconY, int[]? reconU, int[]? reconV,
         int[] sourceY, int[]? sourceU, int[]? sourceV,
         int width, int height, int chromaWidth, int chromaHeight,
@@ -45,54 +56,85 @@ internal static class Av1InLoopFilterSearch
     {
         int miCols = 2 * ((width + 7) >> 3);
         int miRows = 2 * ((height + 7) >> 3);
-
         var seq = BuildSequenceHeader(monoChrome);
+        bool hasChroma = reconU is not null;
+
+        // Stage 1: joint baseline -- assume vertical == horizontal, sweep candidates, minimize luma SSE
+        // alone (chroma is searched independently in stages 4/5 below, and doesn't affect luma's own
+        // filtered output) -- mirrors real picklpf.c's own first `search_filter_level(..., dir=2, ...)` call.
+        int joint = SearchOneDimension(seq, reconY, reconU, reconV, sourceY, sourceU, sourceV, width, height, chromaWidth, chromaHeight, monoChrome, baseQIdx, miCols, miRows, level0: -1, level1: -1, levelU: 0, levelV: 0, plane: 0);
+
+        // Stage 2/3: independent vertical/horizontal refinement, each holding the other at its current best
+        // -- mirrors real picklpf.c's own two follow-up `search_filter_level(..., dir=0/1, ...)` calls
+        // (reachable at this project's own tested cpu-used=2, since LPF_PICK_FROM_FULL_IMAGE_NON_DUAL only
+        // applies at speed >= 4).
+        int level0 = SearchOneDimension(seq, reconY, reconU, reconV, sourceY, sourceU, sourceV, width, height, chromaWidth, chromaHeight, monoChrome, baseQIdx, miCols, miRows, level0: -1, level1: joint, levelU: 0, levelV: 0, plane: 0);
+        int level1 = SearchOneDimension(seq, reconY, reconU, reconV, sourceY, sourceU, sourceV, width, height, chromaWidth, chromaHeight, monoChrome, baseQIdx, miCols, miRows, level0: level0, level1: -1, levelU: 0, levelV: 0, plane: 0);
+
+        // Stage 4/5: U and V, independent of each other and of the now-finalized luma levels -- mirrors
+        // real picklpf.c's own `if (num_planes > 1) { filter_level_u = ...; filter_level_v = ...; }` block.
+        int levelU = 0, levelV = 0;
+        if (hasChroma)
+        {
+            levelU = SearchOneDimension(seq, reconY, reconU, reconV, sourceY, sourceU, sourceV, width, height, chromaWidth, chromaHeight, monoChrome, baseQIdx, miCols, miRows, level0, level1, levelU: -1, levelV: 0, plane: 1);
+            levelV = SearchOneDimension(seq, reconY, reconU, reconV, sourceY, sourceU, sourceV, width, height, chromaWidth, chromaHeight, monoChrome, baseQIdx, miCols, miRows, level0, level1, levelU, levelV: -1, plane: 2);
+        }
+
+        // Final apply: filter once more with the fully-decided combination and commit it -- every stage
+        // above only measured SSE against scratch clones, never mutating reconY/U/V itself.
+        var finalFrame = BuildFrameHeaderForLevels(width, height, monoChrome, baseQIdx, level0, level1, levelU, levelV);
+        var finalResult = BuildDecodeResult(seq, finalFrame, reconY, reconU, reconV, miCols, miRows, width, height, chromaWidth, chromaHeight);
+        Av1DeblockingFilter.Apply(finalResult);
+
+        return (level0, level1, levelU, levelV);
+    }
+
+    /// <summary>
+    /// Searches <see cref="CandidateLevels"/> for the single best value of whichever one of
+    /// <paramref name="level0"/>/<paramref name="level1"/>/<paramref name="levelU"/>/<paramref name="levelV"/>
+    /// is passed as <c>-1</c> (the dimension being searched this call), holding the other three fixed at
+    /// their given values, and returns it -- minimizing squared error on <paramref name="plane"/> alone
+    /// (0 = Y, 1 = U, 2 = V), matching real picklpf.c's own per-<c>search_filter_level</c>-call plane scope.
+    /// </summary>
+    private static int SearchOneDimension(
+        Av1SequenceHeader seq,
+        int[] reconY, int[]? reconU, int[]? reconV,
+        int[] sourceY, int[]? sourceU, int[]? sourceV,
+        int width, int height, int chromaWidth, int chromaHeight, bool monoChrome, int baseQIdx,
+        int miCols, int miRows,
+        int level0, int level1, int levelU, int levelV,
+        int plane)
+    {
+        int[]? source = plane switch { 0 => sourceY, 1 => sourceU, _ => sourceV };
+        if (source is null)
+        {
+            return 0;
+        }
 
         int bestLevel = 0;
-        long bestSse = ComputeSse(reconY, sourceY) + ComputeSse(reconU, sourceU) + ComputeSse(reconV, sourceV);
+        long bestSse = long.MaxValue;
 
-        // Best-so-far filtered planes, only allocated once a candidate actually beats level 0 (the common
-        // case for already-clean content, where the unfiltered reconstruction is the correct final answer
-        // and this search should cost only the ComputeSse calls above, not a single filter pass or clone).
-        int[]? bestFilteredY = null;
-        int[]? bestFilteredU = null;
-        int[]? bestFilteredV = null;
-
-        foreach (int level in CandidateLevels)
+        foreach (int candidate in CandidateLevels)
         {
-            if (level == 0)
-            {
-                // Already scored above (the unfiltered reconstruction, level 0's actual effect) -- skip
-                // re-filtering-and-measuring a no-op.
-                continue;
-            }
+            int l0 = level0 < 0 ? candidate : level0;
+            int l1 = level1 < 0 ? candidate : level1;
+            int lu = levelU < 0 ? candidate : levelU;
+            int lv = levelV < 0 ? candidate : levelV;
 
             int[] trialY = (int[])reconY.Clone();
             int[]? trialU = (int[]?)reconU?.Clone();
             int[]? trialV = (int[]?)reconV?.Clone();
 
-            var frame = BuildFrameHeaderForLevel(width, height, monoChrome, baseQIdx, level);
+            var frame = BuildFrameHeaderForLevels(width, height, monoChrome, baseQIdx, l0, l1, lu, lv);
             var result = BuildDecodeResult(seq, frame, trialY, trialU, trialV, miCols, miRows, width, height, chromaWidth, chromaHeight);
             Av1DeblockingFilter.Apply(result);
 
-            long sse = ComputeSse(trialY, sourceY) + ComputeSse(trialU, sourceU) + ComputeSse(trialV, sourceV);
+            int[]? filtered = plane switch { 0 => trialY, 1 => trialU, _ => trialV };
+            long sse = ComputeSse(filtered, source);
             if (sse < bestSse)
             {
                 bestSse = sse;
-                bestLevel = level;
-                bestFilteredY = trialY;
-                bestFilteredU = trialU;
-                bestFilteredV = trialV;
-            }
-        }
-
-        if (bestFilteredY is not null)
-        {
-            Array.Copy(bestFilteredY, reconY, reconY.Length);
-            if (reconU is not null)
-            {
-                Array.Copy(bestFilteredU!, reconU, reconU.Length);
-                Array.Copy(bestFilteredV!, reconV!, reconV!.Length);
+                bestLevel = candidate;
             }
         }
 
@@ -151,17 +193,17 @@ internal static class Av1InLoopFilterSearch
     };
 
     /// <summary>
-    /// Resolves the real <see cref="Av1FrameHeader"/> a candidate <paramref name="level"/> would produce, by
+    /// Resolves the real <see cref="Av1FrameHeader"/> a candidate four-level combination would produce, by
     /// calling the actual write path (<see cref="Av1FrameHeaderWriter.Write"/>) against a throwaway
     /// <see cref="Av1BitWriter"/> -- reuses that method's already-correct field construction instead of a
     /// second, hand-duplicated copy of it (the same reasoning <see cref="Av1CoefficientWriter.WriteCoeffs"/>'s
     /// <see cref="IAv1SymbolSink"/> reuse follows), at the cost of writing (and discarding) real bits once per
     /// candidate -- cheap next to the filtering/SSE work the same loop iteration already does.
     /// </summary>
-    private static Av1FrameHeader BuildFrameHeaderForLevel(int width, int height, bool monoChrome, int baseQIdx, int level)
+    private static Av1FrameHeader BuildFrameHeaderForLevels(int width, int height, bool monoChrome, int baseQIdx, int level0, int level1, int levelU, int levelV)
     {
         var scratchWriter = new Av1BitWriter();
-        return Av1FrameHeaderWriter.Write(scratchWriter, width, height, monoChrome, baseQIdx, lossless: false, loopFilterLevel: level);
+        return Av1FrameHeaderWriter.Write(scratchWriter, width, height, monoChrome, baseQIdx, lossless: false, level0, enableCdef: false, cdef: null, allowScreenContentTools: false, allowIntrabc: false, reducedTxSet: true, level1, levelU, levelV);
     }
 
     private static Av1FrameDecodeResult BuildDecodeResult(Av1SequenceHeader seq, Av1FrameHeader frame, int[] y, int[]? u, int[]? v, int miCols, int miRows, int width, int height, int chromaWidth, int chromaHeight)

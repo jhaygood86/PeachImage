@@ -87,7 +87,7 @@ internal sealed class Av1BitReader
             return 0;
         }
 
-        int w = FloorLog2(n) + 1;
+        int w = Av1CdfAdaptation.FloorLog2(n) + 1;
         uint m = (uint)((1 << w) - n);
         uint v = ReadBits(w - 1);
         if (v < m)
@@ -117,17 +117,5 @@ internal sealed class Av1BitReader
         uint bit = (uint)((_data[byteIndex] >> bitIndexFromMsb) & 1);
         _bitPosition++;
         return bit;
-    }
-
-    private static int FloorLog2(uint x)
-    {
-        int s = 0;
-        while (x != 0)
-        {
-            x >>= 1;
-            s++;
-        }
-
-        return s - 1;
     }
 }

@@ -72,19 +72,35 @@ public class Av1CdfContextTests
         Assert.Same(originalArrayReference, scratch.TxbSkip[0][0]);
     }
 
+    /// <summary>
+    /// <see cref="Av1CdfContext.CopyFrom"/> copies every table, not just the coefficient-related ones --
+    /// see its own remarks for the real bug this corrected (a stale claim that "nothing outside coefficient
+    /// coding ever reads a context copied this way", contradicted by <c>Av1TileEncoder</c>'s own real
+    /// decision-phase cost estimators reading <c>TileState.CostCdf</c>'s partition/uv_mode/angle_delta/
+    /// palette/mv tables extensively). Covers one table from each of the previously-uncopied groups
+    /// (partition, uv_mode, palette, mv) as a representative sample, not an exhaustive per-field sweep.
+    /// </summary>
     [Fact]
-    public void CopyFrom_LeavesUnrelatedTablesUntouched()
+    public void CopyFrom_CopiesNonCoefficientTablesToo()
     {
         var real = new Av1CdfContext(baseQIdx: 0);
         var scratch = new Av1CdfContext(baseQIdx: 0);
 
-        // Mutate a non-coefficient table (partition CDFs) on the real context -- CopyFrom is documented to
-        // only touch the coefficient-related tables WriteCoeffs reads, so this must NOT propagate.
         Av1CdfAdaptation.AdaptCdf(real.PartitionW32[0], real.PartitionW32[0].Length - 1, symbol: 3);
+        Av1CdfAdaptation.AdaptCdf(real.UvModeCflAllowed[0], real.UvModeCflAllowed[0].Length - 1, symbol: 5);
+        Av1CdfAdaptation.AdaptCdf(real.PaletteYSize[0], real.PaletteYSize[0].Length - 1, symbol: 2);
+        Av1CdfAdaptation.AdaptCdf(real.MvJoint, real.MvJoint.Length - 1, symbol: 1);
+
         Assert.NotEqual(scratch.PartitionW32[0], real.PartitionW32[0]);
+        Assert.NotEqual(scratch.UvModeCflAllowed[0], real.UvModeCflAllowed[0]);
+        Assert.NotEqual(scratch.PaletteYSize[0], real.PaletteYSize[0]);
+        Assert.NotEqual(scratch.MvJoint, real.MvJoint);
 
         scratch.CopyFrom(real);
 
-        Assert.NotEqual(scratch.PartitionW32[0], real.PartitionW32[0]);
+        Assert.Equal(real.PartitionW32[0], scratch.PartitionW32[0]);
+        Assert.Equal(real.UvModeCflAllowed[0], scratch.UvModeCflAllowed[0]);
+        Assert.Equal(real.PaletteYSize[0], scratch.PaletteYSize[0]);
+        Assert.Equal(real.MvJoint, scratch.MvJoint);
     }
 }

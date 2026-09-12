@@ -39,6 +39,30 @@ internal static class Program
 
     private static void Run(string[] args)
     {
+        // --corpus <dir>: Phase 0's own corpus-iterating mode (project plan
+        // "for-the-attached-image-nifty-kahan.md", Phase 0 deliverable #2) -- runs every *.avif file in
+        // <dir> through this same reference-vs-actual byte comparison, instead of the single hand-picked
+        // image the rest of this tool targets. Takes over the whole run; every other single-image flag
+        // below is ignored in this mode except --effort/--aomenc/--out.
+        string? corpusDir = GetArg(args, "--corpus");
+        if (corpusDir is not null)
+        {
+            RunCorpus(args, corpusDir);
+            return;
+        }
+
+        // --diagnose <dir>: root-causing helper for a round-trip pixel mismatch the corpus mode already
+        // flagged -- reads that file's own cached input.y4m/reference.obu/actual.obu (already written by a
+        // prior --corpus run) and compares the ORIGINAL source pixels against both sides' own decoded
+        // output, and the two decoded outputs against each other, to localize which side (or both) actually
+        // has the bug rather than just knowing they disagree.
+        string? diagnoseDir = GetArg(args, "--diagnose");
+        if (diagnoseDir is not null)
+        {
+            RunDiagnose(diagnoseDir);
+            return;
+        }
+
         string? inputPath = GetArg(args, "--input");
         string pattern = GetArg(args, "--pattern") ?? "solid";
         int width = int.Parse(GetArg(args, "--width") ?? "128", CultureInfo.InvariantCulture);
@@ -47,27 +71,73 @@ internal static class Program
         string aomencPath = GetArg(args, "--aomenc") ?? DefaultAomencPath;
         string outDir = GetArg(args, "--out") ?? Path.Combine(Path.GetTempPath(), "peachimage-libaom-parity");
 
+        // --reuse-cache <dir>: skip both image loading/generation AND the (slow, external-process) aomenc
+        // invocation entirely, reusing a prior run's own input.y4m + reference.obu pair verbatim -- input.y4m
+        // is already exactly the pixel data any earlier --input/--pattern run produced (Av1RgbToYuvIdentityConverter's
+        // own Y=G/U=B/V=R mapping is trivially invertible, see its own remarks), and reference.obu is aomenc's
+        // own deterministic output for that same pixel data at the same effort, so re-deriving both from
+        // scratch would just reproduce byte-identical files at the cost of a real aomenc re-run (and, for a
+        // network-sourced real test image with no locally-cached original, might not even be reproducible at
+        // all without re-downloading it). Effort/aomenc/pattern/width/height/input args are ignored when this
+        // is set.
+        string? reuseCacheDir = GetArg(args, "--reuse-cache");
+
         Directory.CreateDirectory(outDir);
 
-        using var image = inputPath is not null
-            ? Image.Load(inputPath, new DecoderOptions { TargetPixelFormat = PixelFormat.Rgb24 })
-            : GenerateSyntheticImage(pattern, width, height);
+        byte[] rgb;
+        int imageWidth;
+        int imageHeight;
+        string y4mPath;
+        string referenceObuPath;
+        byte[] referenceObu;
 
-        Console.WriteLine($"Image: {image.Width}x{image.Height} ({(inputPath is not null ? $"loaded from {inputPath}" : $"synthetic '{pattern}'")}), effort={effort}");
-        if (image.Width % 128 != 0 || image.Height % 128 != 0)
+        if (reuseCacheDir is not null)
         {
-            Console.WriteLine("NOTE: dimensions are not a multiple of 128 -- for lossless, PeachImage now signals the true (unpadded) frame_width/frame_height in the bitstream, matching aomenc's own partial-edge-superblock handling (see TileState.TrueMiCols's remarks), so sequence/frame header fields should match exactly. Any remaining divergence here is a partition/mode-search quality gap (like the palette/IntraBC gaps already tracked in the project plan), not a structural frame-size mismatch. Non-lossless still pads frame_width/frame_height to a superblock multiple and will show a real frame_size divergence.");
+            string cachedY4mPath = Path.Combine(reuseCacheDir, "input.y4m");
+            string cachedReferenceObuPath = Path.Combine(reuseCacheDir, "reference.obu");
+            (int[] cy, int[] cu, int[] cv, imageWidth, imageHeight) = ReadY4m(cachedY4mPath);
+            rgb = new byte[imageWidth * imageHeight * 3];
+            for (int i = 0; i < imageWidth * imageHeight; i++)
+            {
+                // Inverse of Av1RgbToYuvIdentityConverter.Convert: R = V, G = Y, B = U.
+                rgb[(i * 3) + 0] = (byte)cv[i];
+                rgb[(i * 3) + 1] = (byte)cy[i];
+                rgb[(i * 3) + 2] = (byte)cu[i];
+            }
+
+            y4mPath = Path.Combine(outDir, "input.y4m");
+            referenceObuPath = Path.Combine(outDir, "reference.obu");
+            File.Copy(cachedY4mPath, y4mPath, overwrite: true);
+            File.Copy(cachedReferenceObuPath, referenceObuPath, overwrite: true);
+            referenceObu = File.ReadAllBytes(referenceObuPath);
+
+            Console.WriteLine($"Image: {imageWidth}x{imageHeight} (reused cache from {reuseCacheDir}), effort={effort}");
         }
+        else
+        {
+            using var image = inputPath is not null
+                ? Image.Load(inputPath, new DecoderOptions { TargetPixelFormat = PixelFormat.Rgb24 })
+                : GenerateSyntheticImage(pattern, width, height);
 
-        byte[] rgb = image.GetPixelSpan().ToArray();
+            imageWidth = image.Width;
+            imageHeight = image.Height;
 
-        var (y, u, v) = Av1RgbToYuvIdentityConverter.Convert(rgb, image.Width, image.Height);
-        string y4mPath = Path.Combine(outDir, "input.y4m");
-        WriteY4m(y4mPath, y, u, v, image.Width, image.Height);
+            Console.WriteLine($"Image: {image.Width}x{image.Height} ({(inputPath is not null ? $"loaded from {inputPath}" : $"synthetic '{pattern}'")}), effort={effort}");
+            if (image.Width % 128 != 0 || image.Height % 128 != 0)
+            {
+                Console.WriteLine("NOTE: dimensions are not a multiple of 128 -- for lossless, PeachImage now signals the true (unpadded) frame_width/frame_height in the bitstream, matching aomenc's own partial-edge-superblock handling (see TileState.TrueMiCols's remarks), so sequence/frame header fields should match exactly. Any remaining divergence here is a partition/mode-search quality gap (like the palette/IntraBC gaps already tracked in the project plan), not a structural frame-size mismatch. Non-lossless still pads frame_width/frame_height to a superblock multiple and will show a real frame_size divergence.");
+            }
 
-        string referenceObuPath = Path.Combine(outDir, "reference.obu");
-        RunAomenc(aomencPath, y4mPath, referenceObuPath, effort);
-        byte[] referenceObu = File.ReadAllBytes(referenceObuPath);
+            rgb = image.GetPixelSpan().ToArray();
+
+            var (y, u, v) = Av1RgbToYuvIdentityConverter.Convert(rgb, image.Width, image.Height);
+            y4mPath = Path.Combine(outDir, "input.y4m");
+            WriteY4m(y4mPath, y, u, v, image.Width, image.Height);
+
+            referenceObuPath = Path.Combine(outDir, "reference.obu");
+            RunAomenc(aomencPath, y4mPath, referenceObuPath, effort);
+            referenceObu = File.ReadAllBytes(referenceObuPath);
+        }
 
         // Captured live during the real encode (project plan Phase 1/Step 6's structural decision-log tool)
         // -- each record's EstimatedCost is PeachImage's own real-time RD-search cost estimate for that
@@ -76,11 +146,11 @@ internal static class Program
         // deliberately avoids -- see ReportDecisionLogDiff's own remarks for why decoding is otherwise
         // sufficient for every other field here).
         var actualLeaves = new List<Av1BlockDecisionRecord>();
-        var actualFrame = Av1FrameEncoder.Encode(rgb, image.Width, image.Height, monoChrome: false, quality: 75, lossless: true, effort, onLeafCommitted: actualLeaves.Add);
+        var actualFrame = Av1FrameEncoder.Encode(rgb, imageWidth, imageHeight, monoChrome: false, quality: 75, lossless: true, effort, onLeafCommitted: actualLeaves.Add);
         byte[] actualObu = actualFrame.ObuBytes;
 
-        int referenceSeqLevelIdx = Av1SequenceHeaderWriter.ComputeSeqLevelIdx(image.Width, image.Height);
-        var referenceFrame = new Av1EncodedFrame(referenceObu, image.Width, image.Height, MonoChrome: false, Chroma444: true, referenceSeqLevelIdx);
+        int referenceSeqLevelIdx = Av1SequenceHeaderWriter.ComputeSeqLevelIdx(imageWidth, imageHeight);
+        var referenceFrame = new Av1EncodedFrame(referenceObu, imageWidth, imageHeight, MonoChrome: false, Chroma444: true, referenceSeqLevelIdx);
         byte[] referenceAvif = BuildAvif(referenceFrame);
         byte[] actualAvif = BuildAvif(actualFrame);
 
@@ -111,12 +181,382 @@ internal static class Program
         Console.WriteLine("=== Structural decision-log diff (project plan Phase 1/Step 6) ===");
         ReportDecisionLogDiff(referenceObu, actualLeaves);
 
+        // Self round-trip structural check (round N+10's own investigation): actualLeaves is the encoder's
+        // own real-time INTENT (captured live via onLeafCommitted during the real commit pass); decoding
+        // PeachImage's own actualObu independently reveals what a real decoder actually reads back for that
+        // same bitstream. These two should always be identical -- any difference here is a genuine
+        // encoder/decoder desync (wrong bits written, or the same bits read under a different, already-
+        // diverged CDF/context state), never a quality/byte-count question, and pinpoints the earliest
+        // structurally-divergent node far more directly than hunting for the first wrong pixel.
+        Console.WriteLine();
+        Console.WriteLine("=== Self round-trip structural check (encoder intent vs. decode of its own output) ===");
+        ReportDecisionLogDiff(actualObu, actualLeaves);
+
+        string? cdfSlotFilter = Environment.GetEnvironmentVariable("PEACHIMAGE_DUMP_UVMODE_LEAVES");
+        if (cdfSlotFilter is not null)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"=== Every leaf touching UvModeCflAllowed[{cdfSlotFilter}] (encoder intent, sorted by position, not real commit order) ===");
+            int targetYMode = int.Parse(cdfSlotFilter, CultureInfo.InvariantCulture);
+            int idx = 0;
+            foreach (var leaf in actualLeaves.OrderBy(l => l.R).ThenBy(l => l.C))
+            {
+                bool cflAllowed = leaf.WidthMi == 1 && leaf.HeightMi == 1;
+                if (cflAllowed && leaf.YMode == targetYMode)
+                {
+                    Console.WriteLine($"  leaf {idx}: {leaf}");
+                }
+
+                idx++;
+            }
+        }
+
         Console.WriteLine();
         Console.WriteLine("=== Full AVIF file (shared muxer -- divergence here should trace back to the OBU diff above) ===");
         CompareAndReport(referenceAvif, actualAvif, isObu: false);
 
         Console.WriteLine();
         Console.WriteLine($"Files written to: {outDir}");
+    }
+
+    /// <summary>
+    /// Phase 0's corpus-iterating mode: decodes every corpus <c>.avif</c> file this decoder can handle in a
+    /// directly re-encodable pixel format (Rgb24 only for now -- see the skip branch below), re-encodes each
+    /// via both real <c>aomenc</c> and PeachImage's own lossless encoder at matching settings, and reports
+    /// byte-identical pass/fail per file plus an aggregate summary. Deliberately does NOT fail the process
+    /// (exit code stays 0) on a mismatch -- unlike the single-image mode's exhaustive per-field diff, this is
+    /// a *measurement* tool for tracking the corpus-wide gap across many real images at once, not (yet) the
+    /// standing, must-pass regression test the project plan's own definition of done ultimately calls for;
+    /// turning this into a hard-failing <c>dotnet test</c> case is deferred until the gap has actually closed
+    /// enough for that to be meaningful rather than permanently red.
+    /// </summary>
+    private static void RunCorpus(string[] args, string corpusDir)
+    {
+        int effort = int.Parse(GetArg(args, "--effort") ?? "2", CultureInfo.InvariantCulture);
+        string aomencPath = GetArg(args, "--aomenc") ?? DefaultAomencPath;
+        string outDir = GetArg(args, "--out") ?? Path.Combine(Path.GetTempPath(), "peachimage-libaom-parity-corpus");
+        Directory.CreateDirectory(outDir);
+
+        string[] files = Directory.GetFiles(corpusDir, "*.avif").OrderBy(f => f, StringComparer.Ordinal).ToArray();
+        Console.WriteLine($"Corpus: {corpusDir} ({files.Length} .avif files), effort={effort}");
+        Console.WriteLine();
+
+        int skipped = 0;
+        int identical = 0;
+        int mismatched = 0;
+        int pixelIdentical = 0;
+        int pixelMismatched = 0;
+        long totalReferenceBytes = 0;
+        long totalActualBytes = 0;
+        var mismatches = new List<string>();
+        var pixelMismatches = new List<string>();
+
+        foreach (string file in files)
+        {
+            string name = Path.GetFileNameWithoutExtension(file);
+            Image? image;
+            try
+            {
+                using var stream = File.OpenRead(file);
+                image = AvifDecoder.Decode(stream);
+            }
+            catch (AvifDecodingException ex)
+            {
+                Console.WriteLine($"  SKIP {name}: decode error ({ex.Message})");
+                skipped++;
+                continue;
+            }
+            catch (AvifUnsupportedFeatureException ex)
+            {
+                Console.WriteLine($"  SKIP {name}: unsupported feature ({ex.Message})");
+                skipped++;
+                continue;
+            }
+
+            using (image)
+            {
+                // Rgb24-only for now, matching AvifFfmpegReferenceTests' own comparable-pixel-format scope
+                // decision: Gray8 would need Av1FrameEncoder.Encode's own monoChrome path wired up here (not
+                // yet done in this harness), and higher-bit-depth/alpha formats aren't a pixel shape this
+                // encoder round-trips through Av1RgbToYuvIdentityConverter at all.
+                if (image.PixelFormat != PixelFormat.Rgb24)
+                {
+                    Console.WriteLine($"  SKIP {name}: pixel format {image.PixelFormat} out of this harness's current scope (Rgb24 only)");
+                    skipped++;
+                    continue;
+                }
+
+                if (image.Width <= 0 || image.Height <= 0)
+                {
+                    Console.WriteLine($"  SKIP {name}: degenerate size {image.Width}x{image.Height}");
+                    skipped++;
+                    continue;
+                }
+
+                byte[] rgb = image.GetPixelSpan().ToArray();
+                string imageOutDir = Path.Combine(outDir, name);
+                Directory.CreateDirectory(imageOutDir);
+
+                var (y, u, v) = Av1RgbToYuvIdentityConverter.Convert(rgb, image.Width, image.Height);
+                string y4mPath = Path.Combine(imageOutDir, "input.y4m");
+                WriteY4m(y4mPath, y, u, v, image.Width, image.Height);
+
+                string referenceObuPath = Path.Combine(imageOutDir, "reference.obu");
+                byte[] referenceObu;
+                try
+                {
+                    RunAomenc(aomencPath, y4mPath, referenceObuPath, effort);
+                    referenceObu = File.ReadAllBytes(referenceObuPath);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  SKIP {name}: aomenc failed ({ex.Message})");
+                    skipped++;
+                    continue;
+                }
+
+                byte[] actualObu;
+                Av1EncodedFrame actualFrame;
+                try
+                {
+                    actualFrame = Av1FrameEncoder.Encode(rgb, image.Width, image.Height, monoChrome: false, quality: 75, lossless: true, effort);
+                    actualObu = actualFrame.ObuBytes;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  FAIL {name}: PeachImage encode threw {ex.GetType().Name}: {ex.Message}");
+                    mismatched++;
+                    mismatches.Add(name);
+                    continue;
+                }
+
+                File.WriteAllBytes(Path.Combine(imageOutDir, "actual.obu"), actualObu);
+
+                totalReferenceBytes += referenceObu.Length;
+                totalActualBytes += actualObu.Length;
+
+                // Round-trip pixel check (project plan definition-of-done item 4, escalation-4's own
+                // "roundtrip through both libaom and PeachImage with identical pixels and bytes" directive):
+                // independently mandatory alongside the byte-identical check above, not implied by it -- this
+                // is the check that actually matters to a real consumer of the format, and it catches a bug in
+                // the byte-comparison harness itself that a pure byte diff couldn't. Decodes both sides' own
+                // encoded output back through PeachImage's own (and only) AVIF decoder -- the same container
+                // each side's own AVIF file was built with via BuildAvif, so this exercises the real decode
+                // path a real consumer would use, not a special test-only reader.
+                //
+                // Checks TWO independent things, not one: (a) actual's own real round-trip against the TRUE
+                // source pixels (`rgb`, already decoded from the corpus file itself) -- this is the only check
+                // that can actually indict PeachImage's own encoder, and (b) reference vs actual, which is a
+                // separate, weaker signal (aomenc's own reference doesn't always round-trip to source
+                // perfectly either for every corpus file -- confirmed directly for at least one grid-tiled
+                // fixture, `sofa_grid1x5_420`, where aomenc's own decoded output disagreed with source while
+                // PeachImage's own matched exactly -- so a reference-vs-actual mismatch alone does NOT mean
+                // PeachImage has a bug, only that the two sides differ, which byte-count differences already
+                // told us). (a) is what actually gates correctness; (b) is kept only as an extra diagnostic.
+                string pixelNote;
+                bool pixelsMatch;
+                try
+                {
+                    int seqLevelIdx = Av1SequenceHeaderWriter.ComputeSeqLevelIdx(image.Width, image.Height);
+                    var referenceFrame = new Av1EncodedFrame(referenceObu, image.Width, image.Height, MonoChrome: false, Chroma444: true, seqLevelIdx);
+                    byte[] referenceAvif = BuildAvif(referenceFrame);
+                    byte[] actualAvif = BuildAvif(actualFrame);
+
+                    using var referenceStream = new MemoryStream(referenceAvif);
+                    using var actualStream = new MemoryStream(actualAvif);
+                    using var referenceDecoded = AvifDecoder.Decode(referenceStream);
+                    using var actualDecoded = AvifDecoder.Decode(actualStream);
+
+                    bool actualMatchesSource = actualDecoded.Width == image.Width && actualDecoded.Height == image.Height
+                        && actualDecoded.PixelFormat == PixelFormat.Rgb24 && actualDecoded.GetPixelSpan().SequenceEqual(rgb);
+
+                    bool referenceMatchesActual = referenceDecoded.Width == actualDecoded.Width && referenceDecoded.Height == actualDecoded.Height
+                        && referenceDecoded.PixelFormat == actualDecoded.PixelFormat && referenceDecoded.GetPixelSpan().SequenceEqual(actualDecoded.GetPixelSpan());
+
+                    pixelsMatch = actualMatchesSource;
+                    pixelNote = actualMatchesSource
+                        ? (referenceMatchesActual ? "pixels match (actual==source, reference==actual)" : "pixels match (actual==source, reference DIFFERS from actual/source -- aomenc's own reference didn't round-trip, not a PeachImage bug)")
+                        : (referenceMatchesActual ? "PIXELS WRONG (actual!=source, but reference==actual -- aomenc has the same bug, or both share a decode issue)" : "PIXELS WRONG (actual!=source)");
+                }
+                catch (Exception ex)
+                {
+                    pixelsMatch = false;
+                    pixelNote = $"round-trip decode threw {ex.GetType().Name}: {ex.Message}";
+                }
+
+                if (pixelsMatch)
+                {
+                    pixelIdentical++;
+                }
+                else
+                {
+                    pixelMismatched++;
+                    pixelMismatches.Add(name);
+                }
+
+                if (referenceObu.AsSpan().SequenceEqual(actualObu))
+                {
+                    Console.WriteLine($"  OK   {name}: {image.Width}x{image.Height}, {referenceObu.Length} bytes, byte-identical, {pixelNote}");
+                    identical++;
+                }
+                else
+                {
+                    double gapPct = ((double)actualObu.Length - referenceObu.Length) / referenceObu.Length * 100.0;
+                    Console.WriteLine($"  DIFF {name}: {image.Width}x{image.Height}, reference={referenceObu.Length}B actual={actualObu.Length}B ({gapPct:+0.00;-0.00}%), {pixelNote}");
+                    mismatched++;
+                    mismatches.Add(name);
+                }
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("=== Corpus summary ===");
+        Console.WriteLine($"Total files: {files.Length}");
+        Console.WriteLine($"Skipped (out of this harness's current scope): {skipped}");
+        Console.WriteLine($"Compared: {identical + mismatched} (byte-identical: {identical}, mismatched: {mismatched})");
+        Console.WriteLine($"Round-trip pixels: {pixelIdentical} match, {pixelMismatched} differ (independent of the byte check above -- see the plan's own definition-of-done item 4)");
+        if (totalReferenceBytes > 0)
+        {
+            double overallGapPct = ((double)totalActualBytes - totalReferenceBytes) / totalReferenceBytes * 100.0;
+            Console.WriteLine($"Aggregate bytes: reference={totalReferenceBytes} actual={totalActualBytes} ({overallGapPct:+0.00;-0.00}%)");
+        }
+
+        if (mismatches.Count > 0)
+        {
+            Console.WriteLine($"Mismatched files ({mismatches.Count}): {string.Join(", ", mismatches)}");
+        }
+
+        if (pixelMismatches.Count > 0)
+        {
+            Console.WriteLine($"Pixel-mismatched files ({pixelMismatches.Count}): {string.Join(", ", pixelMismatches)}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"Per-file artifacts written under: {outDir}");
+    }
+
+    private static void RunDiagnose(string dir)
+    {
+        var (y, u, v, width, height) = ReadY4m(Path.Combine(dir, "input.y4m"));
+        byte[] originalRgb = new byte[width * height * 3];
+        for (int i = 0; i < width * height; i++)
+        {
+            // Inverse of Av1RgbToYuvIdentityConverter.Convert: R = V, G = Y, B = U.
+            originalRgb[(i * 3) + 0] = (byte)v[i];
+            originalRgb[(i * 3) + 1] = (byte)y[i];
+            originalRgb[(i * 3) + 2] = (byte)u[i];
+        }
+
+        byte[] referenceObu = File.ReadAllBytes(Path.Combine(dir, "reference.obu"));
+        byte[] actualObu = File.ReadAllBytes(Path.Combine(dir, "actual.obu"));
+
+        int seqLevelIdx = Av1SequenceHeaderWriter.ComputeSeqLevelIdx(width, height);
+        var referenceFrame = new Av1EncodedFrame(referenceObu, width, height, MonoChrome: false, Chroma444: true, seqLevelIdx);
+        var actualFrame = new Av1EncodedFrame(actualObu, width, height, MonoChrome: false, Chroma444: true, seqLevelIdx);
+
+        byte[] referenceAvif = BuildAvif(referenceFrame);
+        byte[] actualAvif = BuildAvif(actualFrame);
+
+        using var refImg = AvifDecoder.Decode(new MemoryStream(referenceAvif));
+        using var actImg = AvifDecoder.Decode(new MemoryStream(actualAvif));
+
+        Console.WriteLine($"original:  {width}x{height}");
+        Console.WriteLine($"reference: {refImg.Width}x{refImg.Height} {refImg.PixelFormat}");
+        Console.WriteLine($"actual:    {actImg.Width}x{actImg.Height} {actImg.PixelFormat}");
+        Console.WriteLine();
+
+        CompareRgb("original  vs reference", originalRgb, refImg.GetPixelSpan().ToArray(), width);
+        CompareRgb("original  vs actual   ", originalRgb, actImg.GetPixelSpan().ToArray(), width);
+        var (px, py) = CompareRgb("reference vs actual   ", refImg.GetPixelSpan().ToArray(), actImg.GetPixelSpan().ToArray(), width);
+
+        if (px >= 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"=== Per-mi metadata around first pixel-diverging position (pixel x={px},y={py} -> mi r={py / 4},c={px / 4}) ===");
+            ReportMiNeighborhood(referenceObu, "reference", px / 4, py / 4);
+            ReportMiNeighborhood(actualObu, "actual", px / 4, py / 4);
+        }
+
+        string? atArg = Environment.GetEnvironmentVariable("PEACHIMAGE_DIAGNOSE_AT");
+        if (atArg is not null)
+        {
+            string[] parts = atArg.Split(',');
+            int atX = int.Parse(parts[0], CultureInfo.InvariantCulture);
+            int atY = int.Parse(parts[1], CultureInfo.InvariantCulture);
+            Console.WriteLine();
+            Console.WriteLine($"=== Raw 4x4 RGB dump at (x={atX},y={atY}) ===");
+            DumpRgbRegion("original ", originalRgb, width, atX, atY);
+            DumpRgbRegion("reference", refImg.GetPixelSpan().ToArray(), width, atX, atY);
+            DumpRgbRegion("actual   ", actImg.GetPixelSpan().ToArray(), width, atX, atY);
+        }
+    }
+
+    private static void DumpRgbRegion(string label, byte[] rgb, int width, int atX, int atY)
+    {
+        for (int dy = 0; dy < 4; dy++)
+        {
+            var row = new List<string>();
+            for (int dx = 0; dx < 4; dx++)
+            {
+                int idx = (((atY + dy) * width) + atX + dx) * 3;
+                row.Add($"({rgb[idx]},{rgb[idx + 1]},{rgb[idx + 2]})");
+            }
+
+            Console.WriteLine($"  {label} y={atY + dy}: {string.Join(" ", row)}");
+        }
+    }
+
+    private static void ReportMiNeighborhood(byte[] obu, string label, int centerC, int centerR)
+    {
+        try
+        {
+            var result = Av1FrameDecoder.Decode(obu);
+            int miCols = result.Frame.MiCols;
+            int miRows = result.Frame.MiRows;
+
+            for (int r = Math.Max(0, centerR - 2); r <= Math.Min(miRows - 1, centerR + 2); r++)
+            {
+                for (int c = Math.Max(0, centerC - 2); c <= Math.Min(miCols - 1, centerC + 2); c++)
+                {
+                    int idx = (r * miCols) + c;
+                    Console.WriteLine($"  {label} (r={r},c={c}): miSize={result.MiSizes[idx]}, yMode={result.YModes[idx]}, uvMode={result.UvModes[idx]}, skip={result.Skips[idx]}, paletteY={result.PaletteSizesY[idx]}, paletteUV={result.PaletteSizesUV[idx]}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  {label}: could not decode ({ex.GetType().Name}: {ex.Message})");
+        }
+    }
+
+    private static (int X, int Y) CompareRgb(string label, byte[] a, byte[] b, int width)
+    {
+        int len = Math.Min(a.Length, b.Length);
+        int diffCount = 0;
+        int firstDiffIdx = -1;
+        for (int i = 0; i < len; i++)
+        {
+            if (a[i] != b[i])
+            {
+                diffCount++;
+                if (firstDiffIdx < 0)
+                {
+                    firstDiffIdx = i;
+                }
+            }
+        }
+
+        if (diffCount == 0)
+        {
+            Console.WriteLine($"  {label}: identical ({len} bytes)");
+            return (-1, -1);
+        }
+
+        int pixelIdx = firstDiffIdx / 3;
+        int px = pixelIdx % width;
+        int py = pixelIdx / width;
+        Console.WriteLine($"  {label}: {diffCount}/{len} bytes differ ({100.0 * diffCount / len:F2}%), first at byte {firstDiffIdx} (pixel x={px},y={py},channel={firstDiffIdx % 3}): a={a[firstDiffIdx]} b={b[firstDiffIdx]}");
+        return (px, py);
     }
 
     /// <summary>Muxes an AV1-encoded frame into a full AVIF file via PeachImage's own (and only) container writer -- the same code path for both the reference and actual side, so container bytes are identical by construction.</summary>
@@ -229,6 +669,49 @@ internal static class Program
         double top = (grid[y0, x0] * (1 - fx)) + (grid[y0, x0 + 1] * fx);
         double bottom = (grid[y0 + 1, x0] * (1 - fx)) + (grid[y0 + 1, x0 + 1] * fx);
         return (top * (1 - fy)) + (bottom * fy);
+    }
+
+    /// <summary>The exact inverse of <see cref="WriteY4m"/>, for the same fixed C444/8-bit shape it always
+    /// writes (single "FRAME" header, no subsampling, no per-sample bit depth beyond 8) -- not a general Y4M
+    /// parser.</summary>
+    private static (int[] Y, int[] U, int[] V, int Width, int Height) ReadY4m(string path)
+    {
+        byte[] bytes = File.ReadAllBytes(path);
+        int headerEnd = Array.IndexOf(bytes, (byte)'\n');
+        string headerLine = Encoding.ASCII.GetString(bytes, 0, headerEnd);
+        int frameLineEnd = Array.IndexOf(bytes, (byte)'\n', headerEnd + 1);
+
+        int width = 0;
+        int height = 0;
+        foreach (string token in headerLine.Split(' '))
+        {
+            if (token.Length > 1 && token[0] == 'W')
+            {
+                width = int.Parse(token.AsSpan(1), CultureInfo.InvariantCulture);
+            }
+            else if (token.Length > 1 && token[0] == 'H')
+            {
+                height = int.Parse(token.AsSpan(1), CultureInfo.InvariantCulture);
+            }
+        }
+
+        int planeSize = width * height;
+        int offset = frameLineEnd + 1;
+        var y = ReadPlane(bytes, offset, planeSize);
+        var u = ReadPlane(bytes, offset + planeSize, planeSize);
+        var v = ReadPlane(bytes, offset + (2 * planeSize), planeSize);
+        return (y, u, v, width, height);
+    }
+
+    private static int[] ReadPlane(byte[] bytes, int offset, int count)
+    {
+        var plane = new int[count];
+        for (int i = 0; i < count; i++)
+        {
+            plane[i] = bytes[offset + i];
+        }
+
+        return plane;
     }
 
     private static void WriteY4m(string path, int[] y, int[] u, int[] v, int width, int height)
@@ -618,24 +1101,31 @@ internal static class Program
 
         Console.WriteLine($"  {referenceLeaves.Count} real leaves (reference) vs. {sortedActual.Count} real leaves (actual).");
 
+        // Reports up to maxDivergences, rather than stopping at the first -- shows whether a divergence is
+        // an isolated, self-correcting blip (position/size realign on the very next leaf, only a handful of
+        // fields ever differ) or a full bitstream cascade (position/size stays misaligned from that point
+        // on, every subsequent leaf differs) -- the two have very different root causes and this
+        // distinguishes them directly instead of requiring a second run per candidate leaf.
+        const int maxDivergences = 8;
+        int divergencesShown = 0;
         int minCount = Math.Min(referenceLeaves.Count, sortedActual.Count);
-        for (int i = 0; i < minCount; i++)
+        for (int i = 0; i < minCount && divergencesShown < maxDivergences; i++)
         {
             var reference = referenceLeaves[i];
             var actual = sortedActual[i];
             if (reference.R != actual.R || reference.C != actual.C || reference.WidthMi != actual.WidthMi || reference.HeightMi != actual.HeightMi)
             {
-                Console.WriteLine($"  First structural divergence at leaf index {i}:");
+                Console.WriteLine($"  Structural divergence at leaf index {i} (position/size):");
                 Console.WriteLine($"    reference: {reference}");
                 Console.WriteLine($"    actual:    {actual}");
-                Console.WriteLine("  (position/size itself differs here -- every leaf after this point in either log is misaligned with the other, so no further fields were compared.)");
-                return;
+                divergencesShown++;
+                continue;
             }
 
             var fieldDiffs = reference.DiffAgainst(actual).ToList();
             if (fieldDiffs.Count > 0)
             {
-                Console.WriteLine($"  First structural divergence at leaf index {i} (r={reference.R}, c={reference.C}, size={reference.WidthMi}x{reference.HeightMi}):");
+                Console.WriteLine($"  Structural divergence at leaf index {i} (r={reference.R}, c={reference.C}, size={reference.WidthMi}x{reference.HeightMi}):");
                 foreach (string diff in fieldDiffs)
                 {
                     Console.WriteLine($"    {diff}");
@@ -646,11 +1136,16 @@ internal static class Program
                     Console.WriteLine($"    (PeachImage's own real-time estimated cost for this leaf: {cost})");
                 }
 
-                Console.WriteLine($"    full reference: {reference}");
-                Console.WriteLine($"    full actual:    {actual}");
-
-                return;
+                divergencesShown++;
             }
+        }
+
+        if (divergencesShown > 0)
+        {
+            Console.WriteLine(divergencesShown >= maxDivergences
+                ? $"  (stopped after {maxDivergences} divergences -- there may be more.)"
+                : $"  ({divergencesShown} total divergence(s) in the first {minCount} position-aligned leaves; every other leaf position/size matched.)");
+            return;
         }
 
         if (referenceLeaves.Count != sortedActual.Count)

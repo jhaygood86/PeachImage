@@ -19,6 +19,33 @@ public class Av1QuantizerAndReconstructorTests
         Assert.Equal(expectedBaseQIdx, Av1ForwardQuantizer.QualityToBaseQIdx(quality));
     }
 
+    /// <summary>
+    /// Independent transcription of the real formula chain <c>QualityToBaseQIdx</c> ports (libavif's own
+    /// <c>aomQualityToQuantizer</c> default branch, <c>src/codec_aom.c</c>, feeding libaom's own real
+    /// <c>quantizer_to_qindex</c> lookup table, <c>av1/encoder/av1_quantize.c</c>) -- checked across the
+    /// full 0-100 quality range, not just the three round-number spot checks above.
+    /// </summary>
+    [Fact]
+    public void QualityToBaseQIdx_MatchesLibavifAndLibaomReferenceFormula()
+    {
+        int[] quantizerToQindex =
+        [
+            0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48,
+            52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100,
+            104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152,
+            156, 160, 164, 168, 172, 176, 180, 184, 188, 192, 196, 200, 204,
+            208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 249, 255,
+        ];
+
+        for (int quality = 0; quality <= 100; quality++)
+        {
+            int quantizer = (((100 - quality) * 63) + 50) / 100;
+            int expected = Math.Max(quantizerToQindex[quantizer], 1);
+
+            Assert.Equal(expected, Av1ForwardQuantizer.QualityToBaseQIdx(quality));
+        }
+    }
+
     [Fact]
     public void QualityToBaseQIdx_IsMonotonicallyNonIncreasingAsQualityIncreases()
     {

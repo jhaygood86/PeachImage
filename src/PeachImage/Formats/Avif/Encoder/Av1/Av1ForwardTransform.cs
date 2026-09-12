@@ -4,17 +4,20 @@ using PeachImage.Formats.Avif.Encoder.Av1.Transform;
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
 /// <summary>
-/// Forward 2D DCT/ADST/IDTX for AV1 encoding, covering every <c>txType</c> this encoder's
-/// reduced transform set (<c>reduced_tx_set = true</c>, always signalled -- see <see cref="Av1FrameHeaderWriter"/>)
-/// can ever select for an intra block: <see cref="Av1TxType.DctDct"/>/<see cref="Av1TxType.AdstDct"/>/
-/// <see cref="Av1TxType.DctAdst"/>/<see cref="Av1TxType.AdstAdst"/>/<see cref="Av1TxType.Idtx"/> -- see
-/// <c>Av1TileDecoder.GetTxSet</c>'s remarks for why <c>reduced_tx_set</c> collapses this encoder's real search
-/// space down to exactly TX_SET_INTRA_2 (those five, all <see cref="Av1TxClass.Class2D"/>) at every size that
-/// reads a <c>tx_type</c> symbol at all (TX_4X4/8x8/16x16 -- TX_32X32 is forced <c>DCT_DCT</c> with no symbol
-/// read, spec's <c>TX_SET_DCTONLY</c> short-circuit). DCT_DCT is supported at all four square sizes
-/// (4/8/16/32, this encoder's v1 tx-size scope, <c>tx_mode = TX_MODE_LARGEST</c>); the four non-DCT_DCT types
-/// only ever need sizes 4/8/16 -- AV1 has no ADST32, and IDTX never reaches TX_32X32 either given the
-/// DCTONLY short-circuit above, so this class doesn't build (or need) ADST/IDTX operators at size 32.
+/// Forward 2D DCT/ADST/IDTX for AV1 encoding, covering every <c>txType</c> this encoder can ever select for
+/// an intra block: <see cref="Av1TxType.DctDct"/>/<see cref="Av1TxType.AdstDct"/>/<see cref="Av1TxType.DctAdst"/>/
+/// <see cref="Av1TxType.AdstAdst"/>/<see cref="Av1TxType.Idtx"/> (<c>TX_SET_INTRA_2</c>, the reduced set --
+/// always used at TX_16X16, and at TX_4X4/TX_8X8 too when <c>reduced_tx_set</c> is set), plus
+/// <see cref="Av1TxType.VDct"/>/<see cref="Av1TxType.HDct"/> (the two additional <c>TX_SET_INTRA_1</c>
+/// members -- only reachable at TX_4X4/TX_8X8, since TX_16X16 never gets the full set regardless of
+/// <c>reduced_tx_set</c>; see <c>Av1TileDecoder.GetTxSet</c>'s remarks and
+/// <c>Av1TileEncoder.TileState.ReducedTxSet</c>'s own remarks for why this project's own search now visits
+/// the full set by default, matching real aomenc's own observed default). TX_32X32 is forced <c>DCT_DCT</c>
+/// with no symbol read at all, spec's <c>TX_SET_DCTONLY</c> short-circuit -- DCT_DCT is supported at all
+/// four square sizes (4/8/16/32, this encoder's v1 tx-size scope, <c>tx_mode = TX_MODE_LARGEST</c>); every
+/// other type only ever needs sizes 4/8/16 -- AV1 has no ADST32, and neither IDTX nor V_DCT/H_DCT ever reach
+/// TX_32X32 either given the DCTONLY short-circuit above, so this class doesn't build (or need) ADST/
+/// IDTX/identity operators at size 32.
 ///
 /// <para>AV1's spec only normatively defines the <em>inverse</em> transform (as with every video codec) -- an
 /// encoder's forward transform is free-form as long as it round-trips acceptably through the normative
@@ -135,31 +138,39 @@ internal static class Av1ForwardTransform
     /// </summary>
     private static double[,] SelectRowOperator(int txSz, int txType)
     {
-        if (txType == Av1TxType.Idtx)
+        // IDTX's own row pass is identity; V_DCT's own row pass is *also* identity (V_DCT names its DCT
+        // dimension as the column pass -- see Av1InverseTransform.Inverse2D's own row-pass classification,
+        // which puts HDct (not VDct) alongside DctDct/AdstDct in its DCT branch, leaving VDct to fall through
+        // to that same method's own row-pass `else { InverseIdentity }` branch).
+        if (txType is Av1TxType.Idtx or Av1TxType.VDct)
         {
-            return RowIdentityMatrices[txSz] ?? throw new ArgumentOutOfRangeException(nameof(txSz), txSz, "Av1ForwardTransform only supports IDTX at sizes 4/8/16 (TX_32X32 never reads a tx_type symbol at all -- see the class remarks).");
+            return RowIdentityMatrices[txSz] ?? throw new ArgumentOutOfRangeException(nameof(txSz), txSz, "Av1ForwardTransform only supports IDTX/V_DCT at sizes 4/8/16 (TX_32X32 never reads a tx_type symbol at all -- see the class remarks).");
         }
 
         bool rowAdst = txType is Av1TxType.DctAdst or Av1TxType.AdstAdst;
         if (!rowAdst)
         {
+            // DCT_DCT/AdstDct/HDct all share a DCT row pass (Av1InverseTransform.Inverse2D's own row-pass
+            // DCT branch: `DctDct or AdstDct or FlipadstDct or HDct`).
             return RowInverseMatrices[txSz];
         }
 
         return RowAdstMatrices[txSz] ?? throw new ArgumentOutOfRangeException(nameof(txSz), txSz, "Av1ForwardTransform only supports ADST row/column passes at sizes 4/8/16 (AV1 has no ADST32).");
     }
 
-    /// <summary>Column-pass (vertical) counterpart to <see cref="SelectRowOperator"/> -- IDTX's column pass is identity; AdstDct's and AdstAdst's column pass is ADST, DCT_DCT's and DctAdst's is DCT.</summary>
+    /// <summary>Column-pass (vertical) counterpart to <see cref="SelectRowOperator"/> -- IDTX's and H_DCT's column pass is identity (H_DCT names its DCT dimension as the row pass -- see the remarks above); AdstDct's and AdstAdst's column pass is ADST, DCT_DCT's, DctAdst's, and VDct's is DCT.</summary>
     private static double[,] SelectColOperator(int txSz, int txType)
     {
-        if (txType == Av1TxType.Idtx)
+        if (txType is Av1TxType.Idtx or Av1TxType.HDct)
         {
-            return ColIdentityMatrices[txSz] ?? throw new ArgumentOutOfRangeException(nameof(txSz), txSz, "Av1ForwardTransform only supports IDTX at sizes 4/8/16 (TX_32X32 never reads a tx_type symbol at all -- see the class remarks).");
+            return ColIdentityMatrices[txSz] ?? throw new ArgumentOutOfRangeException(nameof(txSz), txSz, "Av1ForwardTransform only supports IDTX/H_DCT at sizes 4/8/16 (TX_32X32 never reads a tx_type symbol at all -- see the class remarks).");
         }
 
         bool colAdst = txType is Av1TxType.AdstDct or Av1TxType.AdstAdst;
         if (!colAdst)
         {
+            // DCT_DCT/DctAdst/VDct all share a DCT column pass (Av1InverseTransform.Inverse2D's own
+            // column-pass DCT branch: `DctDct or DctAdst or DctFlipadst or VDct`).
             return ColInverseMatrices[txSz];
         }
 

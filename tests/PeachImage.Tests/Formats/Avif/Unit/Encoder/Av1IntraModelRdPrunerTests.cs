@@ -1,10 +1,21 @@
 using PeachImage.Formats.Avif.Encoder.Av1;
+using PeachImage.Tests.Formats.Avif.Unit;
 
 namespace PeachImage.Tests.Formats.Avif.Unit.Encoder;
 
 /// <summary>
 /// Verifies <see cref="Av1IntraModelRdPruner"/>'s port of libaom's real <c>aom_hadamard_4x4</c>/<c>aom_satd</c>
 /// and <c>prune_intra_y_mode</c> against hand-computed expectations.
+///
+/// <para><b>CompareReferenceRandom_MatchesLibaomReference</b>/<b>CompareReferenceExtreme_MatchesLibaomReference</b>
+/// (project plan's own libaom test-port item): a faithful port of libaom's own <c>hadamard_test.cc</c>
+/// <c>HadamardLowbdTest.CompareReferenceRandom</c>/<c>CompareReferenceExtreme</c>, using
+/// <see cref="LibaomAcmRandom"/> (the same deterministic PRNG port used for the WHT test port) and
+/// <see cref="LibaomReferenceHadamard"/> (transcribed directly from <c>aom_dsp/avg.c</c>'s own
+/// <c>aom_hadamard_4x4_c</c>/<c>hadamard_col4</c>/<c>aom_satd_c</c>, independent of
+/// <see cref="Av1IntraModelRdPruner"/>'s own implementation) as the reference to compare against --
+/// unlike the hand-traced tests above, this proves the port matches libaom's own real transform for a
+/// large, deterministic sweep of inputs, not just one manually-verified case.</para>
 /// </summary>
 public class Av1IntraModelRdPrunerTests
 {
@@ -86,5 +97,88 @@ public class Av1IntraModelRdPrunerTests
 
         Assert.False(Av1IntraModelRdPruner.PruneIntraYMode(1_000_000, ref bestModelRd, topModelRd));
         Assert.Equal(1_000_000, bestModelRd);
+    }
+
+    /// <summary>
+    /// Port of libaom's own <c>hadamard_test.cc</c> <c>HadamardLowbdTest.CompareReferenceRandom</c>: 1,000
+    /// 4x4 blocks of the same deterministic residual data (<c>src - pred</c>, each an independent
+    /// <c>Rand8()</c> draw, matching <c>HadamardLowbdTest::Rand</c> exactly) libaom's own real test feeds
+    /// <c>aom_hadamard_4x4_c</c>, asserting <see cref="Av1IntraModelRdPruner.Hadamard4x4"/> is bit-exact
+    /// against <see cref="LibaomReferenceHadamard.Hadamard4x4"/> -- libaom's own real algorithm, independently
+    /// transcribed, not a self-consistency check against the port's own hand-traced expectations above.
+    /// libaom's own test sorts both outputs before comparing (order doesn't matter to its own real caller,
+    /// <c>av1_quick_txfm</c>/<c>aom_satd</c>), but this port's own row-major output contract is a real,
+    /// meaningful thing to hold bit-exact position-for-position, so this test compares unsorted -- a
+    /// strictly stronger check.
+    /// </summary>
+    [Fact]
+    public void CompareReferenceRandom_MatchesLibaomReference()
+    {
+        var rnd = new LibaomAcmRandom(LibaomAcmRandom.DeterministicSeed);
+        const int countTestBlock = 1000;
+
+        for (int i = 0; i < countTestBlock; i++)
+        {
+            var a = new short[16];
+            for (int j = 0; j < 16; j++)
+            {
+                short src = rnd.Rand8();
+                short pred = rnd.Rand8();
+                a[j] = (short)(src - pred);
+            }
+
+            var expected = new int[16];
+            LibaomReferenceHadamard.Hadamard4x4(a, 4, expected);
+
+            var residual = new int[16];
+            for (int j = 0; j < 16; j++)
+            {
+                residual[j] = a[j];
+            }
+
+            var actual = new int[16];
+            Av1IntraModelRdPruner.Hadamard4x4(residual, 4, actual);
+
+            for (int j = 0; j < 16; j++)
+            {
+                Assert.Equal(expected[j], actual[j]);
+            }
+
+            Assert.Equal(LibaomReferenceHadamard.Satd(expected), Av1IntraModelRdPruner.Satd(actual));
+        }
+    }
+
+    /// <summary>
+    /// Port of libaom's own <c>hadamard_test.cc</c> <c>HadamardTestBase.CompareReferenceExtreme</c>: every
+    /// sample pinned to +/-255 (the real 8-bit residual extreme, <c>(1 &lt;&lt; kBitDepth) - 1</c>), the case
+    /// most likely to expose an <see langword="int"/> vs. libaom's own real <c>int16_t</c> intermediate
+    /// truncation mismatch -- see <see cref="LibaomReferenceHadamard"/>'s own remarks.
+    /// </summary>
+    [Theory]
+    [InlineData(255)]
+    [InlineData(-255)]
+    public void CompareReferenceExtreme_MatchesLibaomReference(int extreme)
+    {
+        var a = new short[16];
+        Array.Fill(a, (short)extreme);
+
+        var expected = new int[16];
+        LibaomReferenceHadamard.Hadamard4x4(a, 4, expected);
+
+        var residual = new int[16];
+        for (int j = 0; j < 16; j++)
+        {
+            residual[j] = a[j];
+        }
+
+        Span<int> actual = stackalloc int[16];
+        Av1IntraModelRdPruner.Hadamard4x4(residual, 4, actual);
+
+        for (int j = 0; j < 16; j++)
+        {
+            Assert.Equal(expected[j], actual[j]);
+        }
+
+        Assert.Equal(LibaomReferenceHadamard.Satd(expected), Av1IntraModelRdPruner.Satd(actual));
     }
 }

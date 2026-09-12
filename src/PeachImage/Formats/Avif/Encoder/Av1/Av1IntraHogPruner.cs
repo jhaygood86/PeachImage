@@ -27,6 +27,11 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// with <c>-DAOM_TARGET_CPU=generic</c> -- no SIMD, pure C -- so it always runs <c>av1_nn_predict_c</c>
 /// itself; porting the SIMD variant would target hardware this project's own comparison harness never
 /// actually exercises.</para>
+///
+/// <para>Re-verified during the libaom test-porting round: <see cref="Weights"/>/<see cref="Bias"/> (264
+/// float values total) diffed value-by-value against the real <c>av1_intra_hog_model_weights</c>/
+/// <c>av1_intra_hog_model_bias</c> in <c>intra_mode_search_utils.h</c> -- confirmed byte-for-byte
+/// identical.</para>
 /// </summary>
 internal static class Av1IntraHogPruner
 {

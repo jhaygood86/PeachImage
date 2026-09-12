@@ -41,23 +41,27 @@ internal static class Av1FrameHeaderWriter
     /// bits are written (both are unconditionally absent from the bitstream at coded-lossless, not merely
     /// zero-valued, again mirroring the decoder's short-circuit).
     /// </param>
-    /// <param name="loopFilterLevel">
-    /// The deblocking filter level (spec's <c>loop_filter_level[0]</c>/<c>[1]</c>, and, when this frame has
-    /// chroma, also <c>[2]</c>/<c>[3]</c> -- this encoder searches and signals one shared level across all
-    /// four rather than tuning luma/chroma independently, a v1 simplification real encoders typically refine
-    /// further) chosen by <see cref="Av1InLoopFilterSearch"/>'s RD search over the encoder's own local
-    /// reconstruction. 0 (the default) reproduces this method's previous always-off behavior exactly --
-    /// <paramref name="loopFilterLevel"/> is silently ignored (never written) when <paramref name="lossless"/>
-    /// is <see langword="true"/>, since <c>loop_filter_params()</c> is entirely absent from the bitstream at
-    /// coded-lossless regardless of what value would otherwise have been chosen (see <see cref="Write"/>'s own
-    /// <paramref name="lossless"/> remarks).
+    /// <param name="loopFilterLevel0">
+    /// <c>loop_filter_level[0]</c> (Y, vertical edges). Real aomenc genuinely searches this independently of
+    /// <paramref name="loopFilterLevel1"/> at this project's own tested settings (confirmed directly from
+    /// libaom source, <c>av1/encoder/picklpf.c</c>'s own real <c>av1_pick_filter_level</c>: four separate
+    /// <c>search_filter_level</c> calls -- Y-vertical, Y-horizontal, U, V -- not one shared value), which is
+    /// why <see cref="Av1InLoopFilterSearch"/>'s own search now produces four independent levels instead of
+    /// one. 0 (the default) reproduces this method's previous always-off behavior exactly -- all four levels
+    /// are silently ignored (never written) when <paramref name="lossless"/> is <see langword="true"/>, since
+    /// <c>loop_filter_params()</c> is entirely absent from the bitstream at coded-lossless regardless of what
+    /// value would otherwise have been chosen (see <see cref="Write"/>'s own <paramref name="lossless"/>
+    /// remarks).
     /// </param>
+    /// <param name="loopFilterLevel1"><c>loop_filter_level[1]</c> (Y, horizontal edges) -- see <paramref name="loopFilterLevel0"/>'s remarks.</param>
+    /// <param name="loopFilterLevelU"><c>loop_filter_level[2]</c> (U) -- see <paramref name="loopFilterLevel0"/>'s remarks. Only ever written when this frame has chroma and (<paramref name="loopFilterLevel0"/> or <paramref name="loopFilterLevel1"/>) is nonzero (spec's own real <c>loop_filter_params()</c> condition, not simply "chroma present").</param>
+    /// <param name="loopFilterLevelV"><c>loop_filter_level[3]</c> (V) -- see <paramref name="loopFilterLevelU"/>'s remarks.</param>
     /// <param name="enableCdef">
     /// Must match whatever <c>enable_cdef</c> value the sequence header covering this frame actually wrote
     /// (<see cref="Av1SequenceHeaderWriter.Write"/>'s own <c>enableCdef</c> parameter) -- <c>cdef_params()</c>
     /// is only present in the bitstream when the sequence header enabled it (spec's <c>ParseCdefParams</c>
     /// short-circuits on <c>!seq.EnableCdef</c> regardless of what this method would otherwise write), so
-    /// this can't be derived from <paramref name="lossless"/> alone the way <paramref name="loopFilterLevel"/>'s
+    /// this can't be derived from <paramref name="lossless"/> alone the way <paramref name="loopFilterLevel0"/>'s
     /// gating can: a caller is free to build a sequence header with CDEF disabled even for a non-lossless
     /// frame (every default/positional-only call site does exactly that), and writing <c>cdef_params()</c>
     /// bits in that case would desync the very next syntax element a real decoder reads. Defaults to
@@ -87,11 +91,16 @@ internal static class Av1FrameHeaderWriter
     /// </param>
     /// <param name="reducedTxSet">
     /// <c>reduced_tx_set</c> -- spec-provably inert whenever <paramref name="lossless"/> (tx_type is never
-    /// read from the bitstream at coded-lossless at all), so the one caller passes <see langword="false"/>
-    /// there to match real encoders' own observed choice. Defaults to <see langword="true"/>, this method's
-    /// pre-existing (and, for non-lossless, still unverified-safe-to-change) hardcoded value.
+    /// read from the bitstream at coded-lossless at all). The one caller now passes <see langword="false"/>
+    /// unconditionally, matching real aomenc's own observed default (confirmed directly from libaom source,
+    /// <c>av1/encoder/encodeframe.c</c>'s own unconditional <c>features-&gt;reduced_tx_set_used =
+    /// oxcf-&gt;txfm_cfg.reduced_tx_type_set</c> pass-through of a config value that itself defaults to 0 --
+    /// a static default, not a lossless-dependent or per-frame decision). Defaults to <see langword="true"/>
+    /// here only for this method's own pre-existing signature compatibility; the real, load-bearing value
+    /// always comes from the caller. See <c>Av1TileEncoder.TileState.ReducedTxSet</c>'s own remarks for the
+    /// matching non-lossless tx-type search/write side of this same change.
     /// </param>
-    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false, int loopFilterLevel = 0, bool enableCdef = false, Av1CdefChoice? cdef = null, bool allowScreenContentTools = false, bool allowIntrabc = false, bool reducedTxSet = true)
+    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false, int loopFilterLevel0 = 0, bool enableCdef = false, Av1CdefChoice? cdef = null, bool allowScreenContentTools = false, bool allowIntrabc = false, bool reducedTxSet = true, int loopFilterLevel1 = 0, int loopFilterLevelU = 0, int loopFilterLevelV = 0)
     {
         var cdefChoice = cdef ?? Av1CdefChoice.Off;
         if (lossless)
@@ -168,23 +177,27 @@ internal static class Av1FrameHeaderWriter
 
         // delta_lf_present is only read when delta_q_present -- not reached here either way.
 
-        // loop_filter_params() is entirely absent from the bitstream when codedLossless (see
+        // loop_filter_params() is entirely absent from the bitstream when codedLossless OR allowIntrabc (see
         // Av1FrameHeader.ParseLoopFilterParams's `codedLossless || allowIntrabc` short-circuit) -- not just
-        // zero-valued, so these bits must be skipped, not merely written as zero, when lossless.
+        // zero-valued, so these bits must be skipped, not merely written as zero, in either case. Real AV1
+        // forbids in-loop filtering on any frame using IntraBC regardless of losslessness (an IntraBC frame's
+        // own reconstructed samples must stay exactly what the copy-prediction produced, for later same-frame
+        // IntraBC references to remain valid copy sources) -- this was previously written as `if (!lossless)`
+        // alone, correct only because allowIntrabc was, at the time, never true for a non-lossless frame; once
+        // that's no longer guaranteed (see Av1TileEncoder's own exact-match-only non-lossless IntraBC support)
+        // omitting `&& !allowIntrabc` here would write real loop-filter-level bits a real decoder's own parser
+        // never reads at all, permanently desyncing every entropy-coded bit for the rest of the frame.
         int writtenLevel0 = 0, writtenLevel1 = 0, writtenLevel2 = 0, writtenLevel3 = 0;
-        if (!lossless)
+        if (!lossless && !allowIntrabc)
         {
-            (writtenLevel0, writtenLevel1, writtenLevel2, writtenLevel3) = WriteLoopFilterParams(writer, loopFilterLevel, numPlanes);
+            (writtenLevel0, writtenLevel1, writtenLevel2, writtenLevel3) = WriteLoopFilterParams(writer, loopFilterLevel0, loopFilterLevel1, loopFilterLevelU, loopFilterLevelV, numPlanes);
         }
 
         // cdef_params() is read whenever seq.EnableCdef && !codedLossless && !allowIntrabc (see
-        // Av1FrameHeader.ParseCdefParams). !codedLossless (i.e. !lossless) alone already makes this false for
-        // any lossless frame regardless of allowIntrabc's own (now independently-computed, see
-        // Av1TileEncoder.EncodeTile's allowIntrabc parameter) value -- allowIntrabc is only ever true when
-        // lossless is, never the reverse, so it can never flip this condition on its own. The only additional
-        // condition beyond !lossless is enableCdef itself -- see that parameter's own remarks for why this
-        // can't just assume enableCdef == !lossless.
-        bool cdefParamsPresent = !lossless && enableCdef;
+        // Av1FrameHeader.ParseCdefParams) -- the same real "no post-filtering on an IntraBC frame" spec rule
+        // loop_filter_params() follows above, and the same fix applies here for the identical reason: this
+        // used to rely on allowIntrabc never being true for a non-lossless frame, which is no longer assumed.
+        bool cdefParamsPresent = !lossless && !allowIntrabc && enableCdef;
         var writtenCdef = cdefParamsPresent ? cdefChoice : Av1CdefChoice.Off;
         if (cdefParamsPresent)
         {
@@ -195,20 +208,27 @@ internal static class Av1FrameHeaderWriter
         // -- no bits read/written (loop restoration isn't implemented by this encoder yet).
 
         // tx_mode_select is only read when !codedLossless (tx_mode is otherwise implicitly OnlyTx4x4) --
-        // see Av1FrameHeader's own codedLossless branch.
+        // see Av1FrameHeader's own codedLossless branch. Project plan Phase 4's own transform-size RDO:
+        // real aomenc always signals tx_mode_select for non-lossless all-intra content (confirmed directly
+        // from libaom source, av1/encoder/rdopt_utils.h's own select_tx_mode: TX_MODE_SELECT unless
+        // coded_lossless or tx_size_search_method == USE_LARGESTALL, and this project's own tested settings
+        // never hit that USE_LARGESTALL case -- see EncodeLeaf's own non-lossless tx-size search remarks
+        // for the real per-leaf search this bit now genuinely needs) -- so this is unconditionally true
+        // whenever !lossless, not a separate knob.
+        bool txModeSelect = !lossless;
         if (!lossless)
         {
-            writer.WriteFlag(false); // tx_mode_select -> TX_MODE_LARGEST
+            writer.WriteFlag(txModeSelect); // tx_mode_select
         }
 
         // reduced_tx_set is spec-provably inert for lossless: tx_type is never read from the bitstream at
         // coded-lossless at all (spec forces WHT_WHT unconditionally, see Av1TileDecoder's own lossless
         // branch), so this bit can never affect how any symbol is interpreted there -- confirmed via this
         // project's own libaom byte-exact comparison harness that real encoders signal it false for lossless
-        // (both a solid-color and a checkerboard test frame). Left true for non-lossless (this encoder's own
-        // tx-type search doesn't consult ReducedTxSet at all when choosing what to write, so flipping it there
-        // without first verifying the decoder's reduced-vs-full symbol/CDF table selection still matches would
-        // be a real risk, not a proven-inert cleanup like this one).
+        // (both a solid-color and a checkerboard test frame). Now false for non-lossless too, matching real
+        // aomenc's own actual default (see this parameter's own remarks) -- the encoder's own tx-type
+        // search/write now consults TileState.ReducedTxSet at every relevant call site (see its own remarks),
+        // so this is no longer the "flipping it alone would desync the decoder" risk it used to be.
         writer.WriteFlag(reducedTxSet); // reduced_tx_set
         // film_grain_params_present == false short-circuits the apply_grain bit -- no bit read/written.
 
@@ -289,7 +309,7 @@ internal static class Av1FrameHeaderWriter
                 UsesLr = false,
                 UnitSize = [0, 0, 0],
             },
-            TxMode = lossless ? Av1FrameHeader.OnlyTx4x4 : Av1FrameHeader.TxModeLargest,
+            TxMode = lossless ? Av1FrameHeader.OnlyTx4x4 : (txModeSelect ? Av1FrameHeader.TxModeSelect : Av1FrameHeader.TxModeLargest),
             ReducedTxSet = reducedTxSet,
             TileInfo = tileInfo,
             DisableCdfUpdate = false,
@@ -297,35 +317,31 @@ internal static class Av1FrameHeaderWriter
     }
 
     /// <summary>
-    /// <c>loop_filter_params()</c> (spec §5.9.11) write-side. <paramref name="level"/> is written identically
-    /// into all four <c>loop_filter_level</c> slots (Y-vertical, Y-horizontal, U, V) -- this encoder's RD
-    /// search (<see cref="Av1InLoopFilterSearch"/>) picks one shared level rather than tuning luma/chroma
-    /// independently, a v1 simplification. <c>loop_filter_delta_enabled</c> is always written
-    /// <see langword="false"/>: this encoder's <c>RefDeltas</c>/<c>ModeDeltas</c> never deviate from the spec
-    /// defaults <see cref="Write"/> always returns, so there's nothing for delta signaling to express.
-    /// Returns the four written levels for <see cref="Write"/>'s returned <see cref="Av1FrameHeader"/> to
-    /// mirror exactly (level[2]/level[3] are 0, matching what's actually on the wire, whenever
-    /// <paramref name="numPlanes"/> == 1 or <paramref name="level"/> == 0 -- the same
-    /// <c>numPlanes &gt; 1 &amp;&amp; (level0 != 0 || level1 != 0)</c> condition <c>Av1FrameHeader.ParseLoopFilterParams</c>
-    /// gates that read on).
+    /// <c>loop_filter_params()</c> (spec §5.9.11) write-side, now with four genuinely independent levels
+    /// (project plan Phase 4's own deblock-per-plane RDO -- see <see cref="Av1InLoopFilterSearch"/>'s own
+    /// remarks for why this matches real aomenc's own default behavior). The real spec condition for
+    /// writing <paramref name="level2"/>/<paramref name="level3"/> is <c>NumPlanes &gt; 1 &amp;&amp;
+    /// (loop_filter_level[0] || loop_filter_level[1])</c> -- a disjunction over the two <em>luma</em> levels,
+    /// not "any level is nonzero" -- since with independent levels there's no single shared value left to
+    /// test.
     /// </summary>
-    private static (int Level0, int Level1, int Level2, int Level3) WriteLoopFilterParams(Av1BitWriter writer, int level, int numPlanes)
+    private static (int Level0, int Level1, int Level2, int Level3) WriteLoopFilterParams(Av1BitWriter writer, int level0, int level1, int level2, int level3, int numPlanes)
     {
-        writer.WriteBits((uint)level, 6); // loop_filter_level[0]
-        writer.WriteBits((uint)level, 6); // loop_filter_level[1]
+        writer.WriteBits((uint)level0, 6); // loop_filter_level[0]
+        writer.WriteBits((uint)level1, 6); // loop_filter_level[1]
 
-        int level2 = 0, level3 = 0;
-        if (numPlanes > 1 && level != 0)
+        int writtenLevel2 = 0, writtenLevel3 = 0;
+        if (numPlanes > 1 && (level0 != 0 || level1 != 0))
         {
-            writer.WriteBits((uint)level, 6); // loop_filter_level[2]
-            writer.WriteBits((uint)level, 6); // loop_filter_level[3]
-            level2 = level;
-            level3 = level;
+            writer.WriteBits((uint)level2, 6); // loop_filter_level[2]
+            writer.WriteBits((uint)level3, 6); // loop_filter_level[3]
+            writtenLevel2 = level2;
+            writtenLevel3 = level3;
         }
 
         writer.WriteBits(0, 3); // loop_filter_sharpness
         writer.WriteFlag(false); // loop_filter_delta_enabled
-        return (level, level, level2, level3);
+        return (level0, level1, writtenLevel2, writtenLevel3);
     }
 
     /// <summary>

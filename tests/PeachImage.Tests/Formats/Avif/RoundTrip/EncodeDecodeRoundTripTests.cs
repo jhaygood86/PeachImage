@@ -1,4 +1,5 @@
 using PeachImage.Formats.Avif;
+using PeachImage.Formats.Avif.Encoder.Av1;
 
 namespace PeachImage.Tests.Formats.Avif.RoundTrip;
 
@@ -556,6 +557,58 @@ public class EncodeDecodeRoundTripTests
         Assert.Equal(source.GetPixelSpan().ToArray(), decoded.GetPixelSpan().ToArray());
     }
 
+    /// <summary>
+    /// <see cref="AvifEncoderOptions.MonoChrome"/> forced on a genuinely colored (non-gray) RGB source: the
+    /// decoded item must come back as <see cref="PixelFormat.Gray8"/> (chroma really discarded, not just
+    /// tolerated), and the retained luma samples must match <see cref="Av1RgbToYuvConverter"/>'s own BT.601 Y
+    /// formula exactly -- the same formula the corresponding non-monochrome (Quality-based) encode would have
+    /// used, per <see cref="AvifEncoderOptions.MonoChrome"/>'s own remarks.
+    /// </summary>
+    [Fact]
+    public void Rgb24Image_ForcedMonoChrome_RoundTrips_ViaPublicApi()
+    {
+        var source = CreateGradientImage(48, 32);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 85, MonoChrome = true });
+
+        Assert.Equal(PixelFormat.Gray8, decoded.PixelFormat);
+
+        int[] expectedY = Av1RgbToYuvConverter.Convert(source.GetPixelSpan(), source.Width, source.Height).Y;
+        var expectedGray = new byte[expectedY.Length];
+        for (int i = 0; i < expectedY.Length; i++)
+        {
+            expectedGray[i] = (byte)expectedY[i];
+        }
+
+        AssertPsnrAtLeast(expectedGray, decoded.GetPixelSpan().ToArray(), minPsnrDb: 25.0, "luma");
+    }
+
+    /// <summary>
+    /// Same as <see cref="Rgb24Image_ForcedMonoChrome_RoundTrips_ViaPublicApi"/> but lossless: only the
+    /// retained luma channel (<c>Y = G</c>, <see cref="Av1RgbToYuvIdentityConverter"/>'s own identity-matrix
+    /// formula) is exact -- R/B are deliberately, permanently discarded by <see cref="AvifEncoderOptions.MonoChrome"/>
+    /// regardless of <see cref="AvifEncoderOptions.Lossless"/>, matching real encoders' own <c>--monochrome</c>
+    /// semantics (see that property's remarks).
+    /// </summary>
+    [Fact]
+    public void Rgb24Image_ForcedMonoChrome_Lossless_RoundTripsExactly()
+    {
+        var source = CreateGradientImage(48, 32);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Lossless = true, MonoChrome = true });
+
+        Assert.Equal(PixelFormat.Gray8, decoded.PixelFormat);
+
+        var sourcePixels = source.GetPixelSpan();
+        var expectedGray = new byte[source.Width * source.Height];
+        for (int i = 0; i < expectedGray.Length; i++)
+        {
+            expectedGray[i] = sourcePixels[(i * 3) + 1]; // G
+        }
+
+        Assert.Equal(expectedGray, decoded.GetPixelSpan().ToArray());
+    }
+
     [Fact]
     public void Rgb24SolidColor_Lossless_RoundTripsExactly()
     {
@@ -564,6 +617,188 @@ public class EncodeDecodeRoundTripTests
         var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Lossless = true });
 
         Assert.Equal(source.GetPixelSpan().ToArray(), decoded.GetPixelSpan().ToArray());
+    }
+
+    /// <summary>
+    /// Non-lossless (Quality-based) IntraBC, exact-match only (project plan Phase 4) -- a real, previously
+    /// unimplemented feature, not just a settings knob. <see cref="CreateTiledPseudoRandomPatternImage"/>'s
+    /// tiled pseudo-random pattern both (a) satisfies <see cref="Av1ScreenContentEstimator"/>'s real
+    /// content-based heuristic (few distinct luma values and nonzero variance per 16x16 block, matching real
+    /// libaom's own <c>estimate_screen_content</c> thresholds) and (b) gives the real IntraBC search many
+    /// exact-match copy candidates (any already-committed leaf at the same tile phase), while still being
+    /// genuinely hard for real intra prediction + quantization to compress cheaply -- see that method's own
+    /// remarks for why a plain periodic checkerboard was tried first and rejected (its clean edges happened
+    /// to compress almost losslessly under quantization on their own, so IntraBC never had a real cost
+    /// advantage to win with, not a bug). Directly calls <see cref="Av1FrameEncoder.Encode"/> (bypassing the
+    /// public container API) with an <c>onLeafCommitted</c> hook to confirm the feature actually engages --
+    /// per this project's own established lesson (see the round log's own palette-for-lossy history), a
+    /// solid-color image would round-trip fine while silently never exercising the new code path at all, so
+    /// asserting real usage is as important as asserting correctness.
+    /// </summary>
+    [Fact]
+    public void Rgb24TiledPattern_NonLossless_UsesIntrabcAndRoundTrips()
+    {
+        // A clean periodic checkerboard was tried first and rejected: its sharp, perfectly-aligned edges
+        // happen to concentrate almost all of an 8x8 DCT's energy into a single coefficient, so real intra
+        // prediction + quantization already codes it almost for free (measured: ~1-2 cost units per leaf) --
+        // far cheaper than IntraBC's own MV-signaling cost (~10-20 units), so IntraBC legitimately never won,
+        // not a bug. A tiled pseudo-random pattern (a handful of distinct values, arranged with no exploitable
+        // spatial structure) is much harder for a real transform to compress cheaply, while still tiling
+        // EXACTLY at a fixed period (so real IntraBC copy candidates exist) and staying within
+        // Av1ScreenContentEstimator's own real threshold (<= 4 distinct luma values per 16x16 block -- pure
+        // white noise would have ~256 and never trigger the heuristic at all). Tile size 64 matches the
+        // non-lossless superblock size exactly, and the image is 384x384 (6x6 superblocks) so IntraBC's own
+        // real wavefront-reachability delay rule (spec's av1_is_dv_valid, IntrabcDelaySb64 = 4 superblocks)
+        // has enough margin to admit a valid copy source at all -- a 128x128 (2x2 superblock) frame can never
+        // satisfy that rule regardless of content.
+        var source = CreateTiledPseudoRandomPatternImage(384, 384, tileSize: 64);
+        byte[] pixels = source.GetPixelSpan().ToArray();
+
+        var records = new List<Av1BlockDecisionRecord>();
+        var encoded = Av1FrameEncoder.Encode(pixels, source.Width, source.Height, monoChrome: false, quality: 90, lossless: false, onLeafCommitted: records.Add);
+
+        Assert.Contains(records, r => r.UsedIntrabc);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 90 });
+        AssertPsnrAtLeast(source, decoded, minPsnrDb: 30.0);
+    }
+
+    /// <summary>
+    /// Non-lossless (Quality-based) palette, exact-match only (project plan Phase 4) -- a real, third
+    /// attempt at a feature twice reverted after finding real reconstruction-corruption bugs (see the round
+    /// log's own "palette-for-lossy" entries). A single 64x64 superblock (one tile, no repeats at all) of
+    /// <see cref="CreateFewColorRgbPatternImage"/>'s own few-color pseudo-random content deliberately keeps
+    /// the frame too small for IntraBC's own real wavefront-reachability delay rule to ever admit a copy
+    /// source (see <see cref="Rgb24TiledPattern_NonLossless_UsesIntrabcAndRoundTrips"/>'s own remarks on that
+    /// rule) -- isolating this test to palette specifically, so a green result here can't be accidentally
+    /// explained by IntraBC picking up the slack instead.
+    /// </summary>
+    [Fact]
+    public void Rgb24FewColorPattern_NonLossless_UsesPaletteAndRoundTrips()
+    {
+        var source = CreateFewColorRgbPatternImage(64, 64);
+        byte[] pixels = source.GetPixelSpan().ToArray();
+
+        var records = new List<Av1BlockDecisionRecord>();
+        var encoded = Av1FrameEncoder.Encode(pixels, source.Width, source.Height, monoChrome: false, quality: 90, lossless: false, onLeafCommitted: records.Add);
+
+        Assert.Contains(records, r => r.PaletteSizeY > 0);
+        Assert.DoesNotContain(records, r => r.UsedIntrabc);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 90 });
+
+        AssertPsnrAtLeast(source, decoded, minPsnrDb: 30.0);
+    }
+
+    /// <summary>
+    /// <see cref="AvifEncoderOptions.EnableScreenContentTools"/> set <see langword="false"/> on content that
+    /// would otherwise clearly use palette (the exact same source as
+    /// <see cref="Rgb24FewColorPattern_NonLossless_UsesPaletteAndRoundTrips"/>) must disable it entirely --
+    /// mirroring real aomenc's own <c>--enable-palette=0</c>.
+    /// </summary>
+    [Fact]
+    public void Rgb24FewColorPattern_NonLossless_ScreenContentToolsDisabled_NeverUsesPalette()
+    {
+        var source = CreateFewColorRgbPatternImage(64, 64);
+        byte[] pixels = source.GetPixelSpan().ToArray();
+
+        var records = new List<Av1BlockDecisionRecord>();
+        Av1FrameEncoder.Encode(pixels, source.Width, source.Height, monoChrome: false, quality: 90, lossless: false, onLeafCommitted: records.Add, enableScreenContentTools: false);
+
+        Assert.DoesNotContain(records, r => r.PaletteSizeY > 0);
+        Assert.DoesNotContain(records, r => r.UsedIntrabc);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 90, EnableScreenContentTools = false });
+        AssertPsnrAtLeast(source, decoded, minPsnrDb: 30.0);
+    }
+
+    /// <summary>
+    /// <see cref="AvifEncoderOptions.EnableIntrabc"/> set <see langword="false"/> on content that would
+    /// otherwise clearly use IntraBC (the exact same source as
+    /// <see cref="Rgb24TiledPattern_NonLossless_UsesIntrabcAndRoundTrips"/>) must disable IntraBC
+    /// specifically -- mirroring real aomenc's own <c>--enable-intrabc=0</c> -- without needing
+    /// <see cref="AvifEncoderOptions.EnableScreenContentTools"/> to also be off.
+    /// </summary>
+    [Fact]
+    public void Rgb24TiledPattern_NonLossless_IntrabcDisabled_NeverUsesIntrabc()
+    {
+        var source = CreateTiledPseudoRandomPatternImage(384, 384, tileSize: 64);
+        byte[] pixels = source.GetPixelSpan().ToArray();
+
+        var records = new List<Av1BlockDecisionRecord>();
+        Av1FrameEncoder.Encode(pixels, source.Width, source.Height, monoChrome: false, quality: 90, lossless: false, onLeafCommitted: records.Add, enableIntrabc: false);
+
+        Assert.DoesNotContain(records, r => r.UsedIntrabc);
+    }
+
+    /// <summary>
+    /// Genuinely multi-colored (not just per-channel-identical grayscale) few-color content: unlike
+    /// <see cref="CreateTiledPseudoRandomPatternImage"/>'s own R=G=B palette (whose BT.601 chroma planes are
+    /// then perfectly flat/constant -- a real, honest DC_PRED-for-free case that has nothing for a UV-palette
+    /// search to usefully find, correctly rejected by its own real colors&lt;=1 early-exit), this uses three
+    /// real, distinct RGB colors so luma AND chroma both carry genuine multi-value content -- needed because
+    /// this project's own palette architecture is all-or-nothing (both Y and UV must independently win their
+    /// own real search for palette to be usable at all on a leaf, see <c>usedPalette</c>'s own remarks).
+    /// Colors are assigned per 2x2 block, not per pixel: non-lossless chroma is real 4:2:0 (box-filter
+    /// downsampled -- see <c>Av1RgbToYuvConverter</c>), so two differently-colored *adjacent* pixels sharing
+    /// one 2x2 luma block would average into a blended chroma value no small palette represents exactly --
+    /// a real property of 4:2:0 subsampling, not a bug, but one this test must design around to get a
+    /// genuine exact-match candidate on both planes rather than an approximate one.
+    /// </summary>
+    private static Image CreateFewColorRgbPatternImage(int width, int height)
+    {
+        (byte R, byte G, byte B)[] palette = [(200, 40, 40), (40, 200, 40), (40, 40, 200)];
+        var rng = new Random(54321);
+
+        var image = Image.Create(width, height, PixelFormat.Rgb24);
+        var pixels = image.GetPixelSpan();
+        for (int blockRow = 0; blockRow < height; blockRow += 2)
+        {
+            for (int blockCol = 0; blockCol < width; blockCol += 2)
+            {
+                var (r, g, b) = palette[rng.Next(palette.Length)];
+                for (int dy = 0; dy < 2; dy++)
+                {
+                    for (int dx = 0; dx < 2; dx++)
+                    {
+                        int idx = (((blockRow + dy) * width) + blockCol + dx) * 3;
+                        pixels[idx + 0] = r;
+                        pixels[idx + 1] = g;
+                        pixels[idx + 2] = b;
+                    }
+                }
+            }
+        }
+
+        return image;
+    }
+
+    private static Image CreateTiledPseudoRandomPatternImage(int width, int height, int tileSize)
+    {
+        byte[] palette = [40, 128, 210];
+        var rng = new Random(12345);
+        var tile = new byte[tileSize * tileSize];
+        for (int i = 0; i < tile.Length; i++)
+        {
+            tile[i] = palette[rng.Next(palette.Length)];
+        }
+
+        var image = Image.Create(width, height, PixelFormat.Rgb24);
+        var pixels = image.GetPixelSpan();
+        for (int row = 0; row < height; row++)
+        {
+            int tileRow = row % tileSize;
+            for (int col = 0; col < width; col++)
+            {
+                byte value = tile[(tileRow * tileSize) + (col % tileSize)];
+                int idx = ((row * width) + col) * 3;
+                pixels[idx + 0] = value;
+                pixels[idx + 1] = value;
+                pixels[idx + 2] = value;
+            }
+        }
+
+        return image;
     }
 
     /// <summary>

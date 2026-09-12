@@ -163,7 +163,7 @@ internal static class Av1Cdef
         int priStr = frame.Cdef.YPriStrength[idx] << coeffShift;
         int secStr = frame.Cdef.YSecStrength[idx] << coeffShift;
         int dir = priStr == 0 ? 0 : yDir;
-        int varStr = (var >> 6) != 0 ? Math.Min(FloorLog2(var >> 6), 12) : 0;
+        int varStr = (var >> 6) != 0 ? Math.Min(Av1CdfAdaptation.FloorLog2((uint)(var >> 6)), 12) : 0;
         priStr = var != 0 ? (((priStr * (4 + varStr)) + 8) >> 4) : 0;
         int damping = frame.Cdef.Damping + coeffShift;
 
@@ -547,10 +547,10 @@ internal static class Av1Cdef
     /// hoisted out of the per-tap hot path: <paramref name="threshold"/>/<paramref name="damping"/> are
     /// invariant for an entire <see cref="CdefFilter"/> call (only 2 distinct threshold values -- priStr,
     /// secStr -- across up to 768 taps per 8x8 block), so computing it once per call instead of once per
-    /// tap removes ~768 redundant <see cref="FloorLog2"/> bit-loops.
+    /// tap removes ~768 redundant <see cref="Av1CdfAdaptation.FloorLog2"/> bit-loops.
     /// </summary>
     private static int DampingAdjust(int threshold, int damping) =>
-        threshold == 0 ? 0 : Math.Max(0, damping - FloorLog2(threshold));
+        threshold == 0 ? 0 : Math.Max(0, damping - Av1CdfAdaptation.FloorLog2((uint)threshold));
 
     /// <summary><c>constrain(diff, threshold, damping)</c> (spec §7.15.3).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -586,17 +586,5 @@ internal static class Av1Cdef
 
         state.CdefAvailable = false;
         return 0;
-    }
-
-    private static int FloorLog2(int x)
-    {
-        int s = 0;
-        while (x != 0)
-        {
-            x >>= 1;
-            s++;
-        }
-
-        return s - 1;
     }
 }

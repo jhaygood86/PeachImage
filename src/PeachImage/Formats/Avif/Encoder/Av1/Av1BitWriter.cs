@@ -1,3 +1,5 @@
+using PeachImage.Formats.Avif.Decoding.Av1;
+
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
 /// <summary>
@@ -36,7 +38,7 @@ internal sealed class Av1BitWriter
     public void WriteUvlc(uint value)
     {
         uint valuePlus1 = value + 1;
-        int leadingZeroBits = FloorLog2(valuePlus1);
+        int leadingZeroBits = Av1CdfAdaptation.FloorLog2(valuePlus1);
 
         for (int i = 0; i < leadingZeroBits; i++)
         {
@@ -67,7 +69,7 @@ internal sealed class Av1BitWriter
             return;
         }
 
-        int w = FloorLog2(n) + 1;
+        int w = Av1CdfAdaptation.FloorLog2(n) + 1;
         uint m = (uint)((1 << w) - n);
 
         if (value < m)
@@ -134,17 +136,5 @@ internal sealed class Av1BitWriter
         }
 
         _bitPosition++;
-    }
-
-    private static int FloorLog2(uint x)
-    {
-        int s = 0;
-        while (x != 0)
-        {
-            x >>= 1;
-            s++;
-        }
-
-        return s - 1;
     }
 }

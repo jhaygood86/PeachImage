@@ -48,6 +48,44 @@ public class Av1HeaderWritersTests
         }
     }
 
+    /// <summary>
+    /// Custom (non-default) colorPrimaries/transferCharacteristics must round-trip and, critically, must NOT
+    /// trip the identity-matrix short-circuit branch just because chroma444/lossless happens to force
+    /// MatrixCoefficients to MC_IDENTITY -- that branch requires colorPrimaries==CP_BT_709 &&
+    /// transferCharacteristics==TC_SRGB too (see Av1SequenceHeaderWriter.WriteColorConfig's own remarks).
+    /// Getting this wrong would desync a real decoder by skipping/adding color_range or chroma_sample_position
+    /// bits it doesn't expect.
+    /// </summary>
+    [Theory]
+    [InlineData(64, 64, false, false, 9, 16, 1)] // 4:2:0, custom BT.2020 primaries/PQ transfer, custom chroma siting
+    [InlineData(64, 64, false, true, 12, 16, 0)] // chroma444/lossless, custom Display P3 primaries -- must NOT take the identity short-circuit
+    [InlineData(64, 64, false, true, 1, 13, 0)] // chroma444/lossless, default primaries/transfer -- identity short-circuit still applies (no regression)
+    public void Write_CustomColorTagging_RoundTripsThroughParse(int width, int height, bool monoChrome, bool chroma444, int colorPrimaries, int transferCharacteristics, int chromaSamplePosition)
+    {
+        byte[] seqBytes = Av1SequenceHeaderWriter.Write(width, height, monoChrome, chroma444, colorPrimaries: colorPrimaries, transferCharacteristics: transferCharacteristics, chromaSamplePosition: chromaSamplePosition);
+        var seq = Av1SequenceHeader.Parse(new Av1BitReader(seqBytes, 0, seqBytes.Length));
+
+        Assert.Equal(colorPrimaries, seq.ColorPrimaries);
+        Assert.Equal(transferCharacteristics, seq.TransferCharacteristics);
+        Assert.True(seq.ColorRange);
+        Assert.False(seq.SeparateUvDeltaQ);
+
+        // matrixCoefficients is derived from chroma444/monoChrome alone (Av1FrameEncoder never exposes it as
+        // an independent option -- see Av1SequenceHeaderWriter's own remarks), regardless of what
+        // colorPrimaries/transferCharacteristics the caller passes; the identity-branch *bitstream shortcut*
+        // (color_range/chroma_sample_position both skipped) is the separate, three-way-gated condition this
+        // test's own doc comment is really about, and is exercised implicitly by every case here still
+        // round-tripping correctly through Parse rather than desyncing.
+        Assert.Equal(chroma444 ? Av1SequenceHeaderWriter.MatrixCoefficientsIdentity : Av1SequenceHeaderWriter.MatrixCoefficients, seq.MatrixCoefficients);
+        Assert.Equal(chroma444, !seq.SubsamplingX);
+        Assert.Equal(chroma444, !seq.SubsamplingY);
+
+        if (!chroma444)
+        {
+            Assert.Equal(chromaSamplePosition, seq.ChromaSamplePosition);
+        }
+    }
+
     [Theory]
     [InlineData(1, 1, false, 1)]
     [InlineData(1, 1, false, 255)]
@@ -77,7 +115,11 @@ public class Av1HeaderWritersTests
         Assert.Equal([0, 0, 0, 0], parsedHeader.LoopFilter.Level);
         Assert.Equal(0, parsedHeader.Cdef.Bits);
         Assert.False(parsedHeader.LoopRestoration.UsesLr);
-        Assert.Equal(Av1FrameHeader.TxModeLargest, parsedHeader.TxMode);
+        // TxModeSelect, not TxModeLargest: project plan Phase 4's own transform-size RDO -- real aomenc
+        // always signals tx_mode_select for non-lossless all-intra content at this project's own tested
+        // settings (see Av1FrameHeaderWriter's own txModeSelect remarks), so this writer now does too,
+        // unconditionally whenever !lossless.
+        Assert.Equal(Av1FrameHeader.TxModeSelect, parsedHeader.TxMode);
         Assert.True(parsedHeader.ReducedTxSet);
         Assert.False(parsedHeader.DisableCdfUpdate);
         Assert.False(parsedHeader.AllowScreenContentTools);

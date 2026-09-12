@@ -1,11 +1,22 @@
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
 /// <summary>
-/// The deblocking loop filter (spec §7.14), restricted to the intra-only path: <c>ref</c> is always
-/// <c>INTRA_FRAME</c> and <c>isIntra</c> is always true, so the inter-only <c>loop_filter_mode_deltas</c>
-/// branch and the <c>modeType</c> distinction (spec §7.14.4) never apply. Mutates
-/// <see cref="Av1FrameDecodeResult.Planes"/> in place, matching the spec's own in-place <c>CurrFrame</c>
-/// semantics.
+/// The deblocking loop filter (spec §7.14). <c>applyFilter</c>'s own <c>isBlockEdge</c>/<c>skip</c> terms
+/// (spec §7.14.2) are never computed here -- confirmed still safe even now that this project's decoder can
+/// read a real, non-lossless IntraBC block (project plan Phase 4): real AV1 unconditionally forces
+/// <c>loop_filter_params()</c> absent from the bitstream whenever <c>allow_intrabc</c> is set (spec's own
+/// <c>codedLossless || allowIntrabc</c> short-circuit -- mirrored in <see cref="Av1FrameHeader"/>'s own
+/// parse and confirmed directly against real libaom's own encoder source, <c>av1/encoder/bitstream.c</c>'s
+/// <c>encode_loopfilter</c>: <c>if (cm-&gt;features.allow_intrabc) return;</c>, writing nothing), for every
+/// real encoder, not just this project's own. So <see cref="Apply"/> can never run with a real, nonzero
+/// filter level on any frame containing an IntraBC block at all, regardless of who encoded it -- the
+/// distinction this simplification skips can never actually matter, not because an IntraBC block is really
+/// "isIntra" in the strict spec sense (it is NOT: real libaom's own <c>is_inter_block()</c> explicitly
+/// treats an IntraBC block as inter for this exact skip/block-edge computation, since it behaves like inter
+/// prediction structurally -- a skipped IntraBC block can still hide a real block boundary the way a
+/// skipped genuine-inter block can), only because the whole scenario is spec-structurally unreachable.
+/// Mutates <see cref="Av1FrameDecodeResult.Planes"/> in place, matching the spec's own in-place
+/// <c>CurrFrame</c> semantics.
 /// </summary>
 internal static class Av1DeblockingFilter
 {
@@ -100,10 +111,10 @@ internal static class Av1DeblockingFilter
         int txSz = result.LoopfilterTxSizes[plane][((row >> subY) * lfStride) + (col >> subX)];
         int prevTxSz = result.LoopfilterTxSizes[plane][((prevRow >> subY) * lfStride) + (prevCol >> subX)];
 
-        // applyFilter (spec §7.14.2) reduces to isTxEdge here: isIntra is always true for this
-        // intra-only decoder, and applyFilter is 1 whenever isTxEdge && (isBlockEdge || !skip ||
-        // isIntra) -- with isIntra always true, the isBlockEdge/skip terms never change the result, so
-        // isBlockEdge (and the MiSizes/Skips reads it would need) is never computed.
+        // applyFilter (spec §7.14.2) reduces to isTxEdge here -- see this class's own remarks for why this
+        // stays safe even with real, non-lossless IntraBC blocks now decodable (real AV1 forces
+        // loop_filter_params() absent whenever allow_intrabc is set, so this whole method can never run with
+        // a real, nonzero filter level on a frame containing one, regardless of encoder).
         bool isTxEdge;
         if (pass == 0 && xP % Av1TxDimensions.Width[txSz] == 0)
         {
@@ -118,7 +129,6 @@ internal static class Av1DeblockingFilter
             isTxEdge = false;
         }
 
-        // isIntra is always true (intra-only decoder), so applyFilter reduces to isTxEdge && (isBlockEdge || !skip || true) == isTxEdge.
         bool applyFilter = isTxEdge;
         if (!applyFilter)
         {

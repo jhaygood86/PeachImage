@@ -18,22 +18,40 @@ internal interface IAv1SymbolSink
 
 /// <summary>
 /// An <see cref="IAv1SymbolSink"/> that never writes or adapts anything -- it only accumulates the bit cost
-/// <see cref="Av1SymbolEncoder.WriteSymbol"/> would have spent, via <see cref="Av1SymbolEncoder.EstimateSymbolCost"/>,
-/// for RD-search candidate costing (see <see cref="Av1RdCost"/>). A literal bit always costs exactly 1 bit
-/// (see <see cref="Av1SymbolEncoder.EstimateSymbolCost"/>'s remarks on <see cref="Av1SymbolEncoder.WriteBool"/>'s
-/// fixed 50/50 CDF), so <see cref="WriteLiteral"/> adds <c>n</c> directly rather than calling the general
-/// estimator <c>n</c> times.
+/// <see cref="Av1SymbolEncoder.WriteSymbol"/> would have spent, for RD-search candidate costing (see
+/// <see cref="Av1RdCost"/>). Accumulated in <see cref="Av1SymbolEncoder.EstimateSymbolCostPrecise512ths"/>'s
+/// own native, unrounded 1/512-bit fixed-point units -- not per-symbol-rounded whole bits -- for exactly the
+/// same reason <see cref="Av1AdaptingTrialSymbolSink"/> already does this (see that class's own remarks):
+/// a real leaf's residual can involve hundreds of coefficient/skip symbols, and summing that many
+/// already-whole-bit-rounded costs compounds enough error to produce spurious exact ties between genuinely
+/// different candidates. Originally this sink summed <see cref="Av1SymbolEncoder.EstimateSymbolCost"/>
+/// (rounded) directly, on the belief -- stated in a since-corrected version of
+/// <see cref="Av1AdaptingTrialSymbolSink"/>'s own doc comment -- that the tie-collapse failure mode measured
+/// there was unique to that one 128x128-superblock call site; a real per-position instrumented comparison
+/// against aomenc found the identical symptom at an entirely ordinary 4x8px leaf (the second leaf in a real
+/// benchmark image's own frame), directly contradicting that belief. A literal bit always costs exactly 1 bit
+/// (512 of these units, see <see cref="Av1SymbolEncoder.EstimateSymbolCost"/>'s remarks on
+/// <see cref="Av1SymbolEncoder.WriteBool"/>'s fixed 50/50 CDF), so <see cref="WriteLiteral"/> adds
+/// <c>n * 512</c> directly rather than calling the general estimator <c>n</c> times.
 /// </summary>
 internal sealed class Av1TrialSymbolSink : IAv1SymbolSink
 {
-    public long Bits { get; private set; }
+    private long _units512;
 
-    public void WriteSymbol(Span<ushort> cdf, int symbol) => Bits += Av1SymbolEncoder.EstimateSymbolCost(cdf, symbol);
+    public long Bits => (long)Math.Round(_units512 / 512.0, MidpointRounding.AwayFromZero);
 
-    public void WriteLiteral(uint value, int n) => Bits += n;
+    /// <summary>The raw, unrounded accumulated total, in native 1/512-bit units -- for a caller that wants to
+    /// combine this residual cost with further signaling-cost terms of its own (also in these same units,
+    /// see <see cref="Av1SymbolEncoder.EstimateSymbolCostPrecise512ths"/>) and round only once, at the very
+    /// end, instead of rounding this total and each signaling term separately.</summary>
+    public long Units512 => _units512;
 
-    /// <summary>Zeroes <see cref="Bits"/> so this one shared instance (see <c>Av1TileEncoder.TileState.TrialSink</c>) can be reused for the next RD candidate instead of allocating a fresh sink per candidate.</summary>
-    public void Reset() => Bits = 0;
+    public void WriteSymbol(Span<ushort> cdf, int symbol) => _units512 += Av1SymbolEncoder.EstimateSymbolCostPrecise512ths(cdf, symbol);
+
+    public void WriteLiteral(uint value, int n) => _units512 += (long)n * 512;
+
+    /// <summary>Zeroes the accumulated cost so this one shared instance (see <c>Av1TileEncoder.TileState.TrialSink</c>) can be reused for the next RD candidate instead of allocating a fresh sink per candidate.</summary>
+    public void Reset() => _units512 = 0;
 }
 
 /// <summary>
@@ -53,20 +71,22 @@ internal sealed class Av1TrialSymbolSink : IAv1SymbolSink
 /// (potentially 1024) 4x4 sub-blocks needs its own trial to reflect how quickly a real commit's CDF would
 /// adapt across those same sub-blocks -- a literally-flat plane's true cost is dominated almost entirely by
 /// that adaptation, which no amount of per-symbol cost precision alone (<see cref="Av1TrialSymbolSink"/>'s
-/// own improvement) can model. Every other cost estimate in this codebase keeps using the plain, non-adapting
-/// <see cref="Av1TrialSymbolSink"/>, since that rare, once-per-128x128-superblock call site is the only one
-/// this gap was ever measured to matter for.</para>
+/// own identical precision) can model. <see cref="Av1TrialSymbolSink"/> now shares this same unrounded-
+/// accumulation precision (see its own remarks for why "only this call site" was never actually true), so
+/// the two sinks differ only in whether they adapt the CDF they're handed, not in cost precision.</para>
 /// </summary>
 internal sealed class Av1AdaptingTrialSymbolSink : IAv1SymbolSink
 {
     // Accumulated in Av1SymbolEncoder.EstimateSymbolCostPrecise512ths's own native 1/512-bit units, not
-    // rounded per symbol the way Bits (and every other IAv1SymbolSink in this codebase) is -- see that
-    // method's own remarks for why this specific sink needs that extra precision (summing potentially
-    // 1024+ already-whole-bit-rounded symbol costs measurably compounds rounding error, enough to produce
-    // spurious exact ties between two genuinely different candidates).
+    // rounded per symbol -- see Av1TrialSymbolSink's own identical accumulation and remarks (this sink
+    // additionally adapts the CDF it's handed, see the class doc comment above; that's its only real
+    // difference from Av1TrialSymbolSink now).
     private long _units512;
 
     public long Bits => (long)Math.Round(_units512 / 512.0, MidpointRounding.AwayFromZero);
+
+    /// <summary>See <see cref="Av1TrialSymbolSink.Units512"/>'s identical remarks.</summary>
+    public long Units512 => _units512;
 
     public void WriteSymbol(Span<ushort> cdf, int symbol)
     {

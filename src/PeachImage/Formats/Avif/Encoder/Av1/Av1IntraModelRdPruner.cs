@@ -147,4 +147,32 @@ internal static class Av1IntraModelRdPruner
 
         return false;
     }
+
+    /// <summary>
+    /// <c>model_intra_yrd_and_prune</c> (<c>intra_mode_search_utils.h:671-686</c>) -- a distinct, simpler
+    /// single-threshold sibling of <see cref="PruneIntraYMode"/> used specifically to gate a FILTER_INTRA
+    /// submode (<c>rd_pick_filter_intra_sby</c>, <c>intra_mode_search.c:275</c>), sharing the same running
+    /// <paramref name="bestModelRd"/> the plain-mode loop's own <see cref="PruneIntraYMode"/> calls already
+    /// maintain (libaom's own <c>best_model_rd</c> is one value threaded across both loops,
+    /// <c>intra_mode_search.c:1610</c> -&gt; <c>:1677</c>) -- not the top-K array <see cref="PruneIntraYMode"/>
+    /// tracks, which this sibling never reads or writes. Prunes when <paramref name="thisModelRd"/> exceeds
+    /// <c>1.25 * bestModelRd</c> (<c>best_model_rd + (best_model_rd &gt;&gt; 2)</c>, C's integer right-shift
+    /// reproduced exactly by C#'s own <c>&gt;&gt;</c> on <see langword="long"/>), otherwise still updates
+    /// <paramref name="bestModelRd"/> when this candidate improves on it -- exactly libaom's own two-branch
+    /// shape, not simplified into a single comparison.
+    /// </summary>
+    internal static bool PruneFilterIntraModelRd(long thisModelRd, ref long bestModelRd)
+    {
+        if (bestModelRd != long.MaxValue && thisModelRd > bestModelRd + (bestModelRd >> 2))
+        {
+            return true;
+        }
+
+        if (thisModelRd < bestModelRd)
+        {
+            bestModelRd = thisModelRd;
+        }
+
+        return false;
+    }
 }

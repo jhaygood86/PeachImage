@@ -52,7 +52,7 @@ internal static class Av1CdefSearch
         int[] reconY, int[]? reconU, int[]? reconV,
         int[] sourceY, int[]? sourceU, int[]? sourceV,
         int width, int height, int chromaWidth, int chromaHeight,
-        bool monoChrome, int baseQIdx, int loopFilterLevel)
+        bool monoChrome, int baseQIdx, int loopFilterLevel0, int loopFilterLevel1, int loopFilterLevelU, int loopFilterLevelV)
     {
         int miCols = 2 * ((width + 7) >> 3);
         int miRows = 2 * ((height + 7) >> 3);
@@ -69,7 +69,7 @@ internal static class Av1CdefSearch
             var choice = new Av1CdefChoice(Damping: 3, YPriStrength: pri, YSecStrength: sec, UvPriStrength: pri, UvSecStrength: sec);
 
             var (trialY, trialU, trialV) = RentAndCopy(reconY, reconU, reconV, lumaLen, chromaLen);
-            var frame = BuildFrameHeaderForChoice(width, height, monoChrome, baseQIdx, loopFilterLevel, choice);
+            var frame = BuildFrameHeaderForChoice(width, height, monoChrome, baseQIdx, loopFilterLevel0, loopFilterLevel1, loopFilterLevelU, loopFilterLevelV, choice);
             var result = BuildDecodeResult(seq, frame, trialY, trialU, trialV, miCols, miRows, width, height, chromaWidth, chromaHeight);
             Av1Cdef.Apply(result);
 
@@ -86,7 +86,7 @@ internal static class Av1CdefSearch
         if (bestChoice != Av1CdefChoice.Off)
         {
             var (trialY, trialU, trialV) = RentAndCopy(reconY, reconU, reconV, lumaLen, chromaLen);
-            var frame = BuildFrameHeaderForChoice(width, height, monoChrome, baseQIdx, loopFilterLevel, bestChoice);
+            var frame = BuildFrameHeaderForChoice(width, height, monoChrome, baseQIdx, loopFilterLevel0, loopFilterLevel1, loopFilterLevelU, loopFilterLevelV, bestChoice);
             var result = BuildDecodeResult(seq, frame, trialY, trialU, trialV, miCols, miRows, width, height, chromaWidth, chromaHeight);
             Av1Cdef.Apply(result);
 
@@ -177,10 +177,10 @@ internal static class Av1CdefSearch
     };
 
     /// <summary>Resolves the real <see cref="Av1FrameHeader"/> a candidate <paramref name="cdef"/> choice would produce, the same throwaway-<see cref="Av1BitWriter"/> reuse <see cref="Av1InLoopFilterSearch"/>'s identically-named method uses and for the same reason (reuse <see cref="Av1FrameHeaderWriter.Write"/>'s already-correct field construction instead of a second copy of it).</summary>
-    private static Av1FrameHeader BuildFrameHeaderForChoice(int width, int height, bool monoChrome, int baseQIdx, int loopFilterLevel, Av1CdefChoice cdef)
+    private static Av1FrameHeader BuildFrameHeaderForChoice(int width, int height, bool monoChrome, int baseQIdx, int loopFilterLevel0, int loopFilterLevel1, int loopFilterLevelU, int loopFilterLevelV, Av1CdefChoice cdef)
     {
         var scratchWriter = new Av1BitWriter();
-        return Av1FrameHeaderWriter.Write(scratchWriter, width, height, monoChrome, baseQIdx, lossless: false, loopFilterLevel, enableCdef: true, cdef);
+        return Av1FrameHeaderWriter.Write(scratchWriter, width, height, monoChrome, baseQIdx, lossless: false, loopFilterLevel0, enableCdef: true, cdef, allowScreenContentTools: false, allowIntrabc: false, reducedTxSet: true, loopFilterLevel1, loopFilterLevelU, loopFilterLevelV);
     }
 
     private static Av1FrameDecodeResult BuildDecodeResult(Av1SequenceHeader seq, Av1FrameHeader frame, int[] y, int[]? u, int[]? v, int miCols, int miRows, int width, int height, int chromaWidth, int chromaHeight)

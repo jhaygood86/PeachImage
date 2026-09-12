@@ -52,6 +52,7 @@ internal sealed record Av1SpeedFeatures(
     int ExtPartitionEvalThreshBlockPixels,
     int SimpleMotionSearchSplit,
     int IntraCnnBasedPartPruneLevel,
+    int Ml4PartitionSearchLevelIndex,
     Av1WinnerModeType MultiWinnerModeType,
     bool EnableWinnerModeForCoeffOpt,
     bool EnableWinnerModeForUseTxDomainDist,
@@ -107,6 +108,14 @@ internal sealed record Av1SpeedFeatures(
         int extPartitionEvalThreshBlockPixels = 8; // BLOCK_8X8
         int simpleMotionSearchSplit = 0;
         int intraCnnBasedPartPruneLevel = 0;
+
+        // Ml4PartitionSearchLevelIndex is the one field this port pulls in from libaom's own separate
+        // set_allintra_speed_feature_framesize_dependent (speed_features.c:166-344, not otherwise ported
+        // here -- see this record's own remarks) rather than framesize_independent: real libaom's own
+        // cascade for this specific field (speed_features.c:209-271) never branches on resolution, only on
+        // speed, so it's safe to fold into this otherwise-framesize-independent cascade without actually
+        // needing a width/height parameter.
+        int ml4PartitionSearchLevelIndex = 0;
         var multiWinnerModeType = Av1WinnerModeType.Off;
         bool enableWinnerModeForCoeffOpt = false;
         bool enableWinnerModeForUseTxDomainDist = false;
@@ -123,6 +132,7 @@ internal sealed record Av1SpeedFeatures(
             simpleMotionSearchPruneAgg = allowScreenContentTools ? NoPruning : 1; // SIMPLE_AGG_LVL1
             simpleMotionSearchSplit = allowScreenContentTools ? 1 : 2;
             intraCnnBasedPartPruneLevel = allowScreenContentTools ? 0 : 2;
+            ml4PartitionSearchLevelIndex = 1;
         }
 
         if (effort >= 2)
@@ -131,6 +141,7 @@ internal sealed record Av1SpeedFeatures(
             pruneFilterIntraLevel = 1;
             disableSmoothIntra = true;
             simpleMotionSearchPruneAgg = allowScreenContentTools ? NoPruning : 2; // SIMPLE_AGG_LVL2
+            ml4PartitionSearchLevelIndex = 2;
         }
 
         if (effort >= 3)
@@ -139,6 +150,7 @@ internal sealed record Av1SpeedFeatures(
             chromaIntraPruningWithHog = 2;
             prunePaletteSearchLevel = 2;
             simpleMotionSearchPruneAgg = 3; // SIMPLE_AGG_LVL3, unconditional (screen-content or not) from here on
+            ml4PartitionSearchLevelIndex = 3;
         }
 
         if (effort >= 4)
@@ -208,6 +220,7 @@ internal sealed record Av1SpeedFeatures(
             extPartitionEvalThreshBlockPixels,
             simpleMotionSearchSplit,
             intraCnnBasedPartPruneLevel,
+            ml4PartitionSearchLevelIndex,
             multiWinnerModeType,
             enableWinnerModeForCoeffOpt,
             enableWinnerModeForUseTxDomainDist,

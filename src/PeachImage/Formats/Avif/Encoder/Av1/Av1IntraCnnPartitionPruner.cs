@@ -55,6 +55,13 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// with save/restore around each recursive descent) -- see <c>Av1TileEncoder.ComputeDecidePartition</c>'s own
 /// integration remarks for why this is *simpler* to replicate as an ordinary recursive parameter here than
 /// libaom's own mutable-state-with-manual-restore approach.</para>
+///
+/// <para>Re-verified during the libaom test-porting round: all 40 weight/bias/threshold/mean/std arrays in
+/// this file (~9,300 float values total, spanning the 5-layer conv trunk and all 4 branch classifiers)
+/// diffed value-by-value against their real <c>av1_intra_mode_cnn_partition_*</c> counterparts in
+/// <c>partition_cnn_weights.h</c> (a one-off script comparison, not a standing xunit test -- these are
+/// static compile-time constants a source diff would already catch on any future change) -- confirmed
+/// byte-for-byte identical.</para>
 /// </summary>
 internal static class Av1IntraCnnPartitionPruner
 {

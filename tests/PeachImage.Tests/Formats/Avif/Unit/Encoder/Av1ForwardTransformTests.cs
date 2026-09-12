@@ -169,6 +169,57 @@ public class Av1ForwardTransformTests
         Assert.Throws<ArgumentOutOfRangeException>(() => Av1ForwardTransform.Forward2D(residual, coeff, 32, txType));
     }
 
+    /// <summary>
+    /// V_DCT/H_DCT (project plan Phase 4, "full transform-type search" -- the two <c>TX_SET_INTRA_1</c>
+    /// members beyond the reduced <c>TX_SET_INTRA_2</c> five, only reachable at TX_4X4/TX_8X8 once
+    /// <c>reduced_tx_set</c> is false -- see <see cref="Av1ForwardTransform"/>'s own class remarks and
+    /// <c>Av1TileEncoder.TileState.ReducedTxSet</c>'s remarks for the real-aomenc-default motivation). Same
+    /// round-trip-through-the-real-inverse-transform verification every other mixed operator above gets.
+    /// </summary>
+    [Theory]
+    [InlineData(Av1TxType.VDct, 4)]
+    [InlineData(Av1TxType.HDct, 4)]
+    [InlineData(Av1TxType.VDct, 8)]
+    [InlineData(Av1TxType.HDct, 8)]
+    [InlineData(Av1TxType.VDct, 16)]
+    [InlineData(Av1TxType.HDct, 16)]
+    public void Forward2D_VOrHDct_RandomResidual_RoundTripsThroughInverseWithinTolerance(int txType, int size)
+    {
+        var random = new Random(98765);
+        int[] residual = new int[size * size];
+        for (int i = 0; i < residual.Length; i++)
+        {
+            residual[i] = random.Next(-128, 128);
+        }
+
+        AssertRoundTrips(residual, size, tolerance: 3, txType);
+    }
+
+    [Theory]
+    [InlineData(Av1TxType.VDct, 4)]
+    [InlineData(Av1TxType.HDct, 8)]
+    [InlineData(Av1TxType.VDct, 16)]
+    public void Forward2D_VOrHDct_ZeroResidual_ProducesZeroCoefficients(int txType, int size)
+    {
+        int[] residual = new int[size * size];
+        int[] coeff = new int[size * size];
+
+        Av1ForwardTransform.Forward2D(residual, coeff, size, txType);
+
+        Assert.All(coeff, value => Assert.Equal(0, value));
+    }
+
+    /// <summary>AV1 has no V_DCT/H_DCT at TX_32X32 either (that size never reads a tx_type symbol at all -- see the class remarks), so size 32 must still throw rather than silently fall back to a wrong transform.</summary>
+    [Theory]
+    [InlineData(Av1TxType.VDct)]
+    [InlineData(Av1TxType.HDct)]
+    public void Forward2D_VOrHDct_RejectsSize32(int txType)
+    {
+        int[] residual = new int[1024];
+        int[] coeff = new int[1024];
+        Assert.Throws<ArgumentOutOfRangeException>(() => Av1ForwardTransform.Forward2D(residual, coeff, 32, txType));
+    }
+
     private static void AssertRoundTrips(int[] residual, int size, int tolerance, int txType = Av1TxType.DctDct)
     {
         int[] coeff = new int[size * size];
