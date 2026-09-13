@@ -123,4 +123,22 @@ public sealed class AvifEncoderOptions : EncoderOptions
     /// encoder's own palette search has no gate separate from the shared screen-content-tools frame flag.
     /// </summary>
     public bool EnableIntrabc { get; init; } = true;
+
+    /// <summary>
+    /// Whether CDEF (spec §7.15, real per-64x64-unit adaptive strength search -- see
+    /// <c>Av1CdefSearch</c>) is allowed to run at all. Defaults to <see langword="true"/>. Mirrors real
+    /// aomenc's own <c>--enable-cdef</c>. Ignored (never runs regardless) whenever <see cref="Lossless"/> is
+    /// <see langword="true"/> or the frame ends up using IntraBC -- spec forbids both <c>cdef_params()</c>
+    /// and <c>lr_params()</c> on a coded-lossless or IntraBC frame, matching <c>Av1FrameEncoder</c>'s own
+    /// existing per-trial gate.
+    /// </summary>
+    public bool EnableCdef { get; init; } = true;
+
+    /// <summary>
+    /// Whether loop restoration (spec §7.17, real per-unit Wiener/self-guided search -- see
+    /// <c>Av1LoopRestorationSearch</c>) is allowed to run at all. Defaults to <see langword="true"/>. Mirrors
+    /// real aomenc's own <c>--enable-restoration</c>. Same lossless/IntraBC exclusion as
+    /// <see cref="EnableCdef"/>.
+    /// </summary>
+    public bool EnableLoopRestoration { get; init; } = true;
 }

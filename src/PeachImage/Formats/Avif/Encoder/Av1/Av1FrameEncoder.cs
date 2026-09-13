@@ -38,8 +38,17 @@ internal static class Av1FrameEncoder
     /// content-based decision untouched -- there is no equivalent independent "palette only" override in the
     /// other direction, since this encoder's own palette search has no gate separate from the shared
     /// screen-content-tools frame flag IntraBC also needs.</para>
+    ///
+    /// <para><paramref name="enableCdef"/>/<paramref name="enableLoopRestoration"/> gate whether
+    /// <see cref="Av1CdefSearch"/>/<see cref="Av1LoopRestorationSearch"/> are allowed to run at all, mirroring
+    /// real aomenc's own <c>--enable-cdef</c>/<c>--enable-restoration</c>. Both default to
+    /// <see langword="true"/>; setting either to <see langword="false"/> skips that search's own real cost
+    /// entirely for every trial, the same way <paramref name="enableScreenContentTools"/> skips the
+    /// screen-content estimator. Both are already unconditionally skipped whenever <paramref name="lossless"/>
+    /// or a trial's own IntraBC choice is true, independent of these flags -- spec forbids both
+    /// <c>cdef_params()</c> and <c>lr_params()</c> there regardless.</para>
     /// </summary>
-    public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality, bool lossless = false, int effort = 2, Action<Av1BlockDecisionRecord>? onLeafCommitted = null, int colorPrimaries = Av1SequenceHeaderWriter.ColorPrimaries, int transferCharacteristics = Av1SequenceHeaderWriter.TransferCharacteristics, int chromaSamplePosition = Av1SequenceHeaderWriter.ChromaSamplePosition, bool enableScreenContentTools = true, bool enableIntrabc = true)
+    public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality, bool lossless = false, int effort = 2, Action<Av1BlockDecisionRecord>? onLeafCommitted = null, int colorPrimaries = Av1SequenceHeaderWriter.ColorPrimaries, int transferCharacteristics = Av1SequenceHeaderWriter.TransferCharacteristics, int chromaSamplePosition = Av1SequenceHeaderWriter.ChromaSamplePosition, bool enableScreenContentTools = true, bool enableIntrabc = true, bool enableCdef = true, bool enableLoopRestoration = true)
     {
         // Lossless uses 128x128 superblocks (Av1SequenceHeaderWriter/Av1TileEncoder), so the coded canvas
         // must pad to a 128-pixel multiple instead of 64 -- same "every superblock fully in-bounds" reason
@@ -278,24 +287,36 @@ internal static class Av1FrameEncoder
                         // already reflect the chosen deblocking levels at this point. Real per-64x64-unit
                         // adaptive search (Stage 2, Round N+63) -- the returned result flows into
                         // EncodeTileTwoPassWithInLoopFilters's own state.CdefResult before Emit runs, so its
-                        // per-unit cdef_idx literals land at the right bitstream position.
-                        trialCdef = Av1CdefSearch.SearchAndApply(
-                            trialReconY, trialReconU, trialReconV,
-                            yPlane, uPlane, vPlane,
-                            paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
-                            monoChrome, baseQIdx, trialLf0, trialLf1, trialLfU, trialLfV);
+                        // per-unit cdef_idx literals land at the right bitstream position. Gated by
+                        // enableCdef (Phase 5 settings-surface parity, Round N+65) -- mirrors real aomenc's
+                        // own --enable-cdef.
+                        if (enableCdef)
+                        {
+                            trialCdef = Av1CdefSearch.SearchAndApply(
+                                trialReconY, trialReconU, trialReconV,
+                                yPlane, uPlane, vPlane,
+                                paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
+                                monoChrome, baseQIdx, trialLf0, trialLf1, trialLfU, trialLfV);
+                        }
 
                         // Loop restoration (spec §7.17) runs last, per spec's own filter ordering -- reconY/U/V
                         // already reflect the chosen deblocking level AND CDEF strengths at this point (Stage 3,
                         // Round N+64). Mutates trialReconY/U/V in place with the real, winning per-unit filter
                         // choices' actual output (via the genuine, stripe-aware decoder filter -- see
-                        // Av1LoopRestorationSearch's own class remarks).
-                        trialLr = Av1LoopRestorationSearch.SearchAndApply(
-                            trialReconY, trialReconU, trialReconV,
-                            preCdefY, preCdefU, preCdefV,
-                            yPlane, uPlane, vPlane,
-                            paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
-                            monoChrome, baseQIdx);
+                        // Av1LoopRestorationSearch's own class remarks). Gated by enableLoopRestoration
+                        // (Phase 5 settings-surface parity, Round N+65) -- mirrors real aomenc's own
+                        // --enable-restoration. Independent of enableCdef: this still runs against whatever
+                        // reconY/U/V holds (deblocked-only if CDEF was skipped), exactly matching real
+                        // aomenc's own independent --enable-cdef/--enable-restoration flags.
+                        if (enableLoopRestoration)
+                        {
+                            trialLr = Av1LoopRestorationSearch.SearchAndApply(
+                                trialReconY, trialReconU, trialReconV,
+                                preCdefY, preCdefU, preCdefV,
+                                yPlane, uPlane, vPlane,
+                                paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
+                                monoChrome, baseQIdx);
+                        }
                     }
 
                     return (trialCdef, trialLr);

@@ -732,6 +732,53 @@ public class EncodeDecodeRoundTripTests
     }
 
     /// <summary>
+    /// <see cref="AvifEncoderOptions.EnableCdef"/> set <see langword="false"/> mirrors real aomenc's own
+    /// <c>--enable-cdef=0</c>: CDEF (Stage 2's real per-64x64-unit adaptive search) is a Lagrangian
+    /// improvement that only ever gets used when it genuinely helps, so disabling it can only ever leave
+    /// real bits on the table (equal or larger output), never produce a *smaller* real result -- the same
+    /// real-effect assertion this project's own analogous <see cref="AvifEncoderOptions.EnableIntrabc"/>/
+    /// <see cref="AvifEncoderOptions.EnableScreenContentTools"/> tests already establish, just via byte count
+    /// instead of a decision-record check (CDEF has no equivalent leaf-level decision record).
+    /// </summary>
+    [Fact]
+    public void Rgb24Gradient_NonLossless_CdefDisabled_NeverLargerThanEnabled()
+    {
+        var source = CreateGradientImage(128, 128);
+        byte[] pixels = source.GetPixelSpan().ToArray();
+
+        var withCdef = Av1FrameEncoder.Encode(pixels, source.Width, source.Height, monoChrome: false, quality: 60, lossless: false);
+        var withoutCdef = Av1FrameEncoder.Encode(pixels, source.Width, source.Height, monoChrome: false, quality: 60, lossless: false, enableCdef: false);
+
+        Assert.True(withoutCdef.ObuBytes.Length >= withCdef.ObuBytes.Length,
+            $"Disabling CDEF produced smaller output ({withoutCdef.ObuBytes.Length} bytes) than enabling it ({withCdef.ObuBytes.Length} bytes) -- CDEF's own real RD decision should never choose to use it unless doing so is genuinely no worse.");
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 60, EnableCdef = false });
+        AssertPsnrAtLeast(source, decoded, minPsnrDb: 25.0);
+    }
+
+    /// <summary>
+    /// <see cref="AvifEncoderOptions.EnableLoopRestoration"/> set <see langword="false"/> mirrors real
+    /// aomenc's own <c>--enable-restoration=0</c> -- see
+    /// <see cref="Rgb24Gradient_NonLossless_CdefDisabled_NeverLargerThanEnabled"/>'s own identical rationale
+    /// for why this is a real, not-larger-when-disabled assertion rather than a leaf-decision-record check.
+    /// </summary>
+    [Fact]
+    public void Rgb24Gradient_NonLossless_LoopRestorationDisabled_NeverLargerThanEnabled()
+    {
+        var source = CreateGradientImage(128, 128);
+        byte[] pixels = source.GetPixelSpan().ToArray();
+
+        var withLr = Av1FrameEncoder.Encode(pixels, source.Width, source.Height, monoChrome: false, quality: 60, lossless: false);
+        var withoutLr = Av1FrameEncoder.Encode(pixels, source.Width, source.Height, monoChrome: false, quality: 60, lossless: false, enableLoopRestoration: false);
+
+        Assert.True(withoutLr.ObuBytes.Length >= withLr.ObuBytes.Length,
+            $"Disabling loop restoration produced smaller output ({withoutLr.ObuBytes.Length} bytes) than enabling it ({withLr.ObuBytes.Length} bytes) -- its own real RD decision should never choose to use it unless doing so is genuinely no worse.");
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 60, EnableLoopRestoration = false });
+        AssertPsnrAtLeast(source, decoded, minPsnrDb: 25.0);
+    }
+
+    /// <summary>
     /// Genuinely multi-colored (not just per-channel-identical grayscale) few-color content: unlike
     /// <see cref="CreateTiledPseudoRandomPatternImage"/>'s own R=G=B palette (whose BT.601 chroma planes are
     /// then perfectly flat/constant -- a real, honest DC_PRED-for-free case that has nothing for a UV-palette

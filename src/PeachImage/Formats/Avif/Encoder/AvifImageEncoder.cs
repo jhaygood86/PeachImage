@@ -21,7 +21,7 @@ internal static class AvifImageEncoder
 
         (byte[] pixels, bool monoChrome, byte[]? alpha) = GatherPixels(image, options);
 
-        var encoded = Av1FrameEncoder.Encode(pixels, image.Width, image.Height, monoChrome, options.Quality, options.Lossless, options.Effort, colorPrimaries: options.ColorPrimaries, transferCharacteristics: options.TransferCharacteristics, chromaSamplePosition: options.ChromaSamplePosition, enableScreenContentTools: options.EnableScreenContentTools, enableIntrabc: options.EnableIntrabc);
+        var encoded = Av1FrameEncoder.Encode(pixels, image.Width, image.Height, monoChrome, options.Quality, options.Lossless, options.Effort, colorPrimaries: options.ColorPrimaries, transferCharacteristics: options.TransferCharacteristics, chromaSamplePosition: options.ChromaSamplePosition, enableScreenContentTools: options.EnableScreenContentTools, enableIntrabc: options.EnableIntrabc, enableCdef: options.EnableCdef, enableLoopRestoration: options.EnableLoopRestoration);
 
         // Alpha is encoded as its own independent monochrome AV1 image -- Av1FrameEncoder's existing
         // monoChrome path already produces exactly that, so no encoder-internal alpha support is needed,
@@ -34,7 +34,7 @@ internal static class AvifImageEncoder
         // plane's own real content either way.
         Av1EncodedFrame? alphaEncoded = alpha is null
             ? null
-            : Av1FrameEncoder.Encode(alpha, image.Width, image.Height, monoChrome: true, options.Quality, options.Lossless, options.Effort, colorPrimaries: options.ColorPrimaries, transferCharacteristics: options.TransferCharacteristics, chromaSamplePosition: options.ChromaSamplePosition, enableScreenContentTools: options.EnableScreenContentTools, enableIntrabc: options.EnableIntrabc);
+            : Av1FrameEncoder.Encode(alpha, image.Width, image.Height, monoChrome: true, options.Quality, options.Lossless, options.Effort, colorPrimaries: options.ColorPrimaries, transferCharacteristics: options.TransferCharacteristics, chromaSamplePosition: options.ChromaSamplePosition, enableScreenContentTools: options.EnableScreenContentTools, enableIntrabc: options.EnableIntrabc, enableCdef: options.EnableCdef, enableLoopRestoration: options.EnableLoopRestoration);
 
         AvifContainerWriter.Write(stream, encoded, alphaEncoded);
     }
