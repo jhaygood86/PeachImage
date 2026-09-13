@@ -197,6 +197,80 @@ internal sealed class Av1SymbolEncoder : IAv1SymbolSink
     }
 
     /// <summary>
+    /// <c>decode_signed_subexp_with_ref_bool(low, high, k, r)</c>'s write-side counterpart (spec §5.11.58) --
+    /// loop restoration's own Wiener-tap/SGR-xqd coefficient coding (<c>Av1LoopRestorationSearch</c>'s
+    /// <c>WriteLr</c>, mirroring <c>Av1TileDecoder.DecodeSignedSubexpWithRefBool</c> exactly). Ports
+    /// cleanly to the write side because every step in the decode chain (subexp bit-length selection,
+    /// recentering around a running reference value) is an exact, invertible bijection -- given the real
+    /// <paramref name="value"/> a real decoder should reconstruct, this reproduces the identical bit sequence
+    /// <see cref="Av1TileDecoder"/>'s own read chain would consume to arrive at it.
+    /// </summary>
+    public void WriteSignedSubexpWithRefBool(int low, int high, int k, int r, int value) =>
+        WriteUnsignedSubexpWithRefBool(high - low, k, r - low, value - low);
+
+    /// <summary><c>decode_unsigned_subexp_with_ref_bool(mx, k, r)</c>'s write-side counterpart.</summary>
+    private void WriteUnsignedSubexpWithRefBool(int mx, int k, int r, int value)
+    {
+        int v = (r << 1) <= mx
+            ? Recenter(r, value)
+            : Recenter(mx - 1 - r, mx - 1 - value);
+        WriteSubexpBool(mx, k, v);
+    }
+
+    /// <summary>
+    /// <c>decode_subexp_bool(numSyms, k)</c>'s write-side counterpart -- reconstructs, tier by tier, the same
+    /// bit-length decisions the decoder's own loop makes (each tier's own <c>a = 1 &lt;&lt; b2</c> range test),
+    /// writing <c>subexp_more_bools</c>/<c>subexp_bools</c>/<see cref="WriteNs"/> directly rather than
+    /// re-deriving <paramref name="numSyms"/>/<paramref name="k"/>'s own bit budget analytically.
+    /// </summary>
+    private void WriteSubexpBool(int numSyms, int k, int v)
+    {
+        int i = 0;
+        int mk = 0;
+        while (true)
+        {
+            int b2 = i != 0 ? k + i - 1 : k;
+            int a = 1 << b2;
+            if (numSyms <= mk + (3 * a))
+            {
+                WriteNs(v - mk, numSyms - mk);
+                return;
+            }
+
+            if (v < mk + a)
+            {
+                WriteLiteral(0, 1); // subexp_more_bools
+                WriteLiteral((uint)(v - mk), b2);
+                return;
+            }
+
+            WriteLiteral(1, 1); // subexp_more_bools
+            i++;
+            mk += a;
+        }
+    }
+
+    /// <summary>
+    /// <c>recenter(r, v)</c> (spec §5.9.29) -- the forward direction of <see cref="Av1TileDecoder.InverseRecenter"/>:
+    /// given the real target <paramref name="v"/> and reference <paramref name="r"/>, finds the subexp-domain
+    /// value a real decoder's own <c>InverseRecenter(r, ·)</c> would map back to <paramref name="v"/>.
+    /// </summary>
+    private static int Recenter(int r, int v)
+    {
+        if (v > (2 * r))
+        {
+            return v;
+        }
+
+        if (v >= r)
+        {
+            return (v - r) << 1;
+        }
+
+        return ((r - v) << 1) - 1;
+    }
+
+    /// <summary>
     /// <c>read_symbol(cdf)</c>'s write-side counterpart: encodes <paramref name="symbol"/> against
     /// <paramref name="cdf"/> and adapts it in place (unless <c>disable_cdf_update</c>), exactly mirroring
     /// <see cref="Av1SymbolDecoder.ReadSymbol"/>'s own adaptation so a real decoder's CDF state stays in

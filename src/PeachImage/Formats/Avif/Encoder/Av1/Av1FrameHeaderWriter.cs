@@ -98,7 +98,19 @@ internal static class Av1FrameHeaderWriter
     /// always comes from the caller. See <c>Av1TileEncoder.TileState.ReducedTxSet</c>'s own remarks for the
     /// matching non-lossless tx-type search/write side of this same change.
     /// </param>
-    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false, int loopFilterLevel0 = 0, bool enableCdef = false, Av1CdefFrameParams? cdef = null, bool allowScreenContentTools = false, bool allowIntrabc = false, bool reducedTxSet = true, int loopFilterLevel1 = 0, int loopFilterLevelU = 0, int loopFilterLevelV = 0)
+    /// <param name="enableRestoration">
+    /// <c>enable_restoration</c> -- the same lossy-only rule <paramref name="enableCdef"/> follows (loop
+    /// restoration is a lossy-only tool; the one caller passes <c>!lossless</c>, matching
+    /// <paramref name="enableCdef"/> exactly).
+    /// </param>
+    /// <param name="lr">
+    /// Loop restoration (spec §7.17) frame-wide parameters from <see cref="Av1LoopRestorationSearch"/>'s real
+    /// per-unit search (Stage 3), or <see cref="Av1LoopRestorationSearchResult.Off"/> (the default) to signal
+    /// no restoration anywhere. Ignored (never written) whenever <paramref name="enableRestoration"/> is
+    /// <see langword="false"/>, <paramref name="lossless"/> is <see langword="true"/>, or
+    /// <paramref name="allowIntrabc"/> is <see langword="true"/>.
+    /// </param>
+    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false, int loopFilterLevel0 = 0, bool enableCdef = false, Av1CdefFrameParams? cdef = null, bool allowScreenContentTools = false, bool allowIntrabc = false, bool reducedTxSet = true, int loopFilterLevel1 = 0, int loopFilterLevelU = 0, int loopFilterLevelV = 0, bool enableRestoration = false, Av1LoopRestorationSearchResult? lr = null)
     {
         if (lossless)
         {
@@ -201,8 +213,18 @@ internal static class Av1FrameHeaderWriter
             WriteCdefParams(writer, writtenCdef);
         }
 
-        // lr_params(): seq.EnableRestoration == false short-circuits it entirely regardless of losslessness
-        // -- no bits read/written (loop restoration isn't implemented by this encoder yet).
+        // lr_params() (spec §5.9.20): read/written whenever !allLossless && !allowIntrabc && seq.EnableRestoration
+        // (Av1FrameHeader.ParseLrParams's own real gate -- AllLossless == lossless always here, see the
+        // returned Av1FrameHeader's own AllLossless remarks below). Stage 3's own real search
+        // (Av1LoopRestorationSearch) only ever runs under that identical condition (mirrors CDEF/deblock's own
+        // "never pay for a result that could never be used" discipline), so writtenLr degrades to Off whenever
+        // this frame couldn't have used real restoration anyway.
+        bool lrParamsPresent = !lossless && !allowIntrabc && enableRestoration;
+        var writtenLr = lrParamsPresent ? (lr ?? Av1LoopRestorationSearchResult.Off) : Av1LoopRestorationSearchResult.Off;
+        if (lrParamsPresent)
+        {
+            WriteLrParams(writer, writtenLr, monoChrome);
+        }
 
         // tx_mode_select is only read when !codedLossless (tx_mode is otherwise implicitly OnlyTx4x4) --
         // see Av1FrameHeader's own codedLossless branch. Project plan Phase 4's own transform-size RDO:
@@ -302,9 +324,9 @@ internal static class Av1FrameHeaderWriter
             },
             LoopRestoration = new Av1LoopRestorationParams
             {
-                FrameRestorationType = [Av1LoopRestorationParams.RestoreNone, Av1LoopRestorationParams.RestoreNone, Av1LoopRestorationParams.RestoreNone],
-                UsesLr = false,
-                UnitSize = [0, 0, 0],
+                FrameRestorationType = writtenLr.FrameRestorationType,
+                UsesLr = writtenLr.UsesLr,
+                UnitSize = writtenLr.UnitSize,
             },
             TxMode = lossless ? Av1FrameHeader.OnlyTx4x4 : (txModeSelect ? Av1FrameHeader.TxModeSelect : Av1FrameHeader.TxModeLargest),
             ReducedTxSet = reducedTxSet,
@@ -372,6 +394,53 @@ internal static class Av1FrameHeaderWriter
             writer.WriteBits((uint)(combo.YSecStrength == 4 ? 3 : combo.YSecStrength), 2);
             writer.WriteBits((uint)combo.UvPriStrength, 4);
             writer.WriteBits((uint)(combo.UvSecStrength == 4 ? 3 : combo.UvSecStrength), 2);
+        }
+    }
+
+    /// <summary>
+    /// <c>lr_params()</c> (spec §5.9.20) write-side -- the exact algebraic inverse of
+    /// <c>Av1FrameHeader.ParseLrParams</c>: given <paramref name="lr"/>'s already-decided
+    /// <see cref="Av1LoopRestorationSearchResult.FrameRestorationType"/>/<see cref="Av1LoopRestorationSearchResult.UnitSize"/>,
+    /// derives the raw <c>lr_type</c>/<c>lr_unit_shift</c>/<c>lr_uv_shift</c> codes a real decoder's own parse
+    /// would produce those same values from, rather than re-running any search here. Always signals
+    /// <c>Use128x128Superblock == false</c> in shape (no such parameter needed): Stage 3's own real search
+    /// only ever runs for a non-lossless frame, which this encoder always codes with 64x64 superblocks (only
+    /// lossless ever uses 128x128 -- see <see cref="Av1SequenceHeaderWriter"/>'s own remarks), so the
+    /// 128x128-superblock branch of <c>ParseLrParams</c>'s own <c>lr_unit_shift</c> read is unreachable here.
+    /// </summary>
+    private static void WriteLrParams(Av1BitWriter writer, Av1LoopRestorationSearchResult lr, bool monoChrome)
+    {
+        // Inverse of ParseLrParams's own remapLrType = [None, Switchable, Wiener, Sgrproj] -- indexed by
+        // value (None=0, Wiener=1, Sgrproj=2, Switchable=3), giving the raw 2-bit code that value came from.
+        ReadOnlySpan<int> invRemapLrType = [0, 2, 3, 1];
+
+        int numPlanes = monoChrome ? 1 : 3;
+        bool usesChromaLr = false;
+        for (int i = 0; i < numPlanes; i++)
+        {
+            writer.WriteBits((uint)invRemapLrType[lr.FrameRestorationType[i]], 2);
+            if (i > 0 && lr.FrameRestorationType[i] != Av1LoopRestorationParams.RestoreNone)
+            {
+                usesChromaLr = true;
+            }
+        }
+
+        if (!lr.UsesLr)
+        {
+            return;
+        }
+
+        const int restorationTileSizeMax = 256;
+        int lrUnitShift = 2 - Av1CdfAdaptation.FloorLog2((uint)(restorationTileSizeMax / lr.UnitSize[0]));
+        writer.WriteFlag(lrUnitShift != 0);
+        if (lrUnitShift != 0)
+        {
+            writer.WriteFlag(lrUnitShift == 2);
+        }
+
+        if (usesChromaLr)
+        {
+            writer.WriteFlag(lr.UnitSize[1] != lr.UnitSize[0]);
         }
     }
 }

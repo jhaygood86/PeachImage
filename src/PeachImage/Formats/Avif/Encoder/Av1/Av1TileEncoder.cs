@@ -398,17 +398,18 @@ internal static class Av1TileEncoder
     /// <paramref name="reconV"/> are the exact same array references <see cref="BuildTileState"/> hands to
     /// <see cref="TileState.ReconY"/>/<c>ReconU</c>/<c>ReconV</c>, never copied, so a caller-side search
     /// mutating them in place here is observed by <see cref="EmitTile"/>'s own subsequent real reconstruction
-    /// reads exactly as if it had mutated <see cref="TileState"/> directly) -- but CDEF's own real per-unit
-    /// assignment DOES need to reach <see cref="TileState"/>, so <paramref name="applyInLoopFilters"/> returns
-    /// it directly rather than mutating anything: assigned to <see cref="TileState.CdefResult"/> here, before
-    /// <see cref="EmitTile"/> runs, so its own per-leaf <c>WriteCdef</c> calls see the real result.
+    /// reads exactly as if it had mutated <see cref="TileState"/> directly) -- but CDEF's/loop restoration's
+    /// own real per-unit assignments DO need to reach <see cref="TileState"/>, so <paramref name="applyInLoopFilters"/>
+    /// returns them directly rather than mutating anything: assigned to <see cref="TileState.CdefResult"/>/
+    /// <see cref="TileState.LrResult"/> here, before <see cref="EmitTile"/> runs, so its own per-leaf
+    /// <c>WriteCdef</c>/per-superblock <c>WriteLr</c> calls see the real results.
     /// </summary>
     internal static byte[] EncodeTileTwoPassWithInLoopFilters(
         int[] yPlane, int yWidth, int yHeight,
         int[]? uPlane, int[]? vPlane, int chromaWidth, int chromaHeight,
         int[] reconY, int[]? reconU, int[]? reconV,
         bool monoChrome, int baseQIdx, bool lossless, bool chroma444, int effort, bool allowScreenContentTools, bool allowIntrabc, int trueWidth, int trueHeight, Action<Av1BlockDecisionRecord>? onLeafCommitted,
-        Func<Av1CdefSearchResult> applyInLoopFilters)
+        Func<(Av1CdefSearchResult Cdef, Av1LoopRestorationSearchResult Lr)> applyInLoopFilters)
     {
         var state = BuildTileState(yPlane, yWidth, yHeight, uPlane, vPlane, chromaWidth, chromaHeight, reconY, reconU, reconV, monoChrome, baseQIdx, lossless, chroma444, effort, allowScreenContentTools, allowIntrabc, trueWidth, trueHeight, onLeafCommitted);
 
@@ -416,7 +417,7 @@ internal static class Av1TileEncoder
         {
             int sbSizeMi = lossless ? 32 : 16;
             DecideTile(state, baseQIdx, sbSizeMi);
-            state.CdefResult = applyInLoopFilters();
+            (state.CdefResult, state.LrResult) = applyInLoopFilters();
             EmitTile(state, sbSizeMi);
             return state.Symbols.Flush();
         }
@@ -519,6 +520,32 @@ internal static class Av1TileEncoder
         var cdefResult = state.CdefResult;
         state.CdefUnitWritten = cdefResult is null ? null : new bool[cdefResult.UnitCols * cdefResult.UnitRows];
 
+        // Stage 3: real per-unit loop-restoration subexp-with-reference coding needs a running reference
+        // value per plane/pass (Wiener) and per plane (SGR) -- reset to the spec's own WienerTapsMid/
+        // SgrprojXqdMid at the start of this Emit pass, mirroring Av1TileDecoder's own once-per-tile
+        // constructor reset exactly (real decode and this encoder's own Emit are both genuinely
+        // "once per tile" here, so the timing matches, not just the values).
+        var lrResult = state.LrResult;
+        if (lrResult is null)
+        {
+            state.RefLrWiener = null;
+            state.RefSgrXqd = null;
+        }
+        else
+        {
+            state.RefLrWiener = new int[6][];
+            state.RefSgrXqd = new int[3][];
+            for (int plane = 0; plane < 3; plane++)
+            {
+                for (int pass = 0; pass < 2; pass++)
+                {
+                    state.RefLrWiener[(plane * 2) + pass] = (int[])WienerTapsMid.Clone();
+                }
+
+                state.RefSgrXqd[plane] = (int[])SgrprojXqdMid.Clone();
+            }
+        }
+
         int superblockIndex = 0;
         for (int r = 0; r < state.MiRows; r += sbSizeMi)
         {
@@ -528,6 +555,7 @@ internal static class Av1TileEncoder
                 superblockIndex++;
 
                 ClearBlockDecodedFlags(state, r, c, sbSize4: sbSizeMi);
+                WriteLr(state, r, c, sbSizeMi);
                 EncodePartitionForced(state, r, c, sizeMi: sbSizeMi);
             }
         }
@@ -573,6 +601,137 @@ internal static class Av1TileEncoder
             s.Symbols.WriteLiteral((uint)cdef.UnitIdx[unitIndex], cdef.FrameParams.Bits);
         }
     }
+
+    /// <summary>
+    /// <c>write_lr(r, c, bSize)</c>, the write-side counterpart of the decoder's <c>ReadLr</c> (spec §5.11.2's
+    /// own <c>decode_tile()</c> call site: immediately before <c>decode_partition()</c> for each superblock --
+    /// see <see cref="EmitTile"/>'s own call site, placed identically). Non-lossless-only (like
+    /// <see cref="WriteCdef"/>): hardcodes 4:2:0 subsampling for chroma since <see cref="TileState.LrResult"/>
+    /// is only ever non-null for a non-lossless frame, which this encoder always subsamples 4:2:0 (chroma444
+    /// is lossless-only -- see <see cref="Av1FrameEncoder.Encode"/>'s own <c>chroma444</c> gate).
+    /// </summary>
+    private static void WriteLr(TileState s, int r, int c, int sbSizeMi)
+    {
+        if (s.Phase == Av1EncodePhase.Decide)
+        {
+            return;
+        }
+
+        var lr = s.LrResult;
+        if (lr is null || !lr.UsesLr)
+        {
+            return;
+        }
+
+        int planeCount = s.MonoChrome ? 1 : 3;
+        for (int plane = 0; plane < planeCount; plane++)
+        {
+            var grid = lr.Grids[plane];
+            if (grid is null)
+            {
+                continue;
+            }
+
+            int sub = plane == 0 ? 0 : 1;
+            int unitSize = grid.UnitSize;
+
+            int unitRowStart = (((r * 4) >> sub) + unitSize - 1) / unitSize;
+            int unitRowEnd = Math.Min(grid.UnitRows, ((((r + sbSizeMi) * 4) >> sub) + unitSize - 1) / unitSize);
+
+            int numerator = 4 >> sub;
+            int unitColStart = ((c * numerator) + unitSize - 1) / unitSize;
+            int unitColEnd = Math.Min(grid.UnitCols, (((c + sbSizeMi) * numerator) + unitSize - 1) / unitSize);
+
+            for (int unitRow = unitRowStart; unitRow < unitRowEnd; unitRow++)
+            {
+                for (int unitCol = unitColStart; unitCol < unitColEnd; unitCol++)
+                {
+                    WriteLrUnit(s, plane, grid, unitRow, unitCol);
+                }
+            }
+        }
+    }
+
+    /// <summary><c>write_lr_unit(plane, unitRow, unitCol)</c>, the write-side counterpart of the decoder's <c>ReadLrUnit</c> (spec §5.11.58).</summary>
+    private static void WriteLrUnit(TileState s, int plane, Av1RestorationUnitGrid grid, int unitRow, int unitCol)
+    {
+        int unitIdx = (unitRow * grid.UnitCols) + unitCol;
+        int frameRestorationType = s.LrResult!.FrameRestorationType[plane];
+        int restorationType = grid.LrType[unitIdx];
+
+        if (frameRestorationType == Av1LoopRestorationParams.RestoreWiener)
+        {
+            s.Symbols.WriteSymbol(s.Cdf.UseWiener, restorationType == Av1LoopRestorationParams.RestoreWiener ? 1 : 0);
+        }
+        else if (frameRestorationType == Av1LoopRestorationParams.RestoreSgrproj)
+        {
+            s.Symbols.WriteSymbol(s.Cdf.UseSgrproj, restorationType == Av1LoopRestorationParams.RestoreSgrproj ? 1 : 0);
+        }
+        else
+        {
+            s.Symbols.WriteSymbol(s.Cdf.RestorationType, restorationType);
+        }
+
+        if (restorationType == Av1LoopRestorationParams.RestoreWiener)
+        {
+            for (int pass = 0; pass < 2; pass++)
+            {
+                var refCoeffs = s.RefLrWiener![(plane * 2) + pass];
+                int firstCoeff = plane != 0 ? 1 : 0;
+
+                for (int j = firstCoeff; j < 3; j++)
+                {
+                    int min = WienerTapsMin[j];
+                    int max = WienerTapsMax[j];
+                    int k = WienerTapsK[j];
+                    int v = grid.LrWiener[(((unitIdx * 2) + pass) * 3) + j];
+                    s.Symbols.WriteSignedSubexpWithRefBool(min, max + 1, k, refCoeffs[j], v);
+                    refCoeffs[j] = v;
+                }
+            }
+        }
+        else if (restorationType == Av1LoopRestorationParams.RestoreSgrproj)
+        {
+            int lrSgrSet = grid.LrSgrSet[unitIdx];
+            s.Symbols.WriteLiteral((uint)lrSgrSet, SgrprojParamsBits);
+
+            for (int i = 0; i < 2; i++)
+            {
+                int radius = Av1SgrParams.Table[lrSgrSet][i * 2];
+                int min = SgrprojXqdMin[i];
+                int max = SgrprojXqdMax[i];
+                int v;
+                if (radius != 0)
+                {
+                    v = grid.LrSgrXqd[(unitIdx * 2) + i];
+                    s.Symbols.WriteSignedSubexpWithRefBool(min, max + 1, SgrprojPrjSubexpK, s.RefSgrXqd![plane][i], v);
+                }
+                else
+                {
+                    // No bits are ever read/written here (spec's own decode_sgrproj_info leaves this xqd
+                    // entirely derived, not coded) -- i == 1 with radius == 0 is DERIVED, from this same
+                    // unit's own just-written i == 0 reference, not searched. Computed here directly
+                    // (matching Av1TileDecoder.ReadLrUnit's own identical derivation exactly) rather than
+                    // trusted from the search's own grid value, so a search bug here can never desync a real
+                    // decoder -- it can only ever waste (or fail to realize) a compression opportunity.
+                    v = i == 1 ? Math.Clamp((1 << SgrprojPrjBits) - s.RefSgrXqd![plane][0], min, max) : 0;
+                }
+
+                s.RefSgrXqd![plane][i] = v;
+            }
+        }
+    }
+
+    private const int SgrprojParamsBits = 4;
+    private const int SgrprojPrjSubexpK = 4;
+    private const int SgrprojPrjBits = 7;
+    private static readonly int[] WienerTapsMin = [-5, -23, -17];
+    private static readonly int[] WienerTapsMax = [10, 8, 46];
+    private static readonly int[] WienerTapsK = [1, 2, 3];
+    private static readonly int[] SgrprojXqdMin = [-96, -32];
+    private static readonly int[] SgrprojXqdMax = [31, 95];
+    internal static readonly int[] WienerTapsMid = [3, -7, 15];
+    internal static readonly int[] SgrprojXqdMid = [-32, 31];
 
     private static void ReturnTileStateBuffers(TileState state)
     {
@@ -1192,6 +1351,20 @@ internal static class Av1TileEncoder
         // the start of EmitTile (WriteCdef's own real bitstream literal fires only once per unit, at the
         // first non-skip leaf reaching it in bitstream order -- exactly matching real write_cdef()).
         public bool[]? CdefUnitWritten;
+
+        // Stage 3 (real per-unit loop-restoration search): the real search result -- null until
+        // EncodeTileTwoPassWithInLoopFilters assigns it (same timing/lifetime as CdefResult above); WriteLr
+        // reads it to know each unit's own real type/Wiener-taps/SGR-set-and-xqd.
+        public Av1LoopRestorationSearchResult? LrResult;
+
+        // Write-side mirror of Av1TileDecoder's _refLrWiener/_refSgrXqd running-reference state (subexp-with-
+        // reference coding needs the PREVIOUS unit's own written value, per plane/pass -- see
+        // Av1SymbolEncoder.WriteSignedSubexpWithRefBool's own remarks). Reset to WienerTapsMid/SgrprojXqdMid
+        // at the start of EmitTile (mirroring Av1TileDecoder's own once-per-tile constructor reset) -- both
+        // null whenever LrResult itself is null/inert (lossless, IntraBC, or every plane's own real RD
+        // decision landed on RestoreNone).
+        public int[][]? RefLrWiener;
+        public int[][]? RefSgrXqd;
 
         // Write-side mirror of Av1TileDecoder's BlockDecoded tracking (spec's BlockDecoded[][], §5.11.3) --
         // needed so haveAboveRight/haveBelowLeft (spec §7.11.2's edge-extension availability, which directional

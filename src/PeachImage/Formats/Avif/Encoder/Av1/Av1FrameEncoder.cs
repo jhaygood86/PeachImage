@@ -190,7 +190,7 @@ internal static class Av1FrameEncoder
         // trials -- each trial is now fully self-contained, with no possible cross-trial leakage, matching the
         // same "only ever run the hook against the SAME trial whose bytes are kept" principle the comment
         // above already established for onLeafCommitted itself.
-        (byte[] Bytes, List<Av1BlockDecisionRecord>? Leaves, int[] ReconY, int[]? ReconU, int[]? ReconV, int LoopFilterLevel0, int LoopFilterLevel1, int LoopFilterLevelU, int LoopFilterLevelV, Av1CdefSearchResult Cdef) EncodeTileTrial(bool trialScreenContentTools, bool trialIntrabc)
+        (byte[] Bytes, List<Av1BlockDecisionRecord>? Leaves, int[] ReconY, int[]? ReconU, int[]? ReconV, int LoopFilterLevel0, int LoopFilterLevel1, int LoopFilterLevelU, int LoopFilterLevelV, Av1CdefSearchResult Cdef, Av1LoopRestorationSearchResult Lr) EncodeTileTrial(bool trialScreenContentTools, bool trialIntrabc)
         {
             // Seeded from the real (already edge-replicated, via PadPlane) source planes, not zero-filled --
             // a real gap found and fixed this round: a lossless leaf whose own coding-block node falls
@@ -246,6 +246,7 @@ internal static class Av1FrameEncoder
             // here rather than deferring to a post-hoc approximation.
             int trialLf0 = 0, trialLf1 = 0, trialLfU = 0, trialLfV = 0;
             var trialCdef = Av1CdefSearchResult.Off;
+            var trialLr = Av1LoopRestorationSearchResult.Off;
             List<Av1BlockDecisionRecord>? leaves = onLeafCommitted is null ? null : [];
             byte[] bytes = Av1TileEncoder.EncodeTileTwoPassWithInLoopFilters(
                 yPlane, paddedWidth, paddedHeight,
@@ -263,6 +264,15 @@ internal static class Av1FrameEncoder
                             paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
                             monoChrome, baseQIdx);
 
+                        // Real per-unit loop-restoration search (Stage 3) needs BOTH the pre-CDEF (deblocked-
+                        // only) and post-CDEF reconstructions -- spec's own stripe-boundary blend (§7.17.1)
+                        // reads the pre-CDEF version near each 64-row stripe edge, exactly mirroring
+                        // Av1LoopRestoration.Apply's own two-buffer decode-side contract. Snapshotted here,
+                        // right after deblocking and before CDEF mutates trialReconY/U/V in place.
+                        int[] preCdefY = (int[])trialReconY.Clone();
+                        int[]? preCdefU = monoChrome ? null : (int[])trialReconU!.Clone();
+                        int[]? preCdefV = monoChrome ? null : (int[])trialReconV!.Clone();
+
                         // CDEF (spec §7.15) runs after deblocking, per spec's own filter ordering
                         // (Av1FrameDecoder.DecodeTileGroup applies them in exactly this order) -- reconY/U/V
                         // already reflect the chosen deblocking levels at this point. Real per-64x64-unit
@@ -274,11 +284,23 @@ internal static class Av1FrameEncoder
                             yPlane, uPlane, vPlane,
                             paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
                             monoChrome, baseQIdx, trialLf0, trialLf1, trialLfU, trialLfV);
+
+                        // Loop restoration (spec §7.17) runs last, per spec's own filter ordering -- reconY/U/V
+                        // already reflect the chosen deblocking level AND CDEF strengths at this point (Stage 3,
+                        // Round N+64). Mutates trialReconY/U/V in place with the real, winning per-unit filter
+                        // choices' actual output (via the genuine, stripe-aware decoder filter -- see
+                        // Av1LoopRestorationSearch's own class remarks).
+                        trialLr = Av1LoopRestorationSearch.SearchAndApply(
+                            trialReconY, trialReconU, trialReconV,
+                            preCdefY, preCdefU, preCdefV,
+                            yPlane, uPlane, vPlane,
+                            paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
+                            monoChrome, baseQIdx);
                     }
 
-                    return trialCdef;
+                    return (trialCdef, trialLr);
                 });
-            return (bytes, leaves, trialReconY, trialReconU, trialReconV, trialLf0, trialLf1, trialLfU, trialLfV, trialCdef);
+            return (bytes, leaves, trialReconY, trialReconU, trialReconV, trialLf0, trialLf1, trialLfU, trialLfV, trialCdef, trialLr);
         }
 
         bool allowScreenContentTools = heuristicScreenContentTools;
@@ -291,6 +313,7 @@ internal static class Av1FrameEncoder
         int[]? reconV = trial.ReconV;
         int loopFilterLevel0 = trial.LoopFilterLevel0, loopFilterLevel1 = trial.LoopFilterLevel1, loopFilterLevelU = trial.LoopFilterLevelU, loopFilterLevelV = trial.LoopFilterLevelV;
         var cdefChoice = trial.Cdef;
+        var lrChoice = trial.Lr;
 
         // The real trial itself: the heuristic above only gates whether this ever runs at all (an image the
         // heuristic already ruled out as screen-content-like never pays this extra encode cost) -- once it
@@ -317,6 +340,7 @@ internal static class Av1FrameEncoder
                 loopFilterLevelU = withoutTools.LoopFilterLevelU;
                 loopFilterLevelV = withoutTools.LoopFilterLevelV;
                 cdefChoice = withoutTools.Cdef;
+                lrChoice = withoutTools.Lr;
                 allowScreenContentTools = false;
                 allowIntrabc = false;
             }
@@ -336,6 +360,7 @@ internal static class Av1FrameEncoder
                     loopFilterLevelU = withoutIntrabc.LoopFilterLevelU;
                     loopFilterLevelV = withoutIntrabc.LoopFilterLevelV;
                     cdefChoice = withoutIntrabc.Cdef;
+                    lrChoice = withoutIntrabc.Lr;
                     allowScreenContentTools = true;
                     allowIntrabc = false;
                 }
@@ -356,12 +381,17 @@ internal static class Av1FrameEncoder
         // winning trial's own real result. Both are lossy-only (codedLossless's own short-circuit means
         // loop_filter_params()/cdef_params() never reach the bitstream at lossless) and skipped whenever
         // allowIntrabc (real AV1 forbids both on any IntraBC frame, regardless of losslessness).
-        byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(headerWidth, headerHeight, monoChrome, chroma444, enableCdef: !lossless, use128x128Superblock: lossless, enableRestoration: lossless, colorPrimaries, transferCharacteristics, chromaSamplePosition);
+        // enableRestoration: !lossless, matching enableCdef's own identical rule immediately above -- loop
+        // restoration is a lossy-only tool (spec's own coded-lossless short-circuit means lr_params() never
+        // reaches the bitstream at lossless either way, Av1FrameHeaderWriter.Write's own lrParamsPresent
+        // gate). Previously hardcoded to `lossless` (the reverse) -- harmless before Stage 3 (loop restoration
+        // was never implemented on either side of that flag), but a real fix as of Stage 3's own real search.
+        byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(headerWidth, headerHeight, monoChrome, chroma444, enableCdef: !lossless, use128x128Superblock: lossless, enableRestoration: !lossless, colorPrimaries, transferCharacteristics, chromaSamplePosition);
 
         var frameHeaderWriter = new Av1BitWriter();
         // `false` unconditionally, matching real aomenc's own observed default -- see
         // Av1TileEncoder.TileState.ReducedTxSet's own remarks. Inert for lossless either way.
-        Av1FrameHeaderWriter.Write(frameHeaderWriter, headerWidth, headerHeight, monoChrome, baseQIdx, lossless, loopFilterLevel0, enableCdef: !lossless, cdefChoice.FrameParams, allowScreenContentTools, allowIntrabc, reducedTxSet: false, loopFilterLevel1, loopFilterLevelU, loopFilterLevelV);
+        Av1FrameHeaderWriter.Write(frameHeaderWriter, headerWidth, headerHeight, monoChrome, baseQIdx, lossless, loopFilterLevel0, enableCdef: !lossless, cdefChoice.FrameParams, allowScreenContentTools, allowIntrabc, reducedTxSet: false, loopFilterLevel1, loopFilterLevelU, loopFilterLevelV, enableRestoration: !lossless, lrChoice);
         byte[] frameHeaderPayload = frameHeaderWriter.ToArray();
 
         // A single combined OBU_FRAME (spec's frame_obu(): frame_header_obu() + byte_alignment() +
