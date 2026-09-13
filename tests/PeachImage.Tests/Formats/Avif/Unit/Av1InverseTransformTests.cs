@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.Intrinsics;
 
 using PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -95,6 +96,151 @@ public class Av1InverseTransformTests
         for (int i = 0; i < 16; i++)
         {
             Assert.Equal(0, residual[i]);
+        }
+    }
+
+    /// <summary>
+    /// Direct differential check of the 4-row-batched SIMD path (<see cref="Av1InverseTransform.InverseDctBatch"/>/
+    /// <c>InverseAdstBatch</c>/<c>InverseIdentityBatch</c>, added to vectorize <c>Inverse2D</c>'s row/column
+    /// passes) against the pre-existing scalar reference (<see cref="Av1InverseTransform.InverseDct"/>/
+    /// <c>InverseAdst</c>/<c>InverseIdentity</c>) it's meant to be a faithful parallelization of: 4
+    /// independently-random rows, packed one per SIMD lane, must produce bit-identical per-lane output to 4
+    /// separate scalar calls on the same data, across every size the batched path is ever used at and a wide
+    /// coefficient-magnitude range (including values large enough to approach the int32-truncation boundary
+    /// the batched path's own <c>TruncateToInt32Batch</c>/<c>RoundBatch</c> exist to replicate). This is a
+    /// stronger, more exhaustive check than <c>Inverse2D</c>'s own corpus/round-trip tests can offer on their
+    /// own, since it isn't limited to whatever coefficient patterns real corpus content happens to produce.
+    /// </summary>
+    [Theory]
+    [InlineData(2, 16)]
+    [InlineData(3, 16)]
+    [InlineData(4, 16)]
+    [InlineData(5, 16)]
+    [InlineData(6, 16)]
+    [InlineData(2, 20)]
+    [InlineData(6, 20)]
+    public void InverseDctBatch_MatchesScalarReference_ForRandomRows(int n, int r)
+    {
+        var rng = new Random((n * 1000) + r);
+        int len = 1 << n;
+
+        for (int trial = 0; trial < 500; trial++)
+        {
+            var rows = new int[4][];
+            var batch = new Vector256<long>[64];
+            for (int lane = 0; lane < 4; lane++)
+            {
+                rows[lane] = new int[len];
+                for (int idx = 0; idx < len; idx++)
+                {
+                    rows[lane][idx] = rng.Next(-(1 << 20), 1 << 20);
+                }
+            }
+
+            for (int idx = 0; idx < len; idx++)
+            {
+                batch[idx] = Vector256.Create((long)rows[0][idx], (long)rows[1][idx], (long)rows[2][idx], (long)rows[3][idx]);
+            }
+
+            Av1InverseTransform.InverseDctBatch(batch, n, r);
+
+            for (int lane = 0; lane < 4; lane++)
+            {
+                var expected = (int[])rows[lane].Clone();
+                Av1InverseTransform.InverseDct(expected, n, r);
+
+                for (int idx = 0; idx < len; idx++)
+                {
+                    Assert.Equal(expected[idx], (int)batch[idx].GetElement(lane));
+                }
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(2, 16)]
+    [InlineData(3, 16)]
+    [InlineData(4, 16)]
+    [InlineData(2, 20)]
+    [InlineData(4, 20)]
+    public void InverseAdstBatch_MatchesScalarReference_ForRandomRows(int n, int r)
+    {
+        var rng = new Random((n * 2000) + r);
+        int len = 1 << n;
+
+        for (int trial = 0; trial < 500; trial++)
+        {
+            var rows = new int[4][];
+            var batch = new Vector256<long>[64];
+            for (int lane = 0; lane < 4; lane++)
+            {
+                rows[lane] = new int[len];
+                for (int idx = 0; idx < len; idx++)
+                {
+                    rows[lane][idx] = rng.Next(-(1 << 20), 1 << 20);
+                }
+            }
+
+            for (int idx = 0; idx < len; idx++)
+            {
+                batch[idx] = Vector256.Create((long)rows[0][idx], (long)rows[1][idx], (long)rows[2][idx], (long)rows[3][idx]);
+            }
+
+            Av1InverseTransform.InverseAdstBatch(batch, n, r);
+
+            for (int lane = 0; lane < 4; lane++)
+            {
+                var expected = (int[])rows[lane].Clone();
+                Av1InverseTransform.InverseAdst(expected, n, r);
+
+                for (int idx = 0; idx < len; idx++)
+                {
+                    Assert.Equal(expected[idx], (int)batch[idx].GetElement(lane));
+                }
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    public void InverseIdentityBatch_MatchesScalarReference_ForRandomRows(int n)
+    {
+        var rng = new Random(n * 3000);
+        int len = 1 << n;
+
+        for (int trial = 0; trial < 500; trial++)
+        {
+            var rows = new int[4][];
+            var batch = new Vector256<long>[64];
+            for (int lane = 0; lane < 4; lane++)
+            {
+                rows[lane] = new int[len];
+                for (int idx = 0; idx < len; idx++)
+                {
+                    rows[lane][idx] = rng.Next(-(1 << 20), 1 << 20);
+                }
+            }
+
+            for (int idx = 0; idx < len; idx++)
+            {
+                batch[idx] = Vector256.Create((long)rows[0][idx], (long)rows[1][idx], (long)rows[2][idx], (long)rows[3][idx]);
+            }
+
+            Av1InverseTransform.InverseIdentityBatch(batch, n);
+
+            for (int lane = 0; lane < 4; lane++)
+            {
+                var expected = (int[])rows[lane].Clone();
+                Av1InverseTransform.InverseIdentity(expected, n);
+
+                for (int idx = 0; idx < len; idx++)
+                {
+                    Assert.Equal(expected[idx], (int)batch[idx].GetElement(lane));
+                }
+            }
         }
     }
 }
