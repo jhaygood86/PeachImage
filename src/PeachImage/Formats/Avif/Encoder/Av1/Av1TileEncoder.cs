@@ -393,19 +393,22 @@ internal static class Av1TileEncoder
     /// the frame's own post-deblock reconstruction, which is exactly what <paramref name="reconY"/>/
     /// <paramref name="reconU"/>/<paramref name="reconV"/> hold once <see cref="DecideTile"/> returns (real
     /// reconstruction is unconditional there, independent of <see cref="Av1EncodePhase"/> -- see
-    /// <see cref="DecideTile"/>'s own remarks) and <paramref name="applyInLoopFilters"/> has run. No
-    /// <see cref="TileState"/> access is needed by the callback: <paramref name="reconY"/>/<paramref name="reconU"/>/
+    /// <see cref="DecideTile"/>'s own remarks) and <paramref name="applyInLoopFilters"/> has run. Deblocking
+    /// itself needs no <see cref="TileState"/> access (<paramref name="reconY"/>/<paramref name="reconU"/>/
     /// <paramref name="reconV"/> are the exact same array references <see cref="BuildTileState"/> hands to
-    /// <see cref="TileState.ReconY"/>/<c>ReconU</c>/<c>ReconV</c> (never copied), so a caller-side search
+    /// <see cref="TileState.ReconY"/>/<c>ReconU</c>/<c>ReconV</c>, never copied, so a caller-side search
     /// mutating them in place here is observed by <see cref="EmitTile"/>'s own subsequent real reconstruction
-    /// reads exactly as if it had mutated <see cref="TileState"/> directly.
+    /// reads exactly as if it had mutated <see cref="TileState"/> directly) -- but CDEF's own real per-unit
+    /// assignment DOES need to reach <see cref="TileState"/>, so <paramref name="applyInLoopFilters"/> returns
+    /// it directly rather than mutating anything: assigned to <see cref="TileState.CdefResult"/> here, before
+    /// <see cref="EmitTile"/> runs, so its own per-leaf <c>WriteCdef</c> calls see the real result.
     /// </summary>
     internal static byte[] EncodeTileTwoPassWithInLoopFilters(
         int[] yPlane, int yWidth, int yHeight,
         int[]? uPlane, int[]? vPlane, int chromaWidth, int chromaHeight,
         int[] reconY, int[]? reconU, int[]? reconV,
         bool monoChrome, int baseQIdx, bool lossless, bool chroma444, int effort, bool allowScreenContentTools, bool allowIntrabc, int trueWidth, int trueHeight, Action<Av1BlockDecisionRecord>? onLeafCommitted,
-        Action applyInLoopFilters)
+        Func<Av1CdefSearchResult> applyInLoopFilters)
     {
         var state = BuildTileState(yPlane, yWidth, yHeight, uPlane, vPlane, chromaWidth, chromaHeight, reconY, reconU, reconV, monoChrome, baseQIdx, lossless, chroma444, effort, allowScreenContentTools, allowIntrabc, trueWidth, trueHeight, onLeafCommitted);
 
@@ -413,7 +416,7 @@ internal static class Av1TileEncoder
         {
             int sbSizeMi = lossless ? 32 : 16;
             DecideTile(state, baseQIdx, sbSizeMi);
-            applyInLoopFilters();
+            state.CdefResult = applyInLoopFilters();
             EmitTile(state, sbSizeMi);
             return state.Symbols.Flush();
         }
@@ -508,6 +511,14 @@ internal static class Av1TileEncoder
         state.IntrabcSignatureIndex.Clear();
         Array.Clear(state.Written);
 
+        // Stage 2: real per-unit cdef_idx literals fire once per 64x64 unit, at the first non-skip leaf
+        // reaching it in bitstream order (WriteCdef) -- same whole-frame-accumulating shape as Written above,
+        // reset fresh for this Emit pass. Sized from the just-assigned CdefResult (state.CdefResult is always
+        // set by now -- see EncodeTileTwoPassWithInLoopFilters's own remarks); Off's UnitCols*UnitRows == 0
+        // makes this an empty (and therefore inert) array whenever CDEF found nothing worth signaling.
+        var cdefResult = state.CdefResult;
+        state.CdefUnitWritten = cdefResult is null ? null : new bool[cdefResult.UnitCols * cdefResult.UnitRows];
+
         int superblockIndex = 0;
         for (int r = 0; r < state.MiRows; r += sbSizeMi)
         {
@@ -519,6 +530,47 @@ internal static class Av1TileEncoder
                 ClearBlockDecodedFlags(state, r, c, sbSize4: sbSizeMi);
                 EncodePartitionForced(state, r, c, sizeMi: sbSizeMi);
             }
+        }
+    }
+
+    /// <summary>
+    /// <c>write_cdef()</c>, the write-side counterpart of the decoder's <c>ReadCdef()</c> (spec §5.11.56) --
+    /// same real gate (<paramref name="skip"/>, coded-lossless, <c>seq.EnableCdef</c>; this encoder folds
+    /// coded-lossless/EnableCdef into "<see cref="TileState.CdefResult"/>'s own <c>Bits</c> is 0," since
+    /// <see cref="Av1CdefSearch.SearchAndApply"/> is simply never called for a lossless or IntraBC frame -- see
+    /// <see cref="Av1FrameEncoder.Encode"/>'s own <c>!lossless &amp;&amp; !trialIntrabc</c> gate) and same
+    /// position: called immediately after skip is written, before delta_q/delta_lf (spec's real position in
+    /// <c>intra_frame_mode_info()</c> -- this encoder never implements segmentation or delta-q/delta-lf, so
+    /// there is nothing between skip and this call for those two, always-absent syntax elements to occupy).
+    /// Writes the real literal only once per 64x64 unit, at whichever leaf reaches it first in bitstream
+    /// order (<see cref="TileState.CdefUnitWritten"/> mirrors the decoder's own <c>_cdefIdx == -1</c>
+    /// sentinel, just at unit granularity rather than the decoder's mi granularity -- this encoder already
+    /// knows every unit's own aligned position from <see cref="Av1CdefSearchResult"/>, so no mi-indexed sparse
+    /// array is needed here the way the decoder's own <c>ClearCdef</c>/<c>SetCdefIdx</c> require).
+    /// </summary>
+    private static void WriteCdef(TileState s, int r, int c, bool skip)
+    {
+        if (s.Phase == Av1EncodePhase.Decide)
+        {
+            return;
+        }
+
+        var cdef = s.CdefResult;
+        if (skip || cdef is null || cdef.FrameParams.Bits == 0 || cdef.UnitIdx is null)
+        {
+            return;
+        }
+
+        int cdefSize4 = Av1BlockTables.Num4x4BlocksWide[Av1BlockSize.Block64x64];
+        int unitRow = (r & ~(cdefSize4 - 1)) / cdefSize4;
+        int unitCol = (c & ~(cdefSize4 - 1)) / cdefSize4;
+        int unitIndex = (unitRow * cdef.UnitCols) + unitCol;
+
+        var written = s.CdefUnitWritten!;
+        if (!written[unitIndex])
+        {
+            written[unitIndex] = true;
+            s.Symbols.WriteLiteral((uint)cdef.UnitIdx[unitIndex], cdef.FrameParams.Bits);
         }
     }
 
@@ -1126,6 +1178,20 @@ internal static class Av1TileEncoder
         // quantized-luma-average signature so the approximate-match search can reach those candidates
         // directly, at O(bucket size) rather than O(every leaf in the frame).
         public required Dictionary<(int SizePixels, int Signature), List<(int R, int C)>> IntrabcSignatureIndex;
+
+        // Stage 2 (real per-64x64-unit CDEF search): the real search result -- null until
+        // EncodeTileTwoPassWithInLoopFilters assigns it (after DecideTile, before EmitTile); WriteCdef reads
+        // it to know each unit's own cdef_idx. Never set for the fused EncodeTile/plain EncodeTileTwoPass
+        // paths (both still write zero cdef_idx bits, matching real cdef_bits == 0's own no-op literal).
+        public Av1CdefSearchResult? CdefResult;
+
+        // Mirrors the decoder's own _cdefIdx sentinel array (spec's clear_cdef(), "not yet assigned this
+        // frame"), but at 64x64-unit granularity rather than mi granularity -- this encoder already knows,
+        // from CdefResult, exactly which unit-aligned position starts each unit, so a flat per-unit flag is
+        // sufficient (no need to replicate the decoder's own mi-indexed sparse array). Reset to all-false at
+        // the start of EmitTile (WriteCdef's own real bitstream literal fires only once per unit, at the
+        // first non-skip leaf reaching it in bitstream order -- exactly matching real write_cdef()).
+        public bool[]? CdefUnitWritten;
 
         // Write-side mirror of Av1TileDecoder's BlockDecoded tracking (spec's BlockDecoded[][], §5.11.3) --
         // needed so haveAboveRight/haveBelowLeft (spec §7.11.2's edge-extension availability, which directional
@@ -6747,6 +6813,11 @@ internal static class Av1TileEncoder
             s.DecideCommitSink.WriteSymbol(s.DecideCdf.Skip[skipCtx], (paletteAllZeroResidual || (usedIntrabc && intrabcExactCandidate)) ? 1 : 0);
         }
 
+        // read_cdef() (spec §5.11.56) sits right here in intra_frame_mode_info() -- immediately after skip,
+        // before delta_q/delta_lf (both always absent from this encoder's bitstream, see WriteCdef's own
+        // remarks) -- so its write-side counterpart goes at the identical position.
+        WriteCdef(s, r, c, paletteAllZeroResidual || (usedIntrabc && intrabcExactCandidate));
+
         // use_intrabc (spec §5.11.7): structurally present whenever this frame allows it (tied to lossless
         // -- see Av1FrameHeaderWriter), read/written unconditionally for every leaf regardless of outcome,
         // exactly like paletteStructurallyPresent's has_palette_y/has_palette_uv bits.
@@ -7999,6 +8070,9 @@ internal static class Av1TileEncoder
         {
             s.DecideCommitSink.WriteSymbol(s.DecideCdf.Skip[skipCtx], paletteAllZeroResidual ? 1 : 0);
         }
+
+        // read_cdef() (spec §5.11.56) -- see EncodeLeaf's own identical call site remarks.
+        WriteCdef(s, r, c, paletteAllZeroResidual);
 
         // use_intrabc (spec §5.11.7): structurally present whenever the frame allows it (tied to lossless AND
         // real content-based IntraBC detection, same as EncodeLeaf's intrabcStructurallyPresent), regardless

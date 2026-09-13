@@ -190,7 +190,7 @@ internal static class Av1FrameEncoder
         // trials -- each trial is now fully self-contained, with no possible cross-trial leakage, matching the
         // same "only ever run the hook against the SAME trial whose bytes are kept" principle the comment
         // above already established for onLeafCommitted itself.
-        (byte[] Bytes, List<Av1BlockDecisionRecord>? Leaves, int[] ReconY, int[]? ReconU, int[]? ReconV, int LoopFilterLevel0, int LoopFilterLevel1, int LoopFilterLevelU, int LoopFilterLevelV, Av1CdefChoice Cdef) EncodeTileTrial(bool trialScreenContentTools, bool trialIntrabc)
+        (byte[] Bytes, List<Av1BlockDecisionRecord>? Leaves, int[] ReconY, int[]? ReconU, int[]? ReconV, int LoopFilterLevel0, int LoopFilterLevel1, int LoopFilterLevelU, int LoopFilterLevelV, Av1CdefSearchResult Cdef) EncodeTileTrial(bool trialScreenContentTools, bool trialIntrabc)
         {
             // Seeded from the real (already edge-replicated, via PadPlane) source planes, not zero-filled --
             // a real gap found and fixed this round: a lossless leaf whose own coding-block node falls
@@ -245,7 +245,7 @@ internal static class Av1FrameEncoder
             // aomenc's own per-trial cost accounting would do the same, and it costs nothing extra to be exact
             // here rather than deferring to a post-hoc approximation.
             int trialLf0 = 0, trialLf1 = 0, trialLfU = 0, trialLfV = 0;
-            var trialCdef = Av1CdefChoice.Off;
+            var trialCdef = Av1CdefSearchResult.Off;
             List<Av1BlockDecisionRecord>? leaves = onLeafCommitted is null ? null : [];
             byte[] bytes = Av1TileEncoder.EncodeTileTwoPassWithInLoopFilters(
                 yPlane, paddedWidth, paddedHeight,
@@ -265,13 +265,18 @@ internal static class Av1FrameEncoder
 
                         // CDEF (spec §7.15) runs after deblocking, per spec's own filter ordering
                         // (Av1FrameDecoder.DecodeTileGroup applies them in exactly this order) -- reconY/U/V
-                        // already reflect the chosen deblocking levels at this point.
+                        // already reflect the chosen deblocking levels at this point. Real per-64x64-unit
+                        // adaptive search (Stage 2, Round N+63) -- the returned result flows into
+                        // EncodeTileTwoPassWithInLoopFilters's own state.CdefResult before Emit runs, so its
+                        // per-unit cdef_idx literals land at the right bitstream position.
                         trialCdef = Av1CdefSearch.SearchAndApply(
                             trialReconY, trialReconU, trialReconV,
                             yPlane, uPlane, vPlane,
                             paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
                             monoChrome, baseQIdx, trialLf0, trialLf1, trialLfU, trialLfV);
                     }
+
+                    return trialCdef;
                 });
             return (bytes, leaves, trialReconY, trialReconU, trialReconV, trialLf0, trialLf1, trialLfU, trialLfV, trialCdef);
         }
@@ -356,7 +361,7 @@ internal static class Av1FrameEncoder
         var frameHeaderWriter = new Av1BitWriter();
         // `false` unconditionally, matching real aomenc's own observed default -- see
         // Av1TileEncoder.TileState.ReducedTxSet's own remarks. Inert for lossless either way.
-        Av1FrameHeaderWriter.Write(frameHeaderWriter, headerWidth, headerHeight, monoChrome, baseQIdx, lossless, loopFilterLevel0, enableCdef: !lossless, cdefChoice, allowScreenContentTools, allowIntrabc, reducedTxSet: false, loopFilterLevel1, loopFilterLevelU, loopFilterLevelV);
+        Av1FrameHeaderWriter.Write(frameHeaderWriter, headerWidth, headerHeight, monoChrome, baseQIdx, lossless, loopFilterLevel0, enableCdef: !lossless, cdefChoice.FrameParams, allowScreenContentTools, allowIntrabc, reducedTxSet: false, loopFilterLevel1, loopFilterLevelU, loopFilterLevelV);
         byte[] frameHeaderPayload = frameHeaderWriter.ToArray();
 
         // A single combined OBU_FRAME (spec's frame_obu(): frame_header_obu() + byte_alignment() +

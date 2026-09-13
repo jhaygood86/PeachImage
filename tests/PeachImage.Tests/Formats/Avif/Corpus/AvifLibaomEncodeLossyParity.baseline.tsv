@@ -54,12 +54,12 @@ corpus/seine_sdr_gainmap_notmapbrand.avif	926F9BCFFC46B4474E5C07C37447CC4D	38389
 corpus/seine_sdr_gainmap_srgb.avif	E3C2D14602622E682CB4263F42394B79	38389:32493
 corpus/seine_sdr_gainmap_srgb_icc.avif	57FDD76F55CCB985BA45237D9C317FA6	SKIPPED
 corpus/sofa_grid1x5_420.avif	D8191C8883FAAD44DC25483A30E03E6A	59731:43965
-corpus/sofa_grid1x5_420_dimg_repeat.avif	89E6D6912AD8EEF8D91775C805E7B72F	62135:46401
-corpus/sofa_grid1x5_420_reversed_dimg_order.avif	C1AAE0CF14938FB5E22520680991D6A9	62077:47557
+corpus/sofa_grid1x5_420_dimg_repeat.avif	89E6D6912AD8EEF8D91775C805E7B72F	62135:46428
+corpus/sofa_grid1x5_420_reversed_dimg_order.avif	C1AAE0CF14938FB5E22520680991D6A9	62077:47584
 corpus/supported_gainmap_writer_version_with_extra_bytes.avif	3D1AD9EC21CC5B3584F571468522F197	SKIPPED
 corpus/unsupported_gainmap_minimum_version.avif	937A5297298B81071B59EC7C3C6AC29E	SKIPPED
 corpus/unsupported_gainmap_version.avif	9CF02C5295D20C292370CAA9355F1EFC	SKIPPED
 corpus/unsupported_gainmap_writer_version_with_extra_bytes.avif	9788D458C57929425131CAF639C589DA	SKIPPED
 corpus/weld_sato_12B_8B_q0.avif	82E8005322C252709F2ADB050480348D	SKIPPED
 corpus/white_1x1.avif	1EDC4B26E90CCDFE13BB8CC651B3195F	31:30
-# Aggregate at recording time: reference=484102 actual=378855 (-21.74%).
+# Aggregate at recording time: reference=484102 actual=378909 (-21.73%).

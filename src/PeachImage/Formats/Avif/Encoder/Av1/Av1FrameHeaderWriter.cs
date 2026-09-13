@@ -69,12 +69,10 @@ internal static class Av1FrameHeaderWriter
     /// doesn't pass it explicitly.
     /// </param>
     /// <param name="cdef">
-    /// CDEF (spec §7.15) strength choice from <see cref="Av1CdefSearch"/>'s RD search, or
-    /// <see cref="Av1CdefChoice.Off"/> (the default) to signal CDEF as a no-op strength-0/0 combo. This
-    /// encoder always writes exactly one strength combo (<c>cdef_bits = 0</c>) rather than the up to 8 a real
-    /// per-64x64-unit-adaptive encoder would use -- see <see cref="Av1CdefSearch"/>'s remarks. Ignored
-    /// (never written) whenever <paramref name="enableCdef"/> is <see langword="false"/> or
-    /// <paramref name="lossless"/> is <see langword="true"/>.
+    /// CDEF (spec §7.15) frame-wide parameters from <see cref="Av1CdefSearch"/>'s real per-64x64-unit
+    /// adaptive search (Stage 2), or <see cref="Av1CdefFrameParams.Off"/> (the default) to signal CDEF as a
+    /// no-op single strength-0/0 combo. Ignored (never written) whenever <paramref name="enableCdef"/> is
+    /// <see langword="false"/> or <paramref name="lossless"/> is <see langword="true"/>.
     /// </param>
     /// <param name="allowScreenContentTools">
     /// <c>allow_screen_content_tools</c> -- real, content-based decision
@@ -100,9 +98,8 @@ internal static class Av1FrameHeaderWriter
     /// always comes from the caller. See <c>Av1TileEncoder.TileState.ReducedTxSet</c>'s own remarks for the
     /// matching non-lossless tx-type search/write side of this same change.
     /// </param>
-    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false, int loopFilterLevel0 = 0, bool enableCdef = false, Av1CdefChoice? cdef = null, bool allowScreenContentTools = false, bool allowIntrabc = false, bool reducedTxSet = true, int loopFilterLevel1 = 0, int loopFilterLevelU = 0, int loopFilterLevelV = 0)
+    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false, int loopFilterLevel0 = 0, bool enableCdef = false, Av1CdefFrameParams? cdef = null, bool allowScreenContentTools = false, bool allowIntrabc = false, bool reducedTxSet = true, int loopFilterLevel1 = 0, int loopFilterLevelU = 0, int loopFilterLevelV = 0)
     {
-        var cdefChoice = cdef ?? Av1CdefChoice.Off;
         if (lossless)
         {
             if (baseQIdx != 0)
@@ -198,10 +195,10 @@ internal static class Av1FrameHeaderWriter
         // loop_filter_params() follows above, and the same fix applies here for the identical reason: this
         // used to rely on allowIntrabc never being true for a non-lossless frame, which is no longer assumed.
         bool cdefParamsPresent = !lossless && !allowIntrabc && enableCdef;
-        var writtenCdef = cdefParamsPresent ? cdefChoice : Av1CdefChoice.Off;
+        var writtenCdef = cdefParamsPresent ? (cdef ?? Av1CdefFrameParams.Off) : Av1CdefFrameParams.Off;
         if (cdefParamsPresent)
         {
-            WriteCdefParams(writer, cdefChoice);
+            WriteCdefParams(writer, writtenCdef);
         }
 
         // lr_params(): seq.EnableRestoration == false short-circuits it entirely regardless of losslessness
@@ -297,11 +294,11 @@ internal static class Av1FrameHeaderWriter
             Cdef = new Av1CdefParams
             {
                 Damping = writtenCdef.Damping,
-                Bits = 0,
-                YPriStrength = [writtenCdef.YPriStrength],
-                YSecStrength = [writtenCdef.YSecStrength],
-                UvPriStrength = [writtenCdef.UvPriStrength],
-                UvSecStrength = [writtenCdef.UvSecStrength],
+                Bits = writtenCdef.Bits,
+                YPriStrength = writtenCdef.Combos.Select(combo => combo.YPriStrength).ToArray(),
+                YSecStrength = writtenCdef.Combos.Select(combo => combo.YSecStrength).ToArray(),
+                UvPriStrength = writtenCdef.Combos.Select(combo => combo.UvPriStrength).ToArray(),
+                UvSecStrength = writtenCdef.Combos.Select(combo => combo.UvSecStrength).ToArray(),
             },
             LoopRestoration = new Av1LoopRestorationParams
             {
@@ -358,16 +355,42 @@ internal static class Av1FrameHeaderWriter
     /// this method can invert that remap unconditionally (<c>value == 4 ? 3 : value</c>) without a validity
     /// check here duplicating that one.</para>
     /// </summary>
-    private static void WriteCdefParams(Av1BitWriter writer, Av1CdefChoice cdef)
+    private static void WriteCdefParams(Av1BitWriter writer, Av1CdefFrameParams cdef)
     {
         writer.WriteBits((uint)(cdef.Damping - 3), 2); // cdef_damping_minus_3
-        writer.WriteBits(0, 2); // cdef_bits -> exactly 1 strength combo
+        writer.WriteBits((uint)cdef.Bits, 2); // cdef_bits
 
-        writer.WriteBits((uint)cdef.YPriStrength, 4); // cdef_y_pri_strength[0]
-        writer.WriteBits((uint)(cdef.YSecStrength == 4 ? 3 : cdef.YSecStrength), 2); // cdef_y_sec_strength[0]
-        writer.WriteBits((uint)cdef.UvPriStrength, 4); // cdef_uv_pri_strength[0]
-        writer.WriteBits((uint)(cdef.UvSecStrength == 4 ? 3 : cdef.UvSecStrength), 2); // cdef_uv_sec_strength[0]
+        // cdef_y_pri_strength[i]/cdef_y_sec_strength[i]/cdef_uv_pri_strength[i]/cdef_uv_sec_strength[i] for
+        // i in 0..(1<<cdef_bits)-1 (spec §5.9.19) -- Stage 2's real per-64x64-unit adaptive search (see
+        // Av1CdefSearch) can signal up to CDEF_MAX_STRENGTHS = 8 combos; Bits == 0 (exactly cdef.Combos.Length
+        // == 1) reproduces this encoder's original v1 single-combo behavior exactly.
+        int nbStrengths = 1 << cdef.Bits;
+        for (int i = 0; i < nbStrengths; i++)
+        {
+            var combo = cdef.Combos[i];
+            writer.WriteBits((uint)combo.YPriStrength, 4);
+            writer.WriteBits((uint)(combo.YSecStrength == 4 ? 3 : combo.YSecStrength), 2);
+            writer.WriteBits((uint)combo.UvPriStrength, 4);
+            writer.WriteBits((uint)(combo.UvSecStrength == 4 ? 3 : combo.UvSecStrength), 2);
+        }
     }
+}
+
+/// <summary>
+/// The full frame-wide CDEF parameter set <c>cdef_params()</c> (spec §5.9.19) signals: a shared damping value
+/// plus up to <c>CDEF_MAX_STRENGTHS</c> = 8 independently-tuned <see cref="Av1CdefChoice"/> combos, each real
+/// 64x64 unit choosing which one to use via its own <c>cdef_idx</c> literal (see
+/// <see cref="Av1TileEncoder"/>'s <c>WriteCdef</c>). <see cref="Bits"/> is spec's <c>cdef_bits</c> --
+/// <see cref="Combos"/> always has exactly <c>1 &lt;&lt; Bits</c> entries.
+/// </summary>
+internal sealed class Av1CdefFrameParams
+{
+    public required int Damping { get; init; }
+    public required int Bits { get; init; }
+    public required Av1CdefChoice[] Combos { get; init; }
+
+    /// <summary>No CDEF filtering anywhere in the frame -- <see cref="Bits"/> == 0, one strength-0/0 combo (see <see cref="Av1CdefChoice.Off"/>).</summary>
+    public static readonly Av1CdefFrameParams Off = new() { Damping = 3, Bits = 0, Combos = [Av1CdefChoice.Off] };
 }
 
 /// <summary>
