@@ -1,4 +1,5 @@
 using PeachImage.Formats.Avif.Decoding.Av1;
+using PeachImage.Formats.Avif.Encoder.Av1.Variance;
 using PeachImage.Formats.Avif.Internal;
 
 namespace PeachImage.Formats.Avif.Encoder.Av1;
@@ -2789,18 +2790,7 @@ internal static class Av1TileEncoder
         int x = c * 4;
         int y = r * 4;
 
-        long sum = 0;
-        long sse = 0;
-        for (int dy = 0; dy < hPixels; dy++)
-        {
-            int rowBase = ((y + dy) * s.YWidth) + x;
-            for (int dx = 0; dx < wPixels; dx++)
-            {
-                int px = s.SourceY[rowBase + dx];
-                sum += px;
-                sse += (long)px * px;
-            }
-        }
+        Av1BlockSumSquaresKernelSelector.Instance.Compute(s.SourceY, s.YWidth, x, y, wPixels, hPixels, out long sum, out long sse);
 
         int n = wPixels * hPixels;
         long variance = sse - ((sum * sum) / n);
@@ -2847,18 +2837,7 @@ internal static class Av1TileEncoder
         {
             for (int dx = 0; dx < sizePixels; dx += 4)
             {
-                long sum = 0;
-                long sse = 0;
-                for (int i = 0; i < 4; i++)
-                {
-                    int rowBase = ((y + dy + i) * s.YWidth) + x + dx;
-                    for (int j = 0; j < 4; j++)
-                    {
-                        int px = s.SourceY[rowBase + j];
-                        sum += px;
-                        sse += (long)px * px;
-                    }
-                }
+                Av1BlockSumSquaresKernelSelector.Instance.Compute(s.SourceY, s.YWidth, x + dx, y + dy, 4, 4, out long sum, out long sse);
 
                 long var4x4 = sse - ((sum * sum) / 16);
                 if (var4x4 < minVar4x4)

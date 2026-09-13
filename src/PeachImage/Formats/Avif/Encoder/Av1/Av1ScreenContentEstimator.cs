@@ -1,3 +1,5 @@
+using PeachImage.Formats.Avif.Encoder.Av1.Variance;
+
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
 /// <summary>
@@ -89,18 +91,7 @@ internal static class Av1ScreenContentEstimator
     /// <summary>libaom's <c>av1_get_perpixel_variance</c>: population variance of the block's raw luma values (no reference/prediction subtracted), rounded to the nearest integer -- matches <c>ROUND_POWER_OF_TWO(sse - sum*sum/N, log2(N))</c> exactly.</summary>
     private static long ComputeVariance(int[] lumaY, int planeWidth, int blockRow, int blockCol)
     {
-        long sum = 0;
-        long sumSq = 0;
-        for (int i = 0; i < BlockSize; i++)
-        {
-            int rowBase = ((blockRow + i) * planeWidth) + blockCol;
-            for (int j = 0; j < BlockSize; j++)
-            {
-                int value = lumaY[rowBase + j];
-                sum += value;
-                sumSq += (long)value * value;
-            }
-        }
+        Av1BlockSumSquaresKernelSelector.Instance.Compute(lumaY, planeWidth, blockCol, blockRow, BlockSize, BlockSize, out long sum, out long sumSq);
 
         long variance = sumSq - ((sum * sum) / BlockArea);
         return (variance + (BlockArea / 2)) / BlockArea;
