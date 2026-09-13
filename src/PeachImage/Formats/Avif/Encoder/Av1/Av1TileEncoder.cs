@@ -385,6 +385,45 @@ internal static class Av1TileEncoder
     }
 
     /// <summary>
+    /// Stage 2 (real per-64x64-unit CDEF search) prerequisite: identical to <see cref="EncodeTileTwoPass"/>
+    /// except <paramref name="applyInLoopFilters"/> runs between <see cref="DecideTile"/> and
+    /// <see cref="EmitTile"/> instead of the caller running deblocking/CDEF search only after this whole method
+    /// returns. This is the real ordering spec's own per-unit <c>cdef_idx</c> literal requires -- that value
+    /// must be written INSIDE the tile bitstream (during <see cref="EmitTile"/>), but can only be computed from
+    /// the frame's own post-deblock reconstruction, which is exactly what <paramref name="reconY"/>/
+    /// <paramref name="reconU"/>/<paramref name="reconV"/> hold once <see cref="DecideTile"/> returns (real
+    /// reconstruction is unconditional there, independent of <see cref="Av1EncodePhase"/> -- see
+    /// <see cref="DecideTile"/>'s own remarks) and <paramref name="applyInLoopFilters"/> has run. No
+    /// <see cref="TileState"/> access is needed by the callback: <paramref name="reconY"/>/<paramref name="reconU"/>/
+    /// <paramref name="reconV"/> are the exact same array references <see cref="BuildTileState"/> hands to
+    /// <see cref="TileState.ReconY"/>/<c>ReconU</c>/<c>ReconV</c> (never copied), so a caller-side search
+    /// mutating them in place here is observed by <see cref="EmitTile"/>'s own subsequent real reconstruction
+    /// reads exactly as if it had mutated <see cref="TileState"/> directly.
+    /// </summary>
+    internal static byte[] EncodeTileTwoPassWithInLoopFilters(
+        int[] yPlane, int yWidth, int yHeight,
+        int[]? uPlane, int[]? vPlane, int chromaWidth, int chromaHeight,
+        int[] reconY, int[]? reconU, int[]? reconV,
+        bool monoChrome, int baseQIdx, bool lossless, bool chroma444, int effort, bool allowScreenContentTools, bool allowIntrabc, int trueWidth, int trueHeight, Action<Av1BlockDecisionRecord>? onLeafCommitted,
+        Action applyInLoopFilters)
+    {
+        var state = BuildTileState(yPlane, yWidth, yHeight, uPlane, vPlane, chromaWidth, chromaHeight, reconY, reconU, reconV, monoChrome, baseQIdx, lossless, chroma444, effort, allowScreenContentTools, allowIntrabc, trueWidth, trueHeight, onLeafCommitted);
+
+        try
+        {
+            int sbSizeMi = lossless ? 32 : 16;
+            DecideTile(state, baseQIdx, sbSizeMi);
+            applyInLoopFilters();
+            EmitTile(state, sbSizeMi);
+            return state.Symbols.Flush();
+        }
+        finally
+        {
+            ReturnTileStateBuffers(state);
+        }
+    }
+
+    /// <summary>
     /// Two-pass tile-encoder architecture, Stage 1b-ii -- the Decide pass: walks every superblock in the
     /// frame exactly once, in the same order <see cref="EncodeTile"/>'s own fused loop already does, running
     /// every real search (<see cref="DecideSuperblockPartition"/>/<see cref="EncodePartitionForced"/>, which

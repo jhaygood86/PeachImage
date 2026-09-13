@@ -190,7 +190,7 @@ internal static class Av1FrameEncoder
         // trials -- each trial is now fully self-contained, with no possible cross-trial leakage, matching the
         // same "only ever run the hook against the SAME trial whose bytes are kept" principle the comment
         // above already established for onLeafCommitted itself.
-        (byte[] Bytes, List<Av1BlockDecisionRecord>? Leaves, int[] ReconY, int[]? ReconU, int[]? ReconV) EncodeTileTrial(bool trialScreenContentTools, bool trialIntrabc)
+        (byte[] Bytes, List<Av1BlockDecisionRecord>? Leaves, int[] ReconY, int[]? ReconU, int[]? ReconV, int LoopFilterLevel0, int LoopFilterLevel1, int LoopFilterLevelU, int LoopFilterLevelV, Av1CdefChoice Cdef) EncodeTileTrial(bool trialScreenContentTools, bool trialIntrabc)
         {
             // Seeded from the real (already edge-replicated, via PadPlane) source planes, not zero-filled --
             // a real gap found and fixed this round: a lossless leaf whose own coding-block node falls
@@ -235,14 +235,45 @@ internal static class Av1FrameEncoder
             // "build as a parallel path, verify, then make it the only one" discipline. EncodeTile itself is
             // kept, unused by any production call site, as the reference implementation Stage 1b-ii's own
             // parity tests still check against.
+            //
+            // Stage 2 prerequisite (Round N+62): deblocking/CDEF search now runs INSIDE this per-trial call,
+            // between Decide and Emit (EncodeTileTwoPassWithInLoopFilters), rather than once after the fact on
+            // whichever trial happens to win -- the real ordering a genuine per-64x64-unit adaptive cdef_idx
+            // literal (written inside the tile bitstream during Emit) requires. Gated by trialIntrabc, not the
+            // eventual winner's own allowIntrabc, exactly mirroring spec's real "no loop_filter_params()/
+            // cdef_params() whenever this frame uses IntraBC" rule for THIS trial's own configuration -- real
+            // aomenc's own per-trial cost accounting would do the same, and it costs nothing extra to be exact
+            // here rather than deferring to a post-hoc approximation.
+            int trialLf0 = 0, trialLf1 = 0, trialLfU = 0, trialLfV = 0;
+            var trialCdef = Av1CdefChoice.Off;
             List<Av1BlockDecisionRecord>? leaves = onLeafCommitted is null ? null : [];
-            byte[] bytes = Av1TileEncoder.EncodeTileTwoPass(
+            byte[] bytes = Av1TileEncoder.EncodeTileTwoPassWithInLoopFilters(
                 yPlane, paddedWidth, paddedHeight,
                 uPlane, vPlane, paddedChromaWidth, paddedChromaHeight,
                 trialReconY, trialReconU, trialReconV,
                 monoChrome, baseQIdx, lossless, chroma444, effort, trialScreenContentTools, trialIntrabc,
-                trueWidth: headerWidth, trueHeight: headerHeight, onLeafCommitted: leaves is null ? null : leaves.Add);
-            return (bytes, leaves, trialReconY, trialReconU, trialReconV);
+                trueWidth: headerWidth, trueHeight: headerHeight, onLeafCommitted: leaves is null ? null : leaves.Add,
+                applyInLoopFilters: () =>
+                {
+                    if (!lossless && !trialIntrabc)
+                    {
+                        (trialLf0, trialLf1, trialLfU, trialLfV) = Av1InLoopFilterSearch.SearchAndApply(
+                            trialReconY, trialReconU, trialReconV,
+                            yPlane, uPlane, vPlane,
+                            paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
+                            monoChrome, baseQIdx);
+
+                        // CDEF (spec §7.15) runs after deblocking, per spec's own filter ordering
+                        // (Av1FrameDecoder.DecodeTileGroup applies them in exactly this order) -- reconY/U/V
+                        // already reflect the chosen deblocking levels at this point.
+                        trialCdef = Av1CdefSearch.SearchAndApply(
+                            trialReconY, trialReconU, trialReconV,
+                            yPlane, uPlane, vPlane,
+                            paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
+                            monoChrome, baseQIdx, trialLf0, trialLf1, trialLfU, trialLfV);
+                    }
+                });
+            return (bytes, leaves, trialReconY, trialReconU, trialReconV, trialLf0, trialLf1, trialLfU, trialLfV, trialCdef);
         }
 
         bool allowScreenContentTools = heuristicScreenContentTools;
@@ -253,16 +284,17 @@ internal static class Av1FrameEncoder
         int[] reconY = trial.ReconY;
         int[]? reconU = trial.ReconU;
         int[]? reconV = trial.ReconV;
+        int loopFilterLevel0 = trial.LoopFilterLevel0, loopFilterLevel1 = trial.LoopFilterLevel1, loopFilterLevelU = trial.LoopFilterLevelU, loopFilterLevelV = trial.LoopFilterLevelV;
+        var cdefChoice = trial.Cdef;
 
         // The real trial itself: the heuristic above only gates whether this ever runs at all (an image the
         // heuristic already ruled out as screen-content-like never pays this extra encode cost) -- once it
         // says yes, don't just trust it. Try genuinely turning the tools back off (and, separately, IntraBC
         // off while keeping palette on) and keep whichever REAL committed byte count is actually smaller.
         // Each trial gets its own fresh reconY/U/V (see EncodeTileTrial's own remarks) -- reconY/U/V here are
-        // reassigned to whichever trial's own arrays actually won, in lockstep with tileBytes/winningLeaves,
-        // purely so the non-lossless deblocking/CDEF code below (the only remaining reader of these names)
-        // keeps working unchanged; lossless itself never reads reconY/U/V again after this point regardless
-        // of which trial's own arrays end up referenced here.
+        // reassigned to whichever trial's own arrays actually won, in lockstep with tileBytes/winningLeaves;
+        // loopFilterLevel*/cdefChoice are reassigned the same way, now that each trial computes its own
+        // deblocking/CDEF search in place of a single post-hoc search on the eventual winner (Round N+62).
         // Applies equally to lossless and non-lossless now: both palette (exact-match only for non-lossless)
         // and IntraBC (exact-match only for non-lossless) share this same real trial-comparison structure.
         if (heuristicScreenContentTools)
@@ -275,6 +307,11 @@ internal static class Av1FrameEncoder
                 reconY = withoutTools.ReconY;
                 reconU = withoutTools.ReconU;
                 reconV = withoutTools.ReconV;
+                loopFilterLevel0 = withoutTools.LoopFilterLevel0;
+                loopFilterLevel1 = withoutTools.LoopFilterLevel1;
+                loopFilterLevelU = withoutTools.LoopFilterLevelU;
+                loopFilterLevelV = withoutTools.LoopFilterLevelV;
+                cdefChoice = withoutTools.Cdef;
                 allowScreenContentTools = false;
                 allowIntrabc = false;
             }
@@ -289,6 +326,11 @@ internal static class Av1FrameEncoder
                     reconY = withoutIntrabc.ReconY;
                     reconU = withoutIntrabc.ReconU;
                     reconV = withoutIntrabc.ReconV;
+                    loopFilterLevel0 = withoutIntrabc.LoopFilterLevel0;
+                    loopFilterLevel1 = withoutIntrabc.LoopFilterLevel1;
+                    loopFilterLevelU = withoutIntrabc.LoopFilterLevelU;
+                    loopFilterLevelV = withoutIntrabc.LoopFilterLevelV;
+                    cdefChoice = withoutIntrabc.Cdef;
                     allowScreenContentTools = true;
                     allowIntrabc = false;
                 }
@@ -303,44 +345,12 @@ internal static class Av1FrameEncoder
             }
         }
 
-        // Deblocking (spec §7.14) is a lossy-only tool -- codedLossless's own short-circuit means
-        // loop_filter_params() never even reaches the bitstream at lossless (see Av1FrameHeaderWriter.Write's
-        // own lossless remarks), so there's nothing to search for there. Chooses and applies the filter to
-        // reconY/U/V in place (see Av1InLoopFilterSearch.SearchAndApply's remarks) *before* the frame header
-        // is written, so the header can signal the real, chosen level -- Av1TileEncoder.EncodeTile already
-        // finished producing every pixel these buffers will ever hold, so nothing about the tile's own
-        // (already-flushed) bitstream depends on this running afterward.
-        //
-        // Also skipped whenever allowIntrabc: real AV1 forbids both loop_filter_params() and cdef_params()
-        // on any frame using IntraBC, regardless of losslessness (Av1FrameHeaderWriter.Write's own
-        // `!lossless && !allowIntrabc` gates already correctly discard whatever this search would have
-        // chosen), so running these real, non-trivial per-frame searches here would be pure wasted work for
-        // an IntraBc-enabled non-lossless frame -- not a correctness fix (the header-writer gate alone
-        // already prevents any bitstream desync), purely avoiding paying for a result that could never be
-        // used.
-        int loopFilterLevel0 = 0, loopFilterLevel1 = 0, loopFilterLevelU = 0, loopFilterLevelV = 0;
-        var cdefChoice = Av1CdefChoice.Off;
-        if (!lossless && !allowIntrabc)
-        {
-            (loopFilterLevel0, loopFilterLevel1, loopFilterLevelU, loopFilterLevelV) = Av1InLoopFilterSearch.SearchAndApply(
-                reconY, reconU, reconV,
-                yPlane, uPlane, vPlane,
-                paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
-                monoChrome, baseQIdx);
-
-            // CDEF (spec §7.15) runs after deblocking, per spec's own filter ordering (Av1FrameDecoder.
-            // DecodeTileGroup applies them in exactly this order) -- reconY/U/V already reflect the chosen
-            // deblocking levels at this point, so Av1CdefSearch starts from that, not the pre-deblock
-            // reconstruction. Updates reconY/U/V in place with the winning candidate's content (see
-            // Av1CdefSearch.SearchAndApply's own buffer-ownership remarks for why it copies rather than
-            // reassigning these arrays).
-            cdefChoice = Av1CdefSearch.SearchAndApply(
-                reconY, reconU, reconV,
-                yPlane, uPlane, vPlane,
-                paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
-                monoChrome, baseQIdx, loopFilterLevel0, loopFilterLevel1, loopFilterLevelU, loopFilterLevelV);
-        }
-
+        // Deblocking (spec §7.14) and CDEF (spec §7.15) were already searched and applied to reconY/U/V in
+        // place, per-trial (Round N+62 -- see EncodeTileTrial's own applyInLoopFilters remarks) rather than
+        // once here on whichever trial happened to win; loopFilterLevel*/cdefChoice above already carry the
+        // winning trial's own real result. Both are lossy-only (codedLossless's own short-circuit means
+        // loop_filter_params()/cdef_params() never reach the bitstream at lossless) and skipped whenever
+        // allowIntrabc (real AV1 forbids both on any IntraBC frame, regardless of losslessness).
         byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(headerWidth, headerHeight, monoChrome, chroma444, enableCdef: !lossless, use128x128Superblock: lossless, enableRestoration: lossless, colorPrimaries, transferCharacteristics, chromaSamplePosition);
 
         var frameHeaderWriter = new Av1BitWriter();
