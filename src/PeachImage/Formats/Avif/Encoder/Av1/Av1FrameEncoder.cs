@@ -229,8 +229,14 @@ internal static class Av1FrameEncoder
             int[]? trialReconU = monoChrome ? null : (int[])uPlane!.Clone();
             int[]? trialReconV = monoChrome ? null : (int[])vPlane!.Clone();
 
+            // Two-pass tile-encoder architecture, Stage 1b-ii (Round N+61): switched from the fused
+            // Av1TileEncoder.EncodeTile to the verified-byte-identical EncodeTileTwoPass (Round N+60's own
+            // 17-case parity suite, plus a full corpus/lossy-parity run, both green) -- per the plan's own
+            // "build as a parallel path, verify, then make it the only one" discipline. EncodeTile itself is
+            // kept, unused by any production call site, as the reference implementation Stage 1b-ii's own
+            // parity tests still check against.
             List<Av1BlockDecisionRecord>? leaves = onLeafCommitted is null ? null : [];
-            byte[] bytes = Av1TileEncoder.EncodeTile(
+            byte[] bytes = Av1TileEncoder.EncodeTileTwoPass(
                 yPlane, paddedWidth, paddedHeight,
                 uPlane, vPlane, paddedChromaWidth, paddedChromaHeight,
                 trialReconY, trialReconU, trialReconV,

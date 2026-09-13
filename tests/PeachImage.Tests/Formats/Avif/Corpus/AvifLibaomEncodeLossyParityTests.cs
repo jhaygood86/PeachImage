@@ -1,5 +1,6 @@
+using System.Collections.Concurrent;
 using System.Globalization;
-using System.Text;
+using System.Threading;
 using PeachImage.Formats.Avif;
 using PeachImage.Formats.Avif.Container;
 using PeachImage.Formats.Avif.Encoder.Av1;
@@ -39,11 +40,19 @@ public class AvifLibaomEncodeLossyParityTests
         var inputs = AvifLibaomEncodeLossyParityBaseline.EnumerateInputs();
         Assert.NotEmpty(inputs);
 
-        var failures = new StringBuilder();
+        // Each file's decode/encode/round-trip is fully independent (own local buffers; the shared
+        // ArrayPool<int> instances backing the encoder's scratch buffers are inherently thread-safe, and the
+        // encoder itself holds no mutable static state), so this runs across all available cores instead of
+        // one file at a time -- this loop alone can otherwise dominate this test's real-world wall time given
+        // the encoder's own scalar, no-SIMD, two-pass-doubled per-file cost (SIMD is deliberately scoped as
+        // this project's own last phase, see the master plan's Phase 6 remarks).
+        var failures = new ConcurrentQueue<string>();
         int compared = 0;
 
-        foreach (var (key, path) in inputs)
+        Parallel.ForEach(inputs, item =>
         {
+            var (key, path) = item;
+
             Image? source;
             try
             {
@@ -52,22 +61,22 @@ public class AvifLibaomEncodeLossyParityTests
             }
             catch (AvifDecodingException)
             {
-                continue; // Already covered by AvifCorpusTests' own graceful-decode check.
+                return; // Already covered by AvifCorpusTests' own graceful-decode check.
             }
             catch (AvifUnsupportedFeatureException)
             {
-                continue; // Out of this decoder's current scope -- nothing for this encode-side check to exercise.
+                return; // Out of this decoder's current scope -- nothing for this encode-side check to exercise.
             }
 
             using (source)
             {
                 if (source.PixelFormat != PixelFormat.Rgb24 || source.Width <= 0 || source.Height <= 0)
                 {
-                    continue; // See AvifLibaomEncodeLossyParityBaseline's identical scope note.
+                    return; // See AvifLibaomEncodeLossyParityBaseline's identical scope note.
                 }
 
                 byte[] rgb = source.GetPixelSpan().ToArray();
-                compared++;
+                Interlocked.Increment(ref compared);
 
                 Av1EncodedFrame frame;
                 try
@@ -76,8 +85,8 @@ public class AvifLibaomEncodeLossyParityTests
                 }
                 catch (Exception ex)
                 {
-                    failures.AppendLine(CultureInfo.InvariantCulture, $"  {key}: PeachImage encode threw {ex.GetType().Name}: {ex.Message}");
-                    continue;
+                    failures.Enqueue($"  {key}: PeachImage encode threw {ex.GetType().Name}: {ex.Message}");
+                    return;
                 }
 
                 using var avifStream = new MemoryStream();
@@ -89,27 +98,27 @@ public class AvifLibaomEncodeLossyParityTests
                     using var roundTripped = AvifDecoder.Decode(avifStream);
                     if (roundTripped.Width != source.Width || roundTripped.Height != source.Height || roundTripped.PixelFormat != PixelFormat.Rgb24)
                     {
-                        failures.AppendLine(CultureInfo.InvariantCulture, $"  {key}: round-tripped dimensions/format differ from source");
-                        continue;
+                        failures.Enqueue($"  {key}: round-tripped dimensions/format differ from source");
+                        return;
                     }
 
                     double psnr = ComputePsnrDb(rgb, roundTripped.GetPixelSpan());
                     if (psnr < MinPsnrDb)
                     {
-                        failures.AppendLine(CultureInfo.InvariantCulture, $"  {key}: round-tripped PSNR {psnr:F2} dB below required {MinPsnrDb} dB");
+                        failures.Enqueue($"  {key}: round-tripped PSNR {psnr:F2} dB below required {MinPsnrDb} dB");
                     }
                 }
                 catch (Exception ex)
                 {
-                    failures.AppendLine(CultureInfo.InvariantCulture, $"  {key}: round-trip decode threw {ex.GetType().Name}: {ex.Message}");
+                    failures.Enqueue($"  {key}: round-trip decode threw {ex.GetType().Name}: {ex.Message}");
                 }
             }
-        }
+        });
 
         Assert.SkipWhen(compared == 0, "No corpus file was both decodable and in this encoder's current Rgb24 scope.");
         Assert.True(
-            failures.Length == 0,
-            $"Lossy encode-then-decode round-trip failed for {failures.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Length} of {compared} files:\n{failures}");
+            failures.IsEmpty,
+            $"Lossy encode-then-decode round-trip failed for {failures.Count} of {compared} files:\n{string.Join('\n', failures)}");
     }
 
     [Fact]
@@ -143,22 +152,25 @@ public class AvifLibaomEncodeLossyParityTests
             $"{AvifLibaomEncodeLossyParityBaseline.WriteModeVariable}=write (requires a local aomenc.exe -- see " +
             $"{AvifLibaomEncodeLossyParityBaseline.AomencPathVariable}).");
 
-        var failures = new StringBuilder();
+        var failures = new ConcurrentQueue<string>();
         int compared = 0;
         long totalReference = 0;
         long totalActual = 0;
 
-        foreach (var (key, path) in inputs)
+        // See Encode_RoundTripsWithReasonablePsnr's own remarks on why per-file work is safe to parallelize.
+        Parallel.ForEach(inputs, item =>
         {
+            var (key, path) = item;
+
             if (!baseline.TryGetValue(key, out var recorded))
             {
-                failures.AppendLine(CultureInfo.InvariantCulture, $"  {key}: not in the baseline (new fixture?)");
-                continue;
+                failures.Enqueue($"  {key}: not in the baseline (new fixture?)");
+                return;
             }
 
             if (recorded.Result == AvifLibaomEncodeLossyParityBaseline.SkippedMarker)
             {
-                continue;
+                return;
             }
 
             string[] parts = recorded.Result.Split(':');
@@ -166,8 +178,8 @@ public class AvifLibaomEncodeLossyParityTests
                 || !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int referenceBytes)
                 || !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int recordedActualBytes))
             {
-                failures.AppendLine(CultureInfo.InvariantCulture, $"  {key}: malformed baseline record '{recorded.Result}'");
-                continue;
+                failures.Enqueue($"  {key}: malformed baseline record '{recorded.Result}'");
+                return;
             }
 
             using var stream = File.OpenRead(path);
@@ -181,20 +193,19 @@ public class AvifLibaomEncodeLossyParityTests
             }
             catch (Exception ex)
             {
-                failures.AppendLine(CultureInfo.InvariantCulture, $"  {key}: PeachImage encode threw {ex.GetType().Name}: {ex.Message}");
-                continue;
+                failures.Enqueue($"  {key}: PeachImage encode threw {ex.GetType().Name}: {ex.Message}");
+                return;
             }
 
-            compared++;
-            totalReference += referenceBytes;
-            totalActual += currentActualBytes;
+            Interlocked.Increment(ref compared);
+            Interlocked.Add(ref totalReference, referenceBytes);
+            Interlocked.Add(ref totalActual, currentActualBytes);
 
             if (currentActualBytes != recordedActualBytes)
             {
-                failures.AppendLine(CultureInfo.InvariantCulture,
-                    $"  {key}: PeachImage's own byte count changed ({recordedActualBytes} -> {currentActualBytes}; aomenc reference={referenceBytes})");
+                failures.Enqueue($"  {key}: PeachImage's own byte count changed ({recordedActualBytes} -> {currentActualBytes}; aomenc reference={referenceBytes})");
             }
-        }
+        });
 
         Assert.SkipWhen(compared == 0, "No corpus file had a comparable (non-skipped) baseline record.");
 
@@ -203,9 +214,9 @@ public class AvifLibaomEncodeLossyParityTests
             : string.Empty;
 
         Assert.True(
-            failures.Length == 0,
-            $"PeachImage's own lossy encoded byte count changed for {failures.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Length} of {compared} files " +
-            $"(a deliberate improvement or an accidental regression -- either way, review and regenerate the baseline with {AvifLibaomEncodeLossyParityBaseline.WriteModeVariable}=write):\n{failures}{aggregate}");
+            failures.IsEmpty,
+            $"PeachImage's own lossy encoded byte count changed for {failures.Count} of {compared} files " +
+            $"(a deliberate improvement or an accidental regression -- either way, review and regenerate the baseline with {AvifLibaomEncodeLossyParityBaseline.WriteModeVariable}=write):\n{string.Join('\n', failures)}{aggregate}");
     }
 
     private static double ComputePsnrDb(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b)

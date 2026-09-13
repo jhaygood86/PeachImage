@@ -450,6 +450,14 @@ internal static class Av1TileEncoder
     /// begins -- without this, every leaf's IntraBC search here would see the ENTIRE frame's positions
     /// (already fully populated by Decide), including leaves that come later in bitstream order, which a real
     /// decoder could never do.</description></item>
+    /// <item><description><see cref="TileState.Written"/> (<see cref="IsSourceFootprintWritten"/>'s own
+    /// authoritative "really committed so far" record, the same real-decode-corruption guard its own remarks
+    /// describe) is exactly the same class of whole-frame-accumulating state as
+    /// <see cref="TileState.PositionsBySize"/> above, and needs the identical treatment: by the time
+    /// <see cref="DecideTile"/> finishes, every mi position in the frame is marked written, so without an
+    /// explicit reset here <see cref="IsSourceFootprintWritten"/> would silently pass for every candidate
+    /// during Emit too, defeating the exact causality check it exists to enforce and reintroducing the same
+    /// real round-trip decode corruption its own doc comment already once fixed.</description></item>
     /// </list>
     /// Real bitstream writes now fire for real (<see cref="Av1EncodePhase.Emit"/> unblocks them at every
     /// gated call site); decide-tracking writes are correctly suppressed the same way.
@@ -459,6 +467,7 @@ internal static class Av1TileEncoder
         state.Phase = Av1EncodePhase.Emit;
         state.PositionsBySize.Clear();
         state.IntrabcSignatureIndex.Clear();
+        Array.Clear(state.Written);
 
         int superblockIndex = 0;
         for (int r = 0; r < state.MiRows; r += sbSizeMi)
@@ -7531,7 +7540,13 @@ internal static class Av1TileEncoder
             }
         }
 
-        if (s.OnLeafCommitted is not null)
+        // Two-pass tile-encoder architecture, Stage 1b-ii -- see Av1EncodePhase's own remarks. This
+        // diagnostic hook represents "this leaf's decision is now final and committed" -- true only once,
+        // during real emission (Emit or the still-fused Fused phase), never during a preliminary Decide
+        // pass. Without this gate, a future EmitTile re-run would fire this hook a second time per leaf
+        // (identical content, per this stage's own byte-identical verification, but still a real behavioral
+        // change for any test-only consumer expecting exactly one record per leaf).
+        if (s.OnLeafCommitted is not null && s.Phase != Av1EncodePhase.Decide)
         {
             s.OnLeafCommitted(new Av1BlockDecisionRecord
             {
@@ -8534,7 +8549,8 @@ internal static class Av1TileEncoder
             }
         }
 
-        if (s.OnLeafCommitted is not null)
+        // Two-pass tile-encoder architecture, Stage 1b-ii -- see EncodeLeaf's own identical gate remarks.
+        if (s.OnLeafCommitted is not null && s.Phase != Av1EncodePhase.Decide)
         {
             // EstimatedCost is deliberately omitted (left null) here: TileState.PartitionDecisions is keyed
             // by the *square parent's* own (r, c, sizeMi) that chose Horz/Vert, not by either individual
