@@ -1,3 +1,5 @@
+using PeachImage.Formats.Avif.Decoding.Av1.IntraPrediction;
+
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
 /// <summary>
@@ -17,6 +19,9 @@ internal sealed class Av1EdgeArray
         get => _data[i + Offset];
         set => _data[i + Offset] = value;
     }
+
+    /// <summary>A contiguous view of <c>this[0..length)</c>, for callers (SIMD kernels) that need a real span rather than per-element indexing.</summary>
+    public ReadOnlySpan<int> AsSpan(int length) => _data.AsSpan(Offset, length);
 }
 
 /// <summary>
@@ -275,21 +280,15 @@ internal static class Av1IntraPrediction
         }
     }
 
-    /// <summary><c>Basic intra prediction process</c> (spec §7.11.2.2) -- PAETH_PRED.</summary>
+    /// <summary>
+    /// <c>Basic intra prediction process</c> (spec §7.11.2.2) -- PAETH_PRED. Dispatches to whichever
+    /// <see cref="IAv1PaethKernel"/> tier <see cref="Av1PaethKernelSelector"/> picked for this hardware --
+    /// see <see cref="ScalarAv1PaethKernel"/> for the reference implementation every tier must match
+    /// bit-exactly.
+    /// </summary>
     private static void PredictPaeth(int[] pred, int w, int h, Av1EdgeArray aboveRow, Av1EdgeArray leftCol)
     {
-        for (int i = 0; i < h; i++)
-        {
-            for (int j = 0; j < w; j++)
-            {
-                int baseVal = aboveRow[j] + leftCol[i] - aboveRow[-1];
-                int pLeft = Math.Abs(baseVal - leftCol[i]);
-                int pTop = Math.Abs(baseVal - aboveRow[j]);
-                int pTopLeft = Math.Abs(baseVal - aboveRow[-1]);
-
-                pred[(i * w) + j] = pLeft <= pTop && pLeft <= pTopLeft ? leftCol[i] : pTop <= pTopLeft ? aboveRow[j] : aboveRow[-1];
-            }
-        }
+        Av1PaethKernelSelector.Instance.Apply(pred.AsSpan(0, w * h), w, h, aboveRow.AsSpan(w), leftCol.AsSpan(h), aboveRow[-1]);
     }
 
     /// <summary><c>Recursive intra prediction process</c> (spec §7.11.2.3) -- filter-intra.</summary>
