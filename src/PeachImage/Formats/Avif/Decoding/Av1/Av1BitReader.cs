@@ -119,15 +119,5 @@ internal sealed class Av1BitReader
         return bit;
     }
 
-    private static int FloorLog2(uint x)
-    {
-        int s = 0;
-        while (x != 0)
-        {
-            x >>= 1;
-            s++;
-        }
-
-        return s - 1;
-    }
+    private static int FloorLog2(uint x) => x == 0 ? -1 : System.Numerics.BitOperations.Log2(x);
 }

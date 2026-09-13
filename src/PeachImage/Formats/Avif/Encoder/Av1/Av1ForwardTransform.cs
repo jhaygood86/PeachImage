@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using PeachImage.Formats.Avif.Decoding.Av1;
 using PeachImage.Formats.Avif.Encoder.Av1.Transform;
 
@@ -66,6 +67,15 @@ internal static class Av1ForwardTransform
     /// <c>Av1ForwardQuantizer</c> is responsible for the forward quantization step down to entropy-codable
     /// levels.
     /// </summary>
+    // Every stackalloc'd buffer below (intermediate/rowBuf/rowOut/colBuf/colOut) is fully overwritten,
+    // element by element, before any read -- the row loop fills rowBuf then overwrites it via ApplyMatrix's
+    // output (rowOut), which itself unconditionally writes output[row] for every row (see
+    // Vector256Av1MatrixVectorKernel.Apply/ScalarAv1MatrixVectorKernel.Apply); same reasoning for the column
+    // pass. So the runtime's default zero-init of stack-allocated locals is provably redundant work here --
+    // this method is called once per transform block during every RDO trial (thousands of times per encode),
+    // and profiling showed that zero-init (`ZeroMemoryInternal`) dominating over 90% of lossy encode's CPU
+    // self-time. Matches the existing [SkipLocalsInit] precedent in this repo's Jpeg AAN DCT kernels.
+    [SkipLocalsInit]
     public static void Forward2D(ReadOnlySpan<int> residual, Span<int> coeffOut, int size, int txType = Av1TxType.DctDct)
     {
         int txSz = SizeToTxSz(size);

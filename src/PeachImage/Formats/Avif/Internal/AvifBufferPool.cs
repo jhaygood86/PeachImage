@@ -6,9 +6,9 @@ namespace PeachImage.Formats.Avif.Internal;
 /// A dedicated <see cref="ArrayPool{T}"/> for AVIF decode's large per-plane working buffers, mirroring
 /// <c>Webp.Internal.WebpBufferPool</c>. Raises <see cref="ArrayPool{T}.Shared"/>'s default 1 MiB max
 /// pooled array length, which would otherwise silently fall back to a fresh heap allocation for any AV1
-/// plane above roughly 512x512 pixels — the exact large-image case pooling is meant to help most. Not yet
-/// used (no pixel decode exists until Phase 2+); scaffolded now so later phases have a shared pool to rent
-/// from from the start rather than introducing ad hoc pooling per component.
+/// plane above roughly 512x512 pixels — the exact large-image case pooling is meant to help most. Actively
+/// used by both decode (<c>Av1FrameDecoder</c>, <c>Av1Cdef</c>, <c>Av1LoopRestoration</c>, <c>Av1TileComposer</c>)
+/// and encode (<c>Av1TileEncoder</c>'s per-tile scratch, see <see cref="SharedInt32"/>'s own remarks).
 /// </summary>
 internal static class AvifBufferPool
 {

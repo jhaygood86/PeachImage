@@ -10,7 +10,9 @@ namespace PeachImage.Benchmarks;
 /// process-spawn <c>ffmpeg</c> timing comparison, called out with its own overhead caveat rather than
 /// presented as a directly comparable BenchmarkDotNet row. Covers 8-bit 4:2:0 photographic content, with
 /// alpha, and a small-image scenario to surface fixed per-decode overhead separately from throughput on
-/// large images -- the same scenario shape as <c>WebpDecodeBenchmarks</c>.
+/// large images -- the same scenario shape as <c>WebpDecodeBenchmarks</c>. Also covers a
+/// <see cref="AvifEncoderOptions.Lossless"/>-encoded source (4:4:4, WHT/IntraBC/palette path), since that's
+/// a materially different decode path from the default 4:2:0/DCT content the other cases exercise.
 /// </summary>
 [MemoryDiagnoser]
 [GroupBenchmarksBy(BenchmarkDotNet.Configs.BenchmarkLogicalGroupRule.ByCategory)]
@@ -19,6 +21,7 @@ public class AvifDecodeBenchmarks
 {
     private byte[] _photographic420 = null!;
     private byte[] _photographicAlpha = null!;
+    private byte[] _photographicLossless = null!;
     private byte[] _small = null!;
 
     [GlobalSetup]
@@ -27,6 +30,7 @@ public class AvifDecodeBenchmarks
         string assetsDir = Path.Combine(AppContext.BaseDirectory, "Assets");
         _photographic420 = File.ReadAllBytes(Path.Combine(assetsDir, "photo_1920x1080_420.avif"));
         _photographicAlpha = File.ReadAllBytes(Path.Combine(assetsDir, "photo_1920x1080_alpha.avif"));
+        _photographicLossless = File.ReadAllBytes(Path.Combine(assetsDir, "photo_1920x1080_lossless.avif"));
         _small = File.ReadAllBytes(Path.Combine(assetsDir, "small_32x24.avif"));
     }
 
@@ -51,6 +55,14 @@ public class AvifDecodeBenchmarks
     public Image PeachImage_Decode_Small()
     {
         using var stream = new MemoryStream(_small);
+        return AvifDecoder.Decode(stream);
+    }
+
+    [Benchmark(Baseline = true)]
+    [BenchmarkCategory("Photographic-Lossless")]
+    public Image PeachImage_Decode_PhotographicLossless()
+    {
+        using var stream = new MemoryStream(_photographicLossless);
         return AvifDecoder.Decode(stream);
     }
 }

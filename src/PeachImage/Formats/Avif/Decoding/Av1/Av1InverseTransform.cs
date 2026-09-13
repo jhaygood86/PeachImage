@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
@@ -113,6 +114,19 @@ internal static class Av1InverseTransform
     private static int[]? _permuteScratch;
 
     private static int[] PermuteScratch() => _permuteScratch ??= new int[64];
+
+    // Same reasoning as _permuteScratch above, for Inverse2D's own row/column scratch rows -- both bounded
+    // to 64 (the largest transform dimension) and reused across every one of a block's h rows / w columns
+    // instead of a fresh array per call.
+    [ThreadStatic]
+    private static int[]? _rowScratch;
+
+    [ThreadStatic]
+    private static int[]? _colScratch;
+
+    private static int[] RowScratch() => _rowScratch ??= new int[64];
+
+    private static int[] ColScratch() => _colScratch ??= new int[64];
 
     /// <summary><c>B(a, b, angle, flip, r)</c> butterfly rotation (spec §7.13.2.1).</summary>
     private static void B(int[] t, int a, int b, int angle, bool flip, int r)
@@ -667,6 +681,11 @@ internal static class Av1InverseTransform
     /// <c>64x64</c> row-major buffer, as written by <see cref="Av1Dequantizer.Dequantize"/>) into
     /// <paramref name="residual"/> (a flat <c>w x h</c> row-major buffer).
     /// </summary>
+    // `t` (the only stackalloc in this method) is fully overwritten, index by index, for j in [0, w) at the
+    // top of every row iteration below, before any read -- same reasoning as Av1ForwardTransform.Forward2D's
+    // own [SkipLocalsInit] (see that method's remarks), and this is the single hottest per-block call in the
+    // entire decoder (called via both real decode and every encoder-side RDO reconstruction trial).
+    [SkipLocalsInit]
     public static void Inverse2D(int[] dequant, int[] residual, int txSz, int planeTxType, bool lossless, int bitDepth)
     {
         int log2W = Av1TxDimensions.WidthLog2[txSz];
@@ -683,10 +702,10 @@ internal static class Av1InverseTransform
 
         // Every InverseDct/InverseAdst/InverseWht/InverseIdentity call below takes plain int[] (not
         // Span<int>) and only ever touches indices bounded by its own explicit n/w parameter, never
-        // t.Length -- so one w-length scratch array, allocated once and reused/overwritten for every one
-        // of the block's h rows, replaces what was previously a fresh w-length array allocated via
-        // ToArray() on every single row (an h-fold reduction in both allocation count and bytes).
-        var tRow = new int[w];
+        // tRow.Length -- so the shared 64-length scratch array (same pattern as _permuteScratch above),
+        // reused/overwritten for every one of the block's h rows, replaces what was previously a fresh
+        // w-length array allocated on every single call to Inverse2D.
+        var tRow = RowScratch();
 
         for (int i = 0; i < h; i++)
         {
@@ -754,7 +773,7 @@ internal static class Av1InverseTransform
             residual[k] = Math.Clamp(residual[k], -colBound, colBound - 1);
         }
 
-        var tCol = new int[h];
+        var tCol = ColScratch();
         for (int j = 0; j < w; j++)
         {
             for (int i = 0; i < h; i++)

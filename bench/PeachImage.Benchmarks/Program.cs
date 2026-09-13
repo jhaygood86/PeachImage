@@ -14,6 +14,11 @@ if (args.Length > 0 && string.Equals(args[0], "avif-profile", StringComparison.O
     return AvifProfileHarness.Run(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "avif-encode-profile", StringComparison.OrdinalIgnoreCase))
+{
+    return AvifEncodeProfileHarness.Run(args);
+}
+
 if (args.Length > 0 && string.Equals(args[0], "gif-profile", StringComparison.OrdinalIgnoreCase))
 {
     return GifProfileHarness.Run(args);
