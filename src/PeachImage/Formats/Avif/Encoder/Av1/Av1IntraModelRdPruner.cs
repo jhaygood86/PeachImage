@@ -1,3 +1,5 @@
+using PeachImage.Formats.Avif.Encoder.Av1.IntraModel;
+
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
 /// <summary>
@@ -37,49 +39,16 @@ internal static class Av1IntraModelRdPruner
     /// <c>aom_hadamard_4x4_c</c> (<c>aom_dsp/avg.c</c>) -- a real, distinct transform from this project's own
     /// lossless <see cref="Av1ForwardWht"/> (confirmed by reading libaom's own <c>av1_quick_txfm</c>/
     /// <c>wht_fwd_txfm</c>: the real lossless coding path and this SATD-estimate path deliberately use
-    /// <em>different</em> transforms, `aom_hadamard_4x4` here vs. the spec's own WHT for real coding), a
-    /// separable 4x4 transform built from two passes of a 4-point butterfly with an intermediate right-shift
-    /// (<c>hadamard_col4</c>), ported with the exact same index arithmetic as the original (column pass, then
-    /// a cross-column pass over the intermediate buffer, then a final transpose "to match SSE2 behavior" per
-    /// libaom's own comment) rather than simplified via abstract separable-transform reasoning, to avoid an
-    /// off-by-one/transpose-direction error in a construction this indirect.
+    /// <em>different</em> transforms, `aom_hadamard_4x4` here vs. the spec's own WHT for real coding).
+    /// Dispatches to whichever <see cref="IAv1Hadamard4x4Kernel"/> tier
+    /// <see cref="Av1Hadamard4x4KernelSelector"/> picked for this hardware -- see
+    /// <see cref="ScalarAv1Hadamard4x4Kernel"/> for the column/row butterfly plus final-transpose reference
+    /// implementation, and <see cref="Vector128Av1Hadamard4x4Kernel"/> for the SIMD port every tier must
+    /// match bit-exactly.
     /// </summary>
     internal static void Hadamard4x4(ReadOnlySpan<int> srcDiff, int srcStride, Span<int> coeff)
     {
-        Span<int> buffer = stackalloc int[16];
-        Span<int> buffer2 = stackalloc int[16];
-
-        for (int idx = 0; idx < 4; idx++)
-        {
-            HadamardCol4(srcDiff, idx, srcStride, buffer, idx * 4);
-        }
-
-        for (int idx = 0; idx < 4; idx++)
-        {
-            HadamardCol4(buffer, idx, 4, buffer2, idx * 4);
-        }
-
-        for (int i = 0; i < 4; i++)
-        {
-            for (int j = 0; j < 4; j++)
-            {
-                coeff[(i * 4) + j] = buffer2[(j * 4) + i];
-            }
-        }
-    }
-
-    /// <summary><c>hadamard_col4</c> (<c>aom_dsp/avg.c</c>) -- a 4-point butterfly with an intermediate right-shift-by-1 (C's arithmetic right shift on a signed value, reproduced exactly by C#'s own <c>&gt;&gt;</c> on <c>int</c>).</summary>
-    private static void HadamardCol4(ReadOnlySpan<int> src, int srcOffset, int stride, Span<int> dst, int dstOffset)
-    {
-        int b0 = (src[srcOffset + (0 * stride)] + src[srcOffset + (1 * stride)]) >> 1;
-        int b1 = (src[srcOffset + (0 * stride)] - src[srcOffset + (1 * stride)]) >> 1;
-        int b2 = (src[srcOffset + (2 * stride)] + src[srcOffset + (3 * stride)]) >> 1;
-        int b3 = (src[srcOffset + (2 * stride)] - src[srcOffset + (3 * stride)]) >> 1;
-
-        dst[dstOffset + 0] = b0 + b2;
-        dst[dstOffset + 1] = b1 + b3;
-        dst[dstOffset + 2] = b0 - b2;
-        dst[dstOffset + 3] = b1 - b3;
+        Av1Hadamard4x4KernelSelector.Instance.Apply(srcDiff, srcStride, coeff);
     }
 
     /// <summary><c>aom_satd_c</c> (<c>aom_dsp/avg.c</c>) -- sum of absolute transform-domain coefficients, no entropy modeling at all.</summary>
