@@ -146,14 +146,21 @@ internal static class Av1TileEncoder
     /// Computes the two libaom speed features that prune LUMA's own <see cref="CandidateModes"/> search --
     /// <see cref="Av1SpeedFeatures.IntraPruningWithHog"/> (populates <paramref name="directionalModeSkipMask"/>,
     /// see <see cref="Av1IntraHogPruner"/>'s own remarks) and <see cref="Av1SpeedFeatures.DisableSmoothIntra"/>
-    /// (<paramref name="skipSmoothVh"/>/<paramref name="skipSmoothPlain"/>) -- shared by <see cref="EstimateLumaCost"/>
-    /// and <see cref="EncodeLeaf"/>'s real search so both apply the identical restriction (an
-    /// estimate that considers a candidate the real commit will then prune away would bias the partition
-    /// decision toward an achievable-looking cost the real search can never actually deliver). Deliberately a
-    /// complete no-op (every output left at "don't prune anything") whenever <paramref name="lossless"/> is
-    /// false: <see cref="TileState.SpeedFeatures"/> is only ever meaningful for lossless (see
-    /// <c>EncodeTile</c>'s own <c>effort</c> parameter remarks), and non-lossless behavior must never change
-    /// as a side effect of this.
+    /// (<paramref name="skipSmoothVh"/>/<paramref name="skipSmoothPlain"/>) -- shared by <see cref="EstimateLumaCost"/>,
+    /// <see cref="EstimateRectLumaCost"/>, and <see cref="EncodeLeaf"/>'s real search so all three apply the
+    /// identical restriction (an estimate that considers a candidate the real commit will then prune away
+    /// would bias the partition decision toward an achievable-looking cost the real search can never actually
+    /// deliver). Deliberately a complete no-op (every output left at "don't prune anything") whenever
+    /// <paramref name="lossless"/> is false: <see cref="TileState.SpeedFeatures"/> is only ever meaningful for
+    /// lossless (see <c>EncodeTile</c>'s own <c>effort</c> parameter remarks), and non-lossless behavior must
+    /// never change as a side effect of this.
+    ///
+    /// <para><paramref name="widthPixels"/>/<paramref name="heightPixels"/> are independent (not a single
+    /// square <c>sizePixels</c>) so <see cref="EstimateRectLumaCost"/>'s rectangular (Horz/Vert) leaves can
+    /// share this exact same pruning, not just square ones -- <see cref="Av1IntraHogPruner.ComputeSkipMask"/>
+    /// (and the HOG histogram it builds) already takes independent width/height with no square assumption
+    /// anywhere in it, so this is a pure signature generalization, not a behavior change for the existing
+    /// square callers (which simply pass the same value twice).</para>
     ///
     /// <para>libaom's own comment on why SMOOTH_PRED needs special-casing here (<c>intra_mode_search.c</c>):
     /// "the functionality of filter intra modes and smooth prediction overlap. Hence smooth prediction is
@@ -163,7 +170,7 @@ internal static class Av1TileEncoder
     /// 0) -- a genuinely non-obvious interaction between two different fields, confirmed by directly reading
     /// libaom's own real mode loop rather than assumed from the field names alone.</para>
     /// </summary>
-    private static void ComputeLumaPruning(TileState s, bool lossless, int[] source, int stride, int x, int y, int sizePixels, Span<bool> directionalModeSkipMask, out bool skipSmoothVh, out bool skipSmoothPlain)
+    private static void ComputeLumaPruning(TileState s, bool lossless, int[] source, int stride, int x, int y, int widthPixels, int heightPixels, Span<bool> directionalModeSkipMask, out bool skipSmoothVh, out bool skipSmoothPlain)
     {
         skipSmoothVh = false;
         skipSmoothPlain = false;
@@ -174,7 +181,7 @@ internal static class Av1TileEncoder
 
         if (s.SpeedFeatures.IntraPruningWithHog > 0)
         {
-            Av1IntraHogPruner.ComputeSkipMask(source, stride, x, y, sizePixels, sizePixels, Av1IntraHogPruner.Thresh[s.SpeedFeatures.IntraPruningWithHog - 1], chromaSubsamplingScale: 1, directionalModeSkipMask);
+            Av1IntraHogPruner.ComputeSkipMask(source, stride, x, y, widthPixels, heightPixels, Av1IntraHogPruner.Thresh[s.SpeedFeatures.IntraPruningWithHog - 1], chromaSubsamplingScale: 1, directionalModeSkipMask);
         }
 
         skipSmoothVh = s.SpeedFeatures.DisableSmoothIntra;
@@ -1401,7 +1408,7 @@ internal static class Av1TileEncoder
         bool angleDeltaAllowed = sizeMi >= 2;
 
         Span<bool> directionalModeSkipMask = stackalloc bool[13];
-        ComputeLumaPruning(s, s.Lossless, s.SourceY, s.YWidth, x, y, sizePixels, directionalModeSkipMask, out bool skipSmoothVh, out bool skipSmoothPlain);
+        ComputeLumaPruning(s, s.Lossless, s.SourceY, s.YWidth, x, y, sizePixels, sizePixels, directionalModeSkipMask, out bool skipSmoothVh, out bool skipSmoothPlain);
 
         Span<long> topIntraModelRd = stackalloc long[4];
         int topModelCount = s.Lossless ? s.SpeedFeatures.TopIntraModelCountAllowed : 0;
@@ -1423,7 +1430,7 @@ internal static class Av1TileEncoder
             {
                 if (topModelCount > 0)
                 {
-                    long modelRd = ComputeIntraModelRd(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels, ptype: 0, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth: false, useRealBoundaryAvailability: false);
+                    long modelRd = ComputeIntraModelRd(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels / 4, sizePixels / 4, ptype: 0, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth: false, useRealBoundaryAvailability: false);
                     if (Av1IntraModelRdPruner.PruneIntraYMode(modelRd, ref bestModelRd, topIntraModelRd[..topModelCount]))
                     {
                         continue;
@@ -1649,7 +1656,7 @@ internal static class Av1TileEncoder
 
                 int subX4 = subX >> 2;
                 int subY4 = subY >> 2;
-                Av1CoefficientWriter.WriteCoeffs(trial, s.Cdf, levels, 4, ptype: 0, subX4, subY4, scratch, writeLumaTxType: null, blockSize: wMi * 4, blockHeight: hMi * 4, updateContext: true);
+                Av1CoefficientWriter.WriteCoeffs(ref trial, s.Cdf, levels, 4, ptype: 0, subX4, subY4, scratch, writeLumaTxType: null, blockSize: wMi * 4, blockHeight: hMi * 4, updateContext: true);
             }
         }
 
@@ -1670,15 +1677,31 @@ internal static class Av1TileEncoder
     /// this gap). Lossless-only (see <see cref="ComputeDecidePartition"/>'s Horz/Vert call site -- non-lossless
     /// never calls this).
     ///
-    /// <para>Deliberately NOT ported here, unlike the square path's own <see cref="EstimateLumaCost"/>: the
-    /// HOG-based directional pruning (<see cref="ComputeLumaPruning"/>) and the SATD-based shortlist
-    /// (<see cref="Av1IntraModelRdPruner"/>). A rectangular leaf is capped at 64x32/32x64 (at most 32
-    /// sub-blocks, versus the square path's worst case of 1024 for a 128x128 superblock kept whole), so a
-    /// plain exhaustive search over all ~61 mode/angle_delta combinations is cheap enough not to need pruning
-    /// -- and, given this project's own stated priority of byte-parity/size over speed, exhaustive is strictly
-    /// safer than risking a wrongly-pruned candidate the way the (reverted) SATD-only prescreen attempt
-    /// elsewhere in this project's history already demonstrated can happen. A real follow-up could add pruning
-    /// here purely for speed once this path's own correctness is well established.</para>
+    /// <para>Now pruned exactly like the square path's own <see cref="EstimateLumaCost"/> -- the same
+    /// <see cref="ComputeLumaPruning"/> HOG-based directional skip mask and <see cref="Av1IntraModelRdPruner"/>
+    /// SATD/model-RD top-N shortlist, generalized to independent <paramref name="wMi"/>/<paramref name="hMi"/>
+    /// rather than a single square dimension. This supersedes an earlier "exhaustive is safer" design: direct
+    /// confirmation against libaom's own source (<c>av1/encoder/intra_mode_search.c</c>'s
+    /// <c>av1_rd_pick_intra_sby_mode</c>) shows libaom uses this identical HOG+SATD combination for intra mode
+    /// search regardless of block shape -- its HOG feature extraction already reads the block's real
+    /// width/height, not an assumed square -- so this is genuine libaom parity for rectangular blocks, not a
+    /// new, untested pruning strategy. It is also *not* a repeat of the (reverted) SATD-only prescreen
+    /// attempt elsewhere in this project's history: that attempt used an isolated WHT-coefficient-magnitude
+    /// proxy with no HOG pre-filtering paired with it; this reuses the real Hadamard-SATD
+    /// (<see cref="Av1IntraModelRdPruner"/>) together with HOG, the exact combination already shipped and
+    /// proven safe for the square path.</para>
+    ///
+    /// <para>Deliberately still NOT ported: libaom's rectangular-specific partition/mode ML models
+    /// (<c>simple_motion_search_prune_rect</c>, <c>av1_ml_prune_rect_partition</c>,
+    /// <c>av1/encoder/partition_strategy.c</c>) -- confirmed by reading libaom's source that both are dead
+    /// code for an intra-only/still-image encode: each one's single call site is guarded by
+    /// <c>!frame_is_intra_only(cm)</c>, and the motion-search one additionally has a hard
+    /// <c>assert(!frame_is_intra_only(...))</c> in the primitive it calls. Porting either would mean adding
+    /// behavior libaom itself never runs for AVIF-style stills, the opposite of matching it. libaom's actual
+    /// intra-frame partition-level rect pruning is its CNN-based <c>intra_cnn_based_part_prune_level</c>,
+    /// which this project already ported as <see cref="Av1IntraCnnPartitionPruner"/> (wired into
+    /// <see cref="ComputeDecidePartition"/>'s <c>rectAllowed</c> output) -- so the only genuine gap was this
+    /// method's own mode-level search, now closed.</para>
     ///
     /// <para>Chroma stays DC_PRED-only for the *mode* search (unchanged) -- a real UV mode search for
     /// rectangular leaves is a separate, natural follow-up, not attempted here. Real chroma *cost*, though,
@@ -1693,14 +1716,38 @@ internal static class Av1TileEncoder
         bool angleDeltaAllowed = RectAngleDeltaAllowed(bSize);
         long bestCost = long.MaxValue;
 
+        int x = c * 4;
+        int y = r * 4;
+        Span<bool> directionalModeSkipMask = stackalloc bool[13];
+        ComputeLumaPruning(s, s.Lossless, s.SourceY, s.YWidth, x, y, wMi * 4, hMi * 4, directionalModeSkipMask, out bool skipSmoothVh, out bool skipSmoothPlain);
+
+        Span<long> topIntraModelRd = stackalloc long[4];
+        int topModelCount = s.Lossless ? s.SpeedFeatures.TopIntraModelCountAllowed : 0;
+        topIntraModelRd[..Math.Max(topModelCount, 0)].Fill(long.MaxValue);
+        long bestModelRd = long.MaxValue;
+
         foreach (int mode in CandidateModes)
         {
+            if (IsLumaModePruned(mode, directionalModeSkipMask, skipSmoothVh, skipSmoothPlain))
+            {
+                continue;
+            }
+
             bool directional = Av1IntraMode.IsDirectional(mode) && angleDeltaAllowed;
             int minDelta = directional ? -MaxAngleDelta : 0;
             int maxDelta = directional ? MaxAngleDelta : 0;
 
             for (int angleDelta = minDelta; angleDelta <= maxDelta; angleDelta++)
             {
+                if (topModelCount > 0)
+                {
+                    long modelRd = ComputeIntraModelRd(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, wMi, hMi, ptype: 0, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth: false, useRealBoundaryAvailability: false);
+                    if (Av1IntraModelRdPruner.PruneIntraYMode(modelRd, ref bestModelRd, topIntraModelRd[..topModelCount]))
+                    {
+                        continue;
+                    }
+                }
+
                 long cost = ComputeRectLumaCostForMode(s, r, c, wMi, hMi, mode, angleDelta, filterTypeSmooth: false, useRealBoundaryAvailability: false);
                 if (cost < bestCost)
                 {
@@ -2483,7 +2530,7 @@ internal static class Av1TileEncoder
 
                 int subX4 = subX >> 2;
                 int subY4 = subY >> 2;
-                Av1CoefficientWriter.WriteCoeffs(trial, s.Cdf, levels, 4, ptype, subX4, subY4, scratch, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels, updateContext: true);
+                Av1CoefficientWriter.WriteCoeffs(ref trial, s.Cdf, levels, 4, ptype, subX4, subY4, scratch, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels, updateContext: true);
             }
         }
 
@@ -2557,7 +2604,7 @@ internal static class Av1TileEncoder
                     Array.Copy(pred, i * 4, recon, ((subY + i) * planeWidth) + subX, 4);
                 }
 
-                Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype, subC, subR, realCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
+                Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype, subC, subR, realCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
                 Av1LocalReconstructor.Reconstruct(recon, planeWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
                 SetBlockDecoded(s, blockDecodedPlane, subR & s.SbMiMask, subC & s.SbMiMask, true);
             }
@@ -2936,7 +2983,7 @@ internal static class Av1TileEncoder
             int w4 = sizePixels >> 2;
             scratch.SeedFrom(realCtx, x4, w4, y4, w4);
             trial.Reset();
-            Av1CoefficientWriter.WriteCoeffs(trial, s.Cdf, levels, sizePixels, ptype, x4, y4, scratch, writeLumaTxType: null, updateContext: true);
+            Av1CoefficientWriter.WriteCoeffs(ref trial, s.Cdf, levels, sizePixels, ptype, x4, y4, scratch, writeLumaTxType: null, updateContext: true);
 
             return Av1RdCost.CombineCost(sse, trial.Bits, s.Lambda);
         }
@@ -2976,7 +3023,7 @@ internal static class Av1TileEncoder
 
                 int subX4 = (x + bx) >> 2;
                 int subY4 = (y + by) >> 2;
-                Av1CoefficientWriter.WriteCoeffs(trial, s.Cdf, levels, 4, ptype, subX4, subY4, scratch, writeLumaTxType: null, blockSize: sizePixels, updateContext: true);
+                Av1CoefficientWriter.WriteCoeffs(ref trial, s.Cdf, levels, 4, ptype, subX4, subY4, scratch, writeLumaTxType: null, blockSize: sizePixels, updateContext: true);
             }
         }
 
@@ -3027,18 +3074,6 @@ internal static class Av1TileEncoder
     /// </summary>
     private static long ComputeLosslessWholeLeafCostPerSubBlock(TileState s, int[] source, int planeWidth, int planeHeight, int r, int c, int x, int y, int sizePixels, int ptype, Av1CoefficientWriter.PlaneContext realCtx, int mode, int angleDelta, bool useFilterIntra, int filterIntraMode, bool filterTypeSmooth, bool useRealBoundaryAvailability, bool useAdaptiveCdf = false, int heightPixels = 0)
     {
-        // heightPixels defaults to 0, meaning "same as sizePixels" (a square leaf -- every pre-existing call
-        // site), mirroring Av1CoefficientWriter.WriteCoeffs's own blockHeight convention exactly. A nonzero
-        // value generalizes this method to a rectangular (Horz/Vert) leaf -- see EstimateRectChromaCost's own
-        // remarks for the one caller that needs this.
-        int effectiveHeightPixels = heightPixels > 0 ? heightPixels : sizePixels;
-        int nW = sizePixels / 4;
-        int nH = effectiveHeightPixels / 4;
-        int x4 = x >> 2;
-        int y4 = y >> 2;
-        var scratch = s.ScratchCoeffCtx;
-        scratch.SeedFrom(realCtx, x4, nW, y4, nH);
-
         // useAdaptiveCdf (see TileState.ScratchCdf/AdaptingTrialSink's own remarks): reseeded from the real,
         // current Cdf once per candidate (this whole method call), never per sub-block and never written
         // back. AdaptingTrialSink then adapts it freely across this candidate's own (potentially 1024)
@@ -3053,21 +3088,49 @@ internal static class Av1TileEncoder
         // committed entropy costs then differed by roughly 6x once the tie-break happened to pick the worse
         // one) -- a real, separate gap, not something this change should paper over by accident via a wider
         // blast radius than the diagnosed problem needed.
-        IAv1SymbolSink trial;
-        Av1CdfContext cdfForTrial;
+        //
+        // The two branches below call the same generic RunLosslessWholeLeafSubBlocks<TSink> sub-block loop
+        // with a different concrete sink type (Av1TrialSymbolSink -- a struct, see its own remarks -- vs.
+        // Av1AdaptingTrialSymbolSink, still a class) instead of a single call through a common
+        // IAv1SymbolSink-typed local: that local would force every WriteCoeffs call in the loop back through
+        // interface dispatch for BOTH branches, undoing the whole point of WriteCoeffs<TSink>'s generic
+        // specialization for the far more common (non-adaptive) branch. Bits is read per-branch off the
+        // concrete field afterward for the same reason -- IAv1SymbolSink deliberately has no Bits member
+        // (Av1SymbolEncoder, the real bitstream writer, also implements the interface and has no comparable
+        // single "trial bits" concept), so it can't be read generically inside the shared loop.
         if (useAdaptiveCdf)
         {
             s.ScratchCdf.CopyFrom(s.Cdf);
             s.AdaptingTrialSink.Reset();
-            trial = s.AdaptingTrialSink;
-            cdfForTrial = s.ScratchCdf;
+            RunLosslessWholeLeafSubBlocks(s, source, planeWidth, r, c, x, y, sizePixels, ptype, realCtx, mode, angleDelta, useFilterIntra, filterIntraMode, filterTypeSmooth, useRealBoundaryAvailability, ref s.AdaptingTrialSink, s.ScratchCdf, heightPixels);
+            return Av1RdCost.CombineCost(0, s.AdaptingTrialSink.Bits, 1.0);
         }
-        else
-        {
-            s.TrialSink.Reset();
-            trial = s.TrialSink;
-            cdfForTrial = s.Cdf;
-        }
+
+        s.TrialSink.Reset();
+        RunLosslessWholeLeafSubBlocks(s, source, planeWidth, r, c, x, y, sizePixels, ptype, realCtx, mode, angleDelta, useFilterIntra, filterIntraMode, filterTypeSmooth, useRealBoundaryAvailability, ref s.TrialSink, s.Cdf, heightPixels);
+        return Av1RdCost.CombineCost(0, s.TrialSink.Bits, 1.0);
+    }
+
+    /// <summary>
+    /// The per-4x4-sub-block predict/WHT/quantize/<see cref="Av1CoefficientWriter.WriteCoeffs{TSink}"/> loop
+    /// shared by both of <see cref="ComputeLosslessWholeLeafCostPerSubBlock"/>'s sink branches -- see that
+    /// method's own remarks for why it's split out generic-over-<typeparamref name="TSink"/> like this
+    /// instead of a common <see cref="IAv1SymbolSink"/>-typed local.
+    /// </summary>
+    private static void RunLosslessWholeLeafSubBlocks<TSink>(TileState s, int[] source, int planeWidth, int r, int c, int x, int y, int sizePixels, int ptype, Av1CoefficientWriter.PlaneContext realCtx, int mode, int angleDelta, bool useFilterIntra, int filterIntraMode, bool filterTypeSmooth, bool useRealBoundaryAvailability, ref TSink sink, Av1CdfContext cdfForTrial, int heightPixels)
+        where TSink : IAv1SymbolSink
+    {
+        // heightPixels defaults to 0, meaning "same as sizePixels" (a square leaf -- every pre-existing call
+        // site), mirroring Av1CoefficientWriter.WriteCoeffs's own blockHeight convention exactly. A nonzero
+        // value generalizes this method to a rectangular (Horz/Vert) leaf -- see EstimateRectChromaCost's own
+        // remarks for the one caller that needs this.
+        int effectiveHeightPixels = heightPixels > 0 ? heightPixels : sizePixels;
+        int nW = sizePixels / 4;
+        int nH = effectiveHeightPixels / 4;
+        int x4 = x >> 2;
+        int y4 = y >> 2;
+        var scratch = s.ScratchCoeffCtx;
+        scratch.SeedFrom(realCtx, x4, nW, y4, nH);
 
         int blockDecodedPlane = ptype == 0 ? 0 : 1;
         int subBlockMiRowBase = r & s.SbMiMask;
@@ -3141,12 +3204,9 @@ internal static class Av1TileEncoder
 
                 int subX4 = subX >> 2;
                 int subY4 = subY >> 2;
-                Av1CoefficientWriter.WriteCoeffs(trial, cdfForTrial, levels, 4, ptype, subX4, subY4, scratch, writeLumaTxType: null, blockSize: sizePixels, updateContext: true, blockHeight: effectiveHeightPixels);
+                Av1CoefficientWriter.WriteCoeffs(ref sink, cdfForTrial, levels, 4, ptype, subX4, subY4, scratch, writeLumaTxType: null, blockSize: sizePixels, updateContext: true, blockHeight: effectiveHeightPixels);
             }
         }
-
-        long trialBits = useAdaptiveCdf ? s.AdaptingTrialSink.Bits : s.TrialSink.Bits;
-        return Av1RdCost.CombineCost(0, trialBits, 1.0);
     }
 
     /// <summary>
@@ -3160,14 +3220,20 @@ internal static class Av1TileEncoder
     /// <para>Mirrors <see cref="ComputeLosslessWholeLeafCostPerSubBlock"/>'s own per-4x4-sub-block prediction
     /// loop exactly (boundary-availability derivation included) rather than a separate whole-leaf-then-split
     /// path the way <see cref="ComputeCandidateCost"/>'s non-lossless branch needs for efficiency at larger
-    /// sizes -- correct uniformly for any <paramref name="sizePixels"/> since real AV1's own
+    /// sizes -- correct uniformly for any <paramref name="wMi"/>/<paramref name="hMi"/> since real AV1's own
     /// <c>intra_model_rd</c> is <em>always</em> a per-tx-block (4x4, forced by lossless) loop regardless of
     /// coding-block size, so there's no size-dependent fast path to mirror here the way the real committed
     /// residual-coding path has.</para>
+    ///
+    /// <para><paramref name="wMi"/>/<paramref name="hMi"/> (in 4x4-sub-block units) are independent -- not a
+    /// single shared square dimension -- specifically so <see cref="EstimateRectLumaCost"/>'s rectangular
+    /// (Horz/Vert) leaves can reuse this exact SATD estimate, not just <see cref="EstimateLumaCost"/>'s square
+    /// ones; the sub-block loop and its raster-order <c>haveAboveRight</c> derivation already generalize
+    /// cleanly (mirroring <see cref="ComputeRectLumaCostForMode"/>'s identical generalization for the real,
+    /// non-model cost).</para>
     /// </summary>
-    private static long ComputeIntraModelRd(TileState s, int[] source, int planeWidth, int planeHeight, int r, int c, int x, int y, int sizePixels, int ptype, int mode, int angleDelta, bool useFilterIntra, int filterIntraMode, bool filterTypeSmooth, bool useRealBoundaryAvailability)
+    private static long ComputeIntraModelRd(TileState s, int[] source, int planeWidth, int planeHeight, int r, int c, int x, int y, int wMi, int hMi, int ptype, int mode, int angleDelta, bool useFilterIntra, int filterIntraMode, bool filterTypeSmooth, bool useRealBoundaryAvailability)
     {
-        int n = sizePixels / 4;
         int blockDecodedPlane = ptype == 0 ? 0 : 1;
         int subBlockMiRowBase = r & s.SbMiMask;
         int subBlockMiColBase = c & s.SbMiMask;
@@ -3181,9 +3247,9 @@ internal static class Av1TileEncoder
         Span<int> residual = stackalloc int[16];
         Span<int> coeff = stackalloc int[16];
 
-        for (int dr = 0; dr < n; dr++)
+        for (int dr = 0; dr < hMi; dr++)
         {
-            for (int dc = 0; dc < n; dc++)
+            for (int dc = 0; dc < wMi; dc++)
             {
                 int subX = x + (dc * 4);
                 int subY = y + (dr * 4);
@@ -3211,7 +3277,10 @@ internal static class Av1TileEncoder
                 }
                 else
                 {
-                    haveAboveRight = dr > 0 && (dc + 1) < n;
+                    // Interior above-right derivation generalized from one shared n to independent wMi --
+                    // see ComputeRectLumaCostForMode's identical remarks for why this raster-order argument
+                    // holds for any wMi, not just a square block's own w==h.
+                    haveAboveRight = dr > 0 && (dc + 1) < wMi;
                     haveBelowLeft = false;
                 }
 
@@ -3260,7 +3329,7 @@ internal static class Av1TileEncoder
         int w4 = sizePixels >> 2;
         scratch.SeedFrom(realCtx, x4, w4, y4, w4);
         trial.Reset();
-        Av1CoefficientWriter.WriteCoeffs(trial, s.Cdf, levels, sizePixels, ptype, x4, y4, scratch, writeLumaTxType: null, updateContext: true);
+        Av1CoefficientWriter.WriteCoeffs(ref trial, s.Cdf, levels, sizePixels, ptype, x4, y4, scratch, writeLumaTxType: null, updateContext: true);
 
         return Av1RdCost.CombineCost(sse, trial.Bits, s.Lambda);
     }
@@ -3353,7 +3422,7 @@ internal static class Av1TileEncoder
         {
             scratch.SeedFrom(realCtx, x4, w4, y4, w4);
             trial.Reset();
-            Av1CoefficientWriter.WriteCoeffs(trial, s.Cdf, levels, sizePixels, ptype, x4, y4, scratch, writeLumaTxType: null, updateContext: true);
+            Av1CoefficientWriter.WriteCoeffs(ref trial, s.Cdf, levels, sizePixels, ptype, x4, y4, scratch, writeLumaTxType: null, updateContext: true);
             return Av1RdCost.CombineCost(distortion, trial.Bits, trellisLambda);
         }
 
@@ -3867,7 +3936,7 @@ internal static class Av1TileEncoder
         bool angleDeltaAllowed = sizeMi >= 2;
 
         Span<bool> directionalModeSkipMask = stackalloc bool[13];
-        ComputeLumaPruning(s, s.Lossless, s.SourceY, s.YWidth, x, y, sizePixels, directionalModeSkipMask, out bool skipSmoothVh, out bool skipSmoothPlain);
+        ComputeLumaPruning(s, s.Lossless, s.SourceY, s.YWidth, x, y, sizePixels, sizePixels, directionalModeSkipMask, out bool skipSmoothVh, out bool skipSmoothPlain);
 
         Span<long> topIntraModelRd = stackalloc long[4];
         int topModelCount = s.Lossless ? s.SpeedFeatures.TopIntraModelCountAllowed : 0;
@@ -3889,7 +3958,7 @@ internal static class Av1TileEncoder
             {
                 if (topModelCount > 0)
                 {
-                    long modelRd = ComputeIntraModelRd(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels, ptype: 0, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: true);
+                    long modelRd = ComputeIntraModelRd(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels / 4, sizePixels / 4, ptype: 0, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: true);
                     if (Av1IntraModelRdPruner.PruneIntraYMode(modelRd, ref bestModelRd, topIntraModelRd[..topModelCount]))
                     {
                         continue;
@@ -4639,7 +4708,7 @@ internal static class Av1TileEncoder
                 // non-square, multi-superblock frame, where the above/left context bookkeeping silently
                 // stops updating past whichever axis is shorter in mi-units -- desyncing every block's
                 // entropy context (and the whole rest of the tile with it) from exactly that point onward.
-                Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, sizePixels, ptype: 0, c, r, s.YCoeffCtx, writeLumaTxType);
+                Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, sizePixels, ptype: 0, c, r, s.YCoeffCtx, writeLumaTxType);
                 MarkLumaBlockDecoded(s, r, c, sizeMi, sizeMi);
             }
         }
@@ -5133,7 +5202,7 @@ internal static class Av1TileEncoder
                     Array.Copy(pred, i * 4, s.ReconY, ((subY + i) * s.YWidth) + subX, 4);
                 }
 
-                Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
+                Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
                 Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
                 SetBlockDecoded(s, 0, subBlockMiRow, subBlockMiCol, true);
             }
@@ -5197,7 +5266,7 @@ internal static class Av1TileEncoder
 
                         int chromaBlockSizeArg = (nW * nH > 1) ? widthPixels : 0;
                         int chromaBlockHeightArg = (nW * nH > 1) ? heightPixels : 0;
-                        Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 1, subC, subR, ctx, writeLumaTxType: null, blockSize: chromaBlockSizeArg, blockHeight: chromaBlockHeightArg);
+                        Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype: 1, subC, subR, ctx, writeLumaTxType: null, blockSize: chromaBlockSizeArg, blockHeight: chromaBlockHeightArg);
                         Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
                         SetBlockDecoded(s, 1, subBlockMiRow, subBlockMiCol, true);
                         SetBlockDecoded(s, 2, subBlockMiRow, subBlockMiCol, true);
@@ -6008,7 +6077,7 @@ internal static class Av1TileEncoder
                     Array.Copy(pred, i * 4, s.ReconY, ((subY + i) * s.YWidth) + subX, 4);
                 }
 
-                Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: sizePixels);
+                Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: sizePixels);
                 Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
 
                 SetBlockDecoded(s, 0, subR & s.SbMiMask, subC & s.SbMiMask, true);
@@ -6077,7 +6146,7 @@ internal static class Av1TileEncoder
                     }
 
                     int chromaBlockSizeArg = chromaN > 1 ? chromaSize : 0;
-                    Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null, blockSize: chromaBlockSizeArg);
+                    Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null, blockSize: chromaBlockSizeArg);
                     Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, subCx, subCy, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
                 }
             }
@@ -6948,7 +7017,7 @@ internal static class Av1TileEncoder
                     // (x4, y4) = (chromaC4, chromaR4), not (chromaR4, chromaC4) -- see EncodeLeaf's luma call
                     // site for why the argument order matters here (x4 = column, y4 = row) even though it's
                     // unobservable on any square/single-superblock chroma grid.
-                    Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null, blockSize: blockSizeArg);
+                    Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null, blockSize: blockSizeArg);
                     Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, s.Lossless, uvTxType);
                     SetBlockDecoded(s, planeIndex, subBlockChromaRow, subBlockChromaCol, true);
                 }
@@ -7057,7 +7126,7 @@ internal static class Av1TileEncoder
                 Array.Copy(pred, i * chromaBlockSizePixels, recon, ((cy + i) * s.ChromaWidth) + cx, chromaBlockSizePixels);
             }
 
-            Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, chromaBlockSizePixels, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null);
+            Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, chromaBlockSizePixels, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null);
             Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, chromaBlockSizePixels, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: false, uvTxType);
 
             // Marks this whole chromaN x chromaN sub-block footprint decoded -- not just its own (top-left)
@@ -7168,7 +7237,7 @@ internal static class Av1TileEncoder
                 // shortcut, see WriteCoeffs's remarks), but exactly 4 for a genuine 4x4 leaf (n == 1), where
                 // it deliberately *does* take that shortcut -- WriteCoeffs's own blockSize == size check
                 // handles both correctly without this call site needing to special-case n == 1 itself.
-                Av1CoefficientWriter.WriteCoeffs(s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: blockSize);
+                Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: blockSize);
                 Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
                 SetBlockDecoded(s, 0, subBlockMiRow, subBlockMiCol, true);
             }

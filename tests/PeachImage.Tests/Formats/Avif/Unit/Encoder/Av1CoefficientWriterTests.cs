@@ -125,7 +125,7 @@ public class Av1CoefficientWriterTests
         {
             int x4 = (i * w4) % planeWidth4;
             int y4 = ((i * w4) / planeWidth4) * w4;
-            Av1CoefficientWriter.WriteCoeffs(encoder, cdf, blocks[i], size, ptype: 0, x4, y4, encodeCtx);
+            Av1CoefficientWriter.WriteCoeffs(ref encoder, cdf, blocks[i], size, ptype: 0, x4, y4, encodeCtx);
         }
 
         byte[] data = encoder.Flush();
@@ -150,7 +150,7 @@ public class Av1CoefficientWriterTests
         var encodeCdf = new Av1CdfContext(baseQIdx: 64);
         var encoder = new Av1SymbolEncoder(disableCdfUpdate: false);
         var encodeCtx = new Av1CoefficientWriter.PlaneContext(planeWidth4, planeHeight4);
-        Av1CoefficientWriter.WriteCoeffs(encoder, encodeCdf, quant, size, ptype, x4: 0, y4: 0, encodeCtx);
+        Av1CoefficientWriter.WriteCoeffs(ref encoder, encodeCdf, quant, size, ptype, x4: 0, y4: 0, encodeCtx);
 
         byte[] data = encoder.Flush();
         var decoder = new Av1SymbolDecoder(data, 0, data.Length, disableCdfUpdate: false);
