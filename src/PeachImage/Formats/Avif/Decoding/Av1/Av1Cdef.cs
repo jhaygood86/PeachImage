@@ -588,15 +588,5 @@ internal static class Av1Cdef
         return 0;
     }
 
-    private static int FloorLog2(int x)
-    {
-        int s = 0;
-        while (x != 0)
-        {
-            x >>= 1;
-            s++;
-        }
-
-        return s - 1;
-    }
+    private static int FloorLog2(int x) => x == 0 ? -1 : System.Numerics.BitOperations.Log2((uint)x);
 }

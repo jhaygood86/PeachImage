@@ -585,17 +585,7 @@ internal sealed class Av1TileDecoder
         return (v << 1) - m + extraBit;
     }
 
-    private static int FloorLog2(int x)
-    {
-        int s = 0;
-        while (x != 0)
-        {
-            x >>= 1;
-            s++;
-        }
-
-        return s - 1;
-    }
+    private static int FloorLog2(int x) => x == 0 ? -1 : System.Numerics.BitOperations.Log2((uint)x);
 
     /// <summary><c>inverse_recenter(r, v)</c> (spec §5.9.29).</summary>
     private static int InverseRecenter(int r, int v)

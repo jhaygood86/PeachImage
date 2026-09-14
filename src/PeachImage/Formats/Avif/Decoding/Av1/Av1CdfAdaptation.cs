@@ -35,15 +35,5 @@ internal static class Av1CdfAdaptation
         }
     }
 
-    public static int FloorLog2(uint x)
-    {
-        int s = 0;
-        while (x != 0)
-        {
-            x >>= 1;
-            s++;
-        }
-
-        return s - 1;
-    }
+    public static int FloorLog2(uint x) => x == 0 ? -1 : System.Numerics.BitOperations.Log2(x);
 }

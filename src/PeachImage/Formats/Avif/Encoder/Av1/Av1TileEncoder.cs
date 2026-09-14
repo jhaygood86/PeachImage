@@ -2622,6 +2622,26 @@ internal static class Av1TileEncoder
         return bits;
     }
 
+    // Reusable scratch state for EstimateColorMapBits below, reused across every call instead of allocating
+    // 4 fresh arrays per call -- this method runs once per structurally-eligible palette RDO candidate (an
+    // instrumented run cited thousands of candidates across the partition search for one benchmark image,
+    // see that method's own remarks). [ThreadStatic] mirrors Av1InverseTransform's own scratch-buffer
+    // pattern; only `seeded` needs clearing between calls, since `scratchCdf` entries are already gated by
+    // it (see the `if (!seeded[ctx])` check below).
+    private const int PaletteColorIndexContexts = 5; // spec PALETTE_COLOR_INDEX_CONTEXTS
+
+    [ThreadStatic]
+    private static int[]? _colorOrderScratch;
+
+    [ThreadStatic]
+    private static int[]? _inverseColorOrderScratch;
+
+    [ThreadStatic]
+    private static ushort[][]? _mapCdfScratch;
+
+    [ThreadStatic]
+    private static bool[]? _mapCdfSeededScratch;
+
     /// <summary>
     /// Pure bit-count mirror of <see cref="WriteColorMapTokens"/> -- identical NS-coded first index plus
     /// wavefront-ordered, context-selected per-pixel symbol costs, but via <see cref="Av1SymbolEncoder.EstimateSymbolCost"/>
@@ -2645,12 +2665,13 @@ internal static class Av1TileEncoder
     /// </summary>
     private static long EstimateColorMapBits(int[] colorMap, int width, int height, int n, ushort[][][] mapCdf)
     {
-        var colorOrder = new int[8];
-        var inverseColorOrder = new int[8];
+        var colorOrder = _colorOrderScratch ??= new int[8];
+        var inverseColorOrder = _inverseColorOrderScratch ??= new int[8];
 
-        const int contexts = 5; // spec PALETTE_COLOR_INDEX_CONTEXTS
-        var scratchCdf = new ushort[contexts][];
-        var seeded = new bool[contexts];
+        const int contexts = PaletteColorIndexContexts;
+        var scratchCdf = _mapCdfScratch ??= new ushort[contexts][];
+        var seeded = _mapCdfSeededScratch ??= new bool[contexts];
+        Array.Clear(seeded);
 
         long bits = Av1SymbolEncoder.EstimateNsCost(colorMap[0], n);
 
@@ -5326,8 +5347,8 @@ internal static class Av1TileEncoder
         int x = c * 4;
         int y = r * 4;
 
-        var candidates = s.IntrabcHashTable?.GetCandidates(sizePixels, x, y);
-        if (candidates is null || candidates.Count == 0)
+        var candidatesOrNull = s.IntrabcHashTable?.GetCandidates(sizePixels, x, y);
+        if (candidatesOrNull is not { Count: > 0 } candidates)
         {
             return false;
         }

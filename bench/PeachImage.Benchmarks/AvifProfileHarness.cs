@@ -19,6 +19,7 @@ internal static class AvifProfileHarness
         ["photo420"] = "photo_1920x1080_420.avif",
         ["alpha"] = "photo_1920x1080_alpha.avif",
         ["small"] = "small_32x24.avif",
+        ["lossless"] = "photo_1920x1080_lossless.avif",
     };
 
     public static int Run(string[] args)

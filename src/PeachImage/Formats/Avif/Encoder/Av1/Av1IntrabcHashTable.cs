@@ -1,3 +1,7 @@
+using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics.X86;
+
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
 /// <summary>
@@ -51,10 +55,14 @@ internal sealed class Av1IntrabcHashTable
     // padded buffer's own edge) so their array slots are simply left at their default 0 and never read.
     private readonly uint[][] _hashBySize;
 
-    // bucketsBySize[i][hash] lists every position at BlockSizes[i] whose hash equals `hash` -- see this
-    // class's own remarks for why this is unbounded (unlike libaom's real 256-cap) and relies on the caller's
-    // own query-time scan cap instead.
-    private readonly Dictionary<uint, List<(int X, int Y)>>[] _bucketsBySize;
+    // offsetsBySize[i][hash] is the (offset, count) range, into positionsBySize[i], of every position at
+    // BlockSizes[i] whose hash equals `hash` -- see this class's own remarks for why this is unbounded
+    // (unlike libaom's real 256-cap) and relies on the caller's own query-time scan cap instead. A flat
+    // per-level array plus (offset, count) ranges (built via a counting sort in BuildBuckets, replacing what
+    // was previously one heap-allocated List<(int,int)> per unique hash bucket) avoids allocating a
+    // per-bucket collection for what can be hundreds of thousands of distinct hashes on a large image.
+    private readonly Dictionary<uint, (int Offset, int Count)>[] _offsetsBySize;
+    private readonly (int X, int Y)[][] _positionsBySize;
 
     /// <summary>
     /// Builds the whole-frame hash pyramid and bucket index once, from <paramref name="lumaY"/> (row-major,
@@ -80,7 +88,8 @@ internal sealed class Av1IntrabcHashTable
 
         int levelCount = Array.IndexOf(BlockSizes, maxBlockSize) + 1;
         _hashBySize = new uint[levelCount][];
-        _bucketsBySize = new Dictionary<uint, List<(int X, int Y)>>[levelCount];
+        _offsetsBySize = new Dictionary<uint, (int Offset, int Count)>[levelCount];
+        _positionsBySize = new (int X, int Y)[levelCount][];
 
         uint[] level2x2 = ComputeLevel2x2(lumaY, width, height);
         uint[] previousLevel = level2x2;
@@ -91,7 +100,7 @@ internal sealed class Av1IntrabcHashTable
             int blockSize = BlockSizes[levelIndex];
             uint[] level = ComputeLevel(previousLevel, previousBlockSize, blockSize, width, height);
             _hashBySize[levelIndex] = level;
-            _bucketsBySize[levelIndex] = BuildBuckets(level, blockSize, width, height);
+            (_offsetsBySize[levelIndex], _positionsBySize[levelIndex]) = BuildBuckets(level, blockSize, width, height);
             previousLevel = level;
             previousBlockSize = blockSize;
         }
@@ -104,16 +113,21 @@ internal sealed class Av1IntrabcHashTable
     /// when <paramref name="blockSize"/> wasn't hashed at all (above this table's own <c>maxBlockSize</c>, see
     /// the constructor) or when there simply are no other same-hash positions.
     /// </summary>
-    public List<(int X, int Y)>? GetCandidates(int blockSize, int x, int y)
+    public ArraySegment<(int X, int Y)>? GetCandidates(int blockSize, int x, int y)
     {
         int levelIndex = Array.IndexOf(BlockSizes, blockSize);
-        if (levelIndex < 0 || levelIndex >= _bucketsBySize.Length)
+        if (levelIndex < 0 || levelIndex >= _offsetsBySize.Length)
         {
             return null;
         }
 
         uint hash = _hashBySize[levelIndex][(y * _width) + x];
-        return _bucketsBySize[levelIndex].TryGetValue(hash, out var list) ? list : null;
+        if (!_offsetsBySize[levelIndex].TryGetValue(hash, out var range))
+        {
+            return null;
+        }
+
+        return new ArraySegment<(int X, int Y)>(_positionsBySize[levelIndex], range.Offset, range.Count);
     }
 
     /// <summary><c>av1_generate_block_2x2_hash_value</c>'s 8-bit path (<c>hash_motion.c</c>) -- packs each 2x2 block's 4 luma samples (top-left, top-right, bottom-left, bottom-right) into one 32-bit value via <c>get_identity_hash_value</c>'s exact <c>(a&lt;&lt;24)+(b&lt;&lt;16)+(c&lt;&lt;8)+d</c> packing (deliberately not a real hash at this level -- libaom's own comment notes 4 8-bit values already fit losslessly in 32 bits, so there's nothing to gain from hashing yet).</summary>
@@ -140,6 +154,10 @@ internal sealed class Av1IntrabcHashTable
     }
 
     /// <summary><c>av1_generate_block_hash_value</c> (<c>hash_motion.c</c>): combines 4 non-overlapping <paramref name="previousBlockSize"/>-sized sub-block hashes (top-left, top-right, bottom-left, bottom-right, each <c>previousBlockSize</c> apart) into a real CRC32C over their packed 16-byte (4 x uint32, little-endian -- matching libaom's own raw pointer cast on its little-endian reference hardware, see <see cref="Av1IntrabcCrc32C"/>'s own remarks) representation.</summary>
+    // `packed` (the only stackalloc here) is fully overwritten, all 16 bytes via the 4 WriteUInt32LittleEndian
+    // calls, before every Compute(packed) read -- same reasoning as Av1ForwardTransform.Forward2D's own
+    // [SkipLocalsInit] (see that method's remarks). Called once per pixel position per hash-pyramid level.
+    [SkipLocalsInit]
     private static uint[] ComputeLevel(uint[] previousLevel, int previousBlockSize, int blockSize, int width, int height)
     {
         var result = new uint[width * height];
@@ -173,28 +191,60 @@ internal sealed class Av1IntrabcHashTable
         destination[3] = (byte)(value >> 24);
     }
 
-    private static Dictionary<uint, List<(int X, int Y)>> BuildBuckets(uint[] level, int blockSize, int width, int height)
+    /// <summary>
+    /// Counting sort of every valid <paramref name="blockSize"/>-level position into one hash-partitioned flat
+    /// array, replacing what was previously a <c>Dictionary&lt;uint, List&lt;(int,int)&gt;&gt;</c> with one
+    /// <c>List</c> allocated per unique hash -- potentially hundreds of thousands of small heap allocations on
+    /// a large image, now exactly 3 array/dictionary allocations regardless of how many distinct hashes exist.
+    /// Pass 2 below visits positions in the exact same raster order as the single-pass version it replaces, so
+    /// the result is stable by construction: equal-hash positions land in the flat array in that same raster
+    /// order, preserving <see cref="GetCandidates"/>'s documented insertion-order contract.
+    /// </summary>
+    private static (Dictionary<uint, (int Offset, int Count)> Offsets, (int X, int Y)[] Positions) BuildBuckets(uint[] level, int blockSize, int width, int height)
     {
-        var buckets = new Dictionary<uint, List<(int X, int Y)>>();
         int xEnd = width - blockSize + 1;
         int yEnd = height - blockSize + 1;
+
+        // Pass 1: count occurrences of each hash.
+        var counts = new Dictionary<uint, int>();
         for (int y = 0; y < yEnd; y++)
         {
             int rowBase = y * width;
             for (int x = 0; x < xEnd; x++)
             {
                 uint hash = level[rowBase + x];
-                if (!buckets.TryGetValue(hash, out var list))
-                {
-                    list = [];
-                    buckets[hash] = list;
-                }
-
-                list.Add((x, y));
+                counts[hash] = counts.TryGetValue(hash, out int c) ? c + 1 : 1;
             }
         }
 
-        return buckets;
+        // Turn counts into (offset, count) ranges via a running prefix sum, and a same-sized "next write
+        // cursor" per hash (reusing the Offset field as the cursor, advanced in pass 2 below).
+        var offsets = new Dictionary<uint, (int Offset, int Count)>(counts.Count);
+        var cursors = new Dictionary<uint, int>(counts.Count);
+        int total = 0;
+        foreach (var (hash, count) in counts)
+        {
+            offsets[hash] = (total, count);
+            cursors[hash] = total;
+            total += count;
+        }
+
+        // Pass 2: same raster-scan order as before, so equal-hash positions land in the flat array in the
+        // same (insertion) order the caller's contract documents.
+        var positions = new (int X, int Y)[total];
+        for (int y = 0; y < yEnd; y++)
+        {
+            int rowBase = y * width;
+            for (int x = 0; x < xEnd; x++)
+            {
+                uint hash = level[rowBase + x];
+                int cursor = cursors[hash];
+                positions[cursor] = (x, y);
+                cursors[hash] = cursor + 1;
+            }
+        }
+
+        return (offsets, positions);
     }
 }
 
@@ -231,9 +281,40 @@ internal static class Av1IntrabcCrc32C
     public static uint Compute(ReadOnlySpan<byte> data)
     {
         uint crc = 0xFFFFFFFFu;
-        foreach (byte b in data)
+
+        // Hardware CRC32C (SSE4.2's `crc32` instruction, available on effectively every AVX2-capable x86-64
+        // CPU) implements exactly this same reflected-in/reflected-out, poly-0x82f63b78 algorithm natively --
+        // it's the instruction real-world CRC-32C (iSCSI, ext4, this class's own check-value test) is defined
+        // against, so consuming 8 (then 4, then 1) bytes at a time this way is bit-identical to the scalar
+        // table loop below, just far fewer iterations for this class's always-16-byte real inputs (see
+        // Av1IntrabcHashTable.ComputeLevel). Falls back to the portable table loop on non-x86/older hardware.
+        int i = 0;
+        if (Sse42.X64.IsSupported)
         {
-            crc = Table[(byte)(crc ^ b)] ^ (crc >> 8);
+            for (; i + 8 <= data.Length; i += 8)
+            {
+                crc = (uint)Sse42.X64.Crc32(crc, BinaryPrimitives.ReadUInt64LittleEndian(data[i..]));
+            }
+        }
+
+        if (Sse42.IsSupported)
+        {
+            for (; i + 4 <= data.Length; i += 4)
+            {
+                crc = Sse42.Crc32(crc, BinaryPrimitives.ReadUInt32LittleEndian(data[i..]));
+            }
+
+            for (; i < data.Length; i++)
+            {
+                crc = Sse42.Crc32(crc, data[i]);
+            }
+
+            return crc ^ 0xFFFFFFFFu;
+        }
+
+        for (; i < data.Length; i++)
+        {
+            crc = Table[(byte)(crc ^ data[i])] ^ (crc >> 8);
         }
 
         return crc ^ 0xFFFFFFFFu;
