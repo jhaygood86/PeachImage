@@ -23,8 +23,18 @@ internal interface IAv1SymbolSink
 /// (see <see cref="Av1SymbolEncoder.EstimateSymbolCost"/>'s remarks on <see cref="Av1SymbolEncoder.WriteBool"/>'s
 /// fixed 50/50 CDF), so <see cref="WriteLiteral"/> adds <c>n</c> directly rather than calling the general
 /// estimator <c>n</c> times.
+///
+/// <para>A mutable <see langword="struct"/> (not a class) specifically so <see cref="Av1CoefficientWriter.WriteCoeffs{TSink}"/>'s
+/// generic <c>TSink</c> instantiation over this type gets fully devirtualized/inlined by the JIT -- this is
+/// the RD-search hot path (tens of millions of calls for a real image), profiled to spend the large
+/// majority of its time inside <c>WriteCoeffs</c> itself; the CLR always JIT-compiles a specialized,
+/// non-shared instantiation per distinct value-type generic argument, eliminating the interface dispatch a
+/// class-typed sink would still pay on every <see cref="WriteSymbol"/>/<see cref="WriteLiteral"/> call.
+/// Callers pass this by <see langword="ref"/> everywhere (see call sites in <c>Av1TileEncoder</c>) so the
+/// same accumulator instance -- not a copy -- keeps mutating across a candidate's many sub-block
+/// <c>WriteCoeffs</c> calls, exactly as the old class's reference semantics did.</para>
 /// </summary>
-internal sealed class Av1TrialSymbolSink : IAv1SymbolSink
+internal struct Av1TrialSymbolSink : IAv1SymbolSink
 {
     public long Bits { get; private set; }
 

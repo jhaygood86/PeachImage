@@ -19,6 +19,41 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 /// </summary>
 internal static class Av1CoefficientWriter
 {
+    /// <summary>
+    /// <c>(txSz, txSzCtx, scan)</c> for each of the four square sizes <see cref="WriteCoeffs{TSink}"/> is
+    /// ever called with (this encoder's <see cref="Av1ForwardTransform.SizeToTxSz"/> supports only 4/8/16/32
+    /// -- always <see cref="Av1TxType.DctDct"/>, so all three are pure functions of <c>size</c> alone),
+    /// computed once instead of on every single call: <c>WriteCoeffs</c> runs tens of millions of times
+    /// during lossless RD-search (see the AVIF encode perf investigation), and re-deriving
+    /// <see cref="Av1ScanTables.GetScan"/>'s own multi-branch dispatch (two comparisons, an array lookup, an
+    /// enum check, two pattern-match checks, then a further <see langword="switch"/>) every call was pure
+    /// waste for a value that's always one of these four answers.
+    /// </summary>
+    private static readonly (int TxSz, int TxSzCtx, int[] Scan)[] SizeLookup = BuildSizeLookup();
+
+    private static (int TxSz, int TxSzCtx, int[] Scan)[] BuildSizeLookup()
+    {
+        var table = new (int, int, int[])[4];
+        foreach (int size in new[] { 4, 8, 16, 32 })
+        {
+            int txSz = Av1ForwardTransform.SizeToTxSz(size);
+            int txSzCtx = (Av1CoeffTables.TxSizeSqr[txSz] + Av1CoeffTables.TxSizeSqrUp[txSz] + 1) >> 1;
+            int[] scan = Av1ScanTables.GetScan(txSz, Av1TxType.DctDct);
+            table[SizeToLookupIndex(size)] = (txSz, txSzCtx, scan);
+        }
+
+        return table;
+    }
+
+    private static int SizeToLookupIndex(int size) => size switch
+    {
+        4 => 0,
+        8 => 1,
+        16 => 2,
+        32 => 3,
+        _ => throw new ArgumentOutOfRangeException(nameof(size), size, "WriteCoeffs only supports square sizes 4, 8, 16, or 32."),
+    };
+
     /// <summary>Per-plane above/left coefficient-level and DC-sign context state, indexed in 4x4 ("mode info") units across the whole plane -- the write-side analog of <see cref="Av1TileDecoder"/>'s <c>_aboveLevelContext</c>/<c>_aboveDcContext</c>/<c>_leftLevelContext</c>/<c>_leftDcContext</c>.</summary>
     public sealed class PlaneContext(int width4, int height4)
     {
@@ -113,32 +148,36 @@ internal static class Av1CoefficientWriter
     /// this one -- it's exercised against every real-world AVIF file the decoder's own corpus tests already
     /// decode).</para>
     ///
-    /// <para><paramref name="s"/> is an <see cref="IAv1SymbolSink"/>, not a concrete <see cref="Av1SymbolEncoder"/>,
-    /// so <see cref="Av1RdCost"/>'s RD-search candidate costing can reuse this exact context-derivation logic
-    /// (via <see cref="Av1TrialSymbolSink"/>) instead of a second, driftable copy of it -- real encoding
-    /// passes an <see cref="Av1SymbolEncoder"/> (which also implements the interface) unchanged.
-    /// <paramref name="updateContext"/> (default <see langword="true"/>, real encoding's only need) gates the
-    /// above/left <paramref name="planeCtx"/> write-back at the end of this method: a trial cost-only call
-    /// passes <see langword="false"/> so a candidate that might not even be chosen never leaves a trace in
-    /// context state a later, real leaf could read.</para>
+    /// <para><paramref name="s"/> is generic over <see cref="IAv1SymbolSink"/> rather than a concrete
+    /// <see cref="Av1SymbolEncoder"/>, so <see cref="Av1RdCost"/>'s RD-search candidate costing can reuse
+    /// this exact context-derivation logic (via <see cref="Av1TrialSymbolSink"/>) instead of a second,
+    /// driftable copy of it -- real encoding passes an <see cref="Av1SymbolEncoder"/> (which also implements
+    /// the interface) unchanged. Generic (rather than plain <c>IAv1SymbolSink</c>-typed) specifically so the
+    /// overwhelmingly hot RD-search call sites, which always instantiate this with the value-type
+    /// <see cref="Av1TrialSymbolSink"/>, get a JIT-specialized instantiation with every <c>s.WriteSymbol</c>/
+    /// <c>s.WriteLiteral</c> call devirtualized -- see <see cref="Av1TrialSymbolSink"/>'s own remarks. Taken
+    /// by <see langword="ref"/> so a value-type <typeparamref name="TSink"/> accumulates across repeated
+    /// calls into the caller's own local, not a per-call copy.</para>
     /// </summary>
-    public static int WriteCoeffs(IAv1SymbolSink s, Av1CdfContext cdf, int[] quantLevels, int size, int ptype, int x4, int y4, PlaneContext planeCtx, Action? writeLumaTxType = null, int blockSize = 0, bool updateContext = true, int blockHeight = 0)
+    public static int WriteCoeffs<TSink>(ref TSink s, Av1CdfContext cdf, int[] quantLevels, int size, int ptype, int x4, int y4, PlaneContext planeCtx, Action? writeLumaTxType = null, int blockSize = 0, bool updateContext = true, int blockHeight = 0)
+        where TSink : IAv1SymbolSink
     {
-        int txSz = Av1ForwardTransform.SizeToTxSz(size);
-        int txSzCtx = (Av1CoeffTables.TxSizeSqr[txSz] + Av1CoeffTables.TxSizeSqrUp[txSz] + 1) >> 1;
+        var (txSz, txSzCtx, scan) = SizeLookup[SizeToLookupIndex(size)];
         int w4 = size >> 2;
         int h4 = size >> 2;
         int effectiveBlockWidth = blockSize > 0 ? blockSize : size;
         int effectiveBlockHeight = blockHeight > 0 ? blockHeight : effectiveBlockWidth;
 
-        int[] scan = Av1ScanTables.GetScan(txSz, Av1TxType.DctDct);
-
+        // eob is the highest scan-order index with a nonzero coefficient, plus one (0 if none) -- scanning
+        // backward and breaking on the first nonzero gives that identical value while skipping everything
+        // past the true eob, unlike an unconditional forward pass over every position.
         int eob = 0;
-        for (int c = 0; c < size * size; c++)
+        for (int c = (size * size) - 1; c >= 0; c--)
         {
             if (quantLevels[scan[c]] != 0)
             {
                 eob = c + 1;
+                break;
             }
         }
 
@@ -164,7 +203,7 @@ internal static class Av1CoefficientWriter
         if (!allZero)
         {
             writeLumaTxType?.Invoke();
-            WriteEobPt(s, cdf, txSz, txSzCtx, ptype, eob);
+            WriteEobPt(ref s, cdf, txSz, txSzCtx, ptype, eob);
 
             for (int c = eob - 1; c >= 0; c--)
             {
@@ -235,7 +274,7 @@ internal static class Av1CoefficientWriter
 
                 if (absLevel > Av1CoeffTables.NumBaseLevels + Av1CoeffTables.CoeffBaseRange)
                 {
-                    WriteGolomb(s, absLevel - Av1CoeffTables.CoeffBaseRange - Av1CoeffTables.NumBaseLevels);
+                    WriteGolomb(ref s, absLevel - Av1CoeffTables.CoeffBaseRange - Av1CoeffTables.NumBaseLevels);
                 }
 
                 if (pos == 0 && absLevel > 0)
@@ -275,7 +314,8 @@ internal static class Av1CoefficientWriter
     }
 
     /// <summary>Write-side of <c>Coeffs()</c>'s <c>eob_pt</c>/<c>eob_extra</c>/literal encoding: given the target <paramref name="eob"/>, determines and writes the bucket symbol plus refinement bits.</summary>
-    private static void WriteEobPt(IAv1SymbolSink s, Av1CdfContext cdf, int txSz, int txSzCtx, int ptype, int eob)
+    private static void WriteEobPt<TSink>(ref TSink s, Av1CdfContext cdf, int txSz, int txSzCtx, int ptype, int eob)
+        where TSink : IAv1SymbolSink
     {
         _ = txSzCtx;
         int eobMultisize = Math.Min(Av1TxDimensions.WidthLog2[txSz], 5) + Math.Min(Av1TxDimensions.HeightLog2[txSz], 5) - 4;
@@ -390,7 +430,6 @@ internal static class Av1CoefficientWriter
     {
         int adjTxSz = Av1CoeffTables.AdjustedTxSize[txSz];
         int bwl = Av1TxDimensions.WidthLog2[adjTxSz];
-        int txw = Av1TxDimensions.Width[adjTxSz];
         int txh = Av1TxDimensions.Height[adjTxSz];
         int row = pos >> bwl;
         int col = pos - (row << bwl);
@@ -402,7 +441,10 @@ internal static class Av1CoefficientWriter
             int refCol = col + Av1CoeffTables.MagRefOffsetWithTxClass[Av1TxClass.Class2D][idx][1];
             if (refRow >= 0 && refCol >= 0 && refRow < txh && refCol < (1 << bwl))
             {
-                mag += Math.Min(Math.Abs(quantLevels[(refRow * txw) + refCol]), Av1CoeffTables.CoeffBaseRange + Av1CoeffTables.NumBaseLevels + 1);
+                // (refRow << bwl), not a runtime `refRow * Width[adjTxSz]` multiply -- Width is always
+                // 1 << WidthLog2 by construction (same invariant GetCoeffBaseCtx's own identical flattening
+                // already relies on), so this is the same value computed cheaper, not a different one.
+                mag += Math.Min(Math.Abs(quantLevels[(refRow << bwl) + refCol]), Av1CoeffTables.CoeffBaseRange + Av1CoeffTables.NumBaseLevels + 1);
             }
         }
 
@@ -562,7 +604,8 @@ internal static class Av1CoefficientWriter
     }
 
     /// <summary>Write-side of <c>Coeffs()</c>'s Exp-Golomb tail (spec §5.11.39) for levels beyond <c>NumBaseLevels + CoeffBaseRange</c>.</summary>
-    private static void WriteGolomb(IAv1SymbolSink s, int value)
+    private static void WriteGolomb<TSink>(ref TSink s, int value)
+        where TSink : IAv1SymbolSink
     {
         // Decode: reads `length` "continue" bits (0 = continue, 1 = stop) via ReadLiteral(1), then
         // `length - 1` data bits (MSB first, excluding the implicit leading 1), reconstructing

@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using PeachImage.Formats.Avif;
 
 namespace PeachImage.Tests.Formats.Avif;
@@ -50,6 +51,35 @@ public class LosslessSizeRegressionTests
         Assert.True(
             avifStream.Length < pngStream.Length,
             $"Lossless AVIF ({avifStream.Length} bytes) was not smaller than the source PNG ({pngStream.Length} bytes) for a {width}x{height} photo-like image.");
+    }
+
+    /// <summary>
+    /// Byte-for-byte regression guard for the lossless AVIF encoder's pure performance refactors (see the
+    /// AVIF encode perf investigation: devirtualizing <c>Av1CoefficientWriter.WriteCoeffs</c>'s trial-sink
+    /// dispatch, caching its per-size scan-table lookup, scanning for <c>eob</c> backward, and unifying
+    /// <c>GetCoeffBrCtx</c>'s neighbor-offset formula with <c>GetCoeffBaseCtx</c>'s). Unlike every other test
+    /// in this class (which checks a size *ratio* or bound), this asserts the output is <em>exactly</em> the
+    /// same bytes as a known-good encode -- the strongest possible guarantee that a change billed as "same
+    /// candidates, same symbols, just computed cheaper" really is behavior-preserving, not just
+    /// coincidentally similar in size. <see cref="ExpectedSha256"/> was captured from this exact fixture
+    /// after those four changes landed, cross-checked against a real-world 1054x1492 photo encoded before and
+    /// after the same changes (also confirmed byte-identical, via SHA-256, outside this test suite).
+    /// </summary>
+    [Fact]
+    public void GraphicContentImage_LosslessAvif_IsByteIdenticalToKnownGoodOutput()
+    {
+        const string ExpectedSha256 = "E1254722CF9CD1F8592928CA346EF1E0EE36E4A33176E768B41268652D596E92";
+
+        using var image = CreateGraphicContentImage(256, 256, seed: 42);
+
+        using var avifStream = new MemoryStream();
+        image.Save(avifStream, "avif", new AvifEncoderOptions { Lossless = true });
+
+        string actualSha256 = Convert.ToHexString(SHA256.HashData(avifStream.ToArray()));
+
+        Assert.True(
+            string.Equals(ExpectedSha256, actualSha256, StringComparison.Ordinal),
+            $"Lossless AVIF output for the 256x256 graphic-content fixture changed ({avifStream.Length} bytes, SHA-256 {actualSha256}) -- expected SHA-256 {ExpectedSha256}. If this is an intentional compression-affecting change (not a pure perf refactor), update ExpectedSha256 to the new value after confirming the new output is still correct.");
     }
 
     /// <summary>
