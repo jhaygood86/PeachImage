@@ -1,7 +1,9 @@
 using System.Buffers.Binary;
+using PeachImage.Formats.Png;
 using PeachImage.Formats.Png.Internal;
 
 namespace PeachImage.Formats.Png.Encoding;
+
 
 /// <summary>Chooses a PNG color type/bit depth for a source <see cref="PixelFormat"/> and writes IHDR.</summary>
 internal static class PngHeaderWriter

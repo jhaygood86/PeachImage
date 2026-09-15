@@ -1,3 +1,5 @@
+using PeachImage.Formats.Png;
+
 namespace PeachImage.Formats.Png.Internal;
 
 /// <summary>Chooses the natural (no-override) decoded <see cref="PixelFormat"/> for a PNG's IHDR color type/bit depth and whether a <c>tRNS</c> chunk is present.</summary>

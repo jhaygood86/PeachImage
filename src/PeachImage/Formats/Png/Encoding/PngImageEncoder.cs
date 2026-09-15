@@ -2,9 +2,11 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
+using PeachImage.Formats.Png;
 using PeachImage.Formats.Png.Internal;
 
 namespace PeachImage.Formats.Png.Encoding;
+
 
 /// <summary>Top-level PNG encode orchestrator: writes IHDR/PLTE/ancillary chunks, then a per-pass (Adam7-aware) filtered/deflated scanline stream.</summary>
 internal static class PngImageEncoder
