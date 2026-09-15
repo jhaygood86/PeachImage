@@ -63,7 +63,8 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   than none/LZW/PackBits, BigTIFF, floating-point/signed samples, and photometric interpretations outside
   that set (YCbCr, LogLuv, Lab) are deliberately out of scope and throw a clear
   `TiffUnsupportedFeatureException` rather than a silently wrong result — the goal is correctness on
-  real-world scanner/export-tool output, not every TIFF extension ever specified.
+  real-world scanner/export-tool output, not every TIFF extension ever specified. An embedded ICC profile
+  (tag 34675) is extracted into `Image.Metadata`, same as JPEG/PNG.
 - Other formats are not yet implemented. The public API (`Image`, `AnimatedImage` for multi-frame formats
   like GIF) is designed to support them without breaking changes when they're added. Codec selection is
   internal — there's no format-specific type or registration step in the public API.

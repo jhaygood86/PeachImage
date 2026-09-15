@@ -14,6 +14,7 @@ internal sealed class TiffFixtureBuilder
 {
     private const ushort TypeShort = 3;
     private const ushort TypeLong = 4;
+    private const ushort TypeUndefined = 7;
 
     public required int Width { get; init; }
 
@@ -42,6 +43,9 @@ internal sealed class TiffFixtureBuilder
     public int? InkSet { get; init; }
 
     public ushort[]? ColorMap { get; init; }
+
+    /// <summary>Raw bytes to write under tag 34675 (ICC Profile), or <see langword="null"/> to omit it.</summary>
+    public byte[]? IccProfile { get; init; }
 
     public bool LittleEndian { get; init; } = true;
 
@@ -158,6 +162,13 @@ internal sealed class TiffFixtureBuilder
         if (SampleFormat is { } sampleFormat)
         {
             AddShort(339, sampleFormat);
+        }
+
+        if (IccProfile is { } iccProfile)
+        {
+            entries.Add(iccProfile.Length <= 4
+                ? (34675, TypeUndefined, (uint)iccProfile.Length, iccProfile, null)
+                : (34675, TypeUndefined, (uint)iccProfile.Length, [], iccProfile));
         }
 
         entries.Sort((a, b) => a.Tag.CompareTo(b.Tag));

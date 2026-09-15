@@ -40,4 +40,16 @@
     <ProjectReference Include="..\..\src\PeachImage\PeachImage.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      A genuine, real-world ICC profile (color.org's sRGB2014.icc reference profile, licensed by the
+      International Color Consortium for unrestricted copying/distribution/embedding) for TIFF ICC-extraction
+      tests; see TiffIccProfileTests. Embedded rather than copied to the output directory so tests don't
+      depend on the working directory a given test runner launches from.
+    -->
+    <EmbeddedResource Include="Formats/Tiff/Assets/reference-srgb.icc">
+      <LogicalName>PeachImage.Tests.Formats.Tiff.Assets.reference-srgb.icc</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
 </Project>

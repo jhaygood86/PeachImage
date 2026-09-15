@@ -35,6 +35,41 @@ internal sealed class TiffIfd(TiffReader reader, IReadOnlyDictionary<ushort, Tif
             ? ReadValues(entry)
             : throw new TiffDecodingException($"Missing required TIFF tag {tag}.");
 
+    /// <summary>
+    /// The raw bytes of <paramref name="tag"/> (e.g. an embedded ICC profile), or <see langword="null"/> if
+    /// the tag is absent or malformed. Unlike the numeric accessors above, a malformed entry here yields
+    /// <see langword="null"/> rather than throwing — this is optional metadata, not structure the rest of
+    /// decode depends on, so a bad tag should be skipped rather than fail the whole decode.
+    /// </summary>
+    public byte[]? TryGetBytes(ushort tag)
+    {
+        if (!entries.TryGetValue(tag, out var entry))
+        {
+            return null;
+        }
+
+        int typeSize = entry.Type.GetByteSize();
+        if (typeSize == 0 || entry.Count == 0 || entry.Count > TiffDecodingLimits.MaxArrayEntryCount)
+        {
+            return null;
+        }
+
+        long totalBytes = (long)typeSize * entry.Count;
+        if (totalBytes > 4 && !reader.HasBytes(entry.ValueFieldOffset, 4))
+        {
+            return null;
+        }
+
+        long valuesOffsetLong = totalBytes <= 4 ? entry.ValueFieldOffset : reader.ReadUInt32(entry.ValueFieldOffset);
+        if (valuesOffsetLong is < 0 or > int.MaxValue)
+        {
+            return null;
+        }
+
+        int valuesOffset = (int)valuesOffsetLong;
+        return reader.HasBytes(valuesOffset, (int)totalBytes) ? reader.ReadSpan(valuesOffset, (int)totalBytes).ToArray() : null;
+    }
+
     private uint[] ReadValues(TiffIfdEntry entry)
     {
         int typeSize = entry.Type.GetByteSize();
