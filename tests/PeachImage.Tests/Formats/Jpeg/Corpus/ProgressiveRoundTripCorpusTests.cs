@@ -8,6 +8,7 @@ namespace PeachImage.Tests.Formats.Jpeg.Corpus;
 /// corpus-sourced images, not a full differential-fidelity sweep (see <see cref="MozjpegCorpusTests"/> for
 /// that, on the decode side).
 /// </summary>
+[Trait("Category", "Corpus")]
 public class ProgressiveRoundTripCorpusTests
 {
     [Theory]

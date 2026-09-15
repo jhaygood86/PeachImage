@@ -12,6 +12,7 @@ namespace PeachImage.Tests.Formats.Jpeg.Corpus;
 /// and metadata-level correctness for the specific paths those files are known (by construction, confirmed
 /// during investigation) to hit.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class AdobeColorSpaceCorpusTests
 {
     private static string ValidPath(string fileName) => Path.Combine(CorpusPaths.ImazenRoot, "jpeg-conformance", "valid", fileName);

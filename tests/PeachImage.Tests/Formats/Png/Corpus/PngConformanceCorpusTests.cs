@@ -6,6 +6,7 @@ namespace PeachImage.Tests.Formats.Png.Corpus;
 /// odd sizes, zlib compression levels, transparency, and ancillary chunks, plus 14 deliberately
 /// corrupt/malformed files.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class PngConformanceCorpusTests
 {
     [Theory]

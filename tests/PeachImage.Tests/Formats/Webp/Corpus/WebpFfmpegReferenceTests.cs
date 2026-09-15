@@ -12,6 +12,7 @@ namespace PeachImage.Tests.Formats.Webp.Corpus;
 /// exists at all alongside <see cref="WebpCorpusTests"/> (SkiaSharp-differential, tolerant) and
 /// <see cref="WebpDecodeHashTests"/> (self-referential regression baseline) rather than replacing either.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class WebpFfmpegReferenceTests
 {
     [Fact]

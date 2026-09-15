@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using PeachImage.Formats.Webp.Decoding.Vp8L;
 using PeachImage.Formats.Webp.Encoding.Vp8L;
 
@@ -10,19 +11,28 @@ namespace PeachImage.Tests.Formats.Webp.Unit.Vp8L;
 /// </summary>
 public class Vp8LPrefixCodeEncoderTests
 {
-    [Theory]
-    [MemberData(nameof(ExhaustiveLengthRange))]
-    public void EncodePrefixCodeValue_RoundTrips_ThroughDecodePrefixCodeValue(int value)
+    /// <summary>
+    /// Exhaustively round-trips every value from 1 to 5000 in one aggregate test rather than one xUnit
+    /// <c>[Theory]</c> case per value: 5,000 individual cases all land in this class's single collection (xUnit
+    /// parallelizes across collections, not within one), so they'd run serially and pay per-case
+    /// discovery/reporting overhead 5,000 times over. <see cref="Parallel.For(int,int,Action{int})"/> keeps the
+    /// exhaustive coverage while actually using more than one core, since each value's round trip is
+    /// independent and side-effect-free.
+    /// </summary>
+    [Fact]
+    public void EncodePrefixCodeValue_RoundTrips_ThroughDecodePrefixCodeValue_Exhaustive()
     {
-        AssertRoundTrips(value);
-    }
+        var failures = new ConcurrentBag<int>();
 
-    public static IEnumerable<object[]> ExhaustiveLengthRange()
-    {
-        for (int v = 1; v <= 5000; v++)
+        Parallel.For(1, 5001, v =>
         {
-            yield return [v];
-        }
+            if (!RoundTrips(v))
+            {
+                failures.Add(v);
+            }
+        });
+
+        Assert.True(failures.IsEmpty, $"Round trip failed for value(s): {string.Join(", ", failures.OrderBy(v => v))}");
     }
 
     [Theory]
@@ -38,7 +48,9 @@ public class Vp8LPrefixCodeEncoderTests
         AssertRoundTrips(value);
     }
 
-    private static void AssertRoundTrips(int value)
+    private static void AssertRoundTrips(int value) => Assert.True(RoundTrips(value));
+
+    private static bool RoundTrips(int value)
     {
         var (symbol, extraValue, extraBits) = Vp8LPrefixCodeEncoder.EncodePrefixCodeValue(value);
 
@@ -49,6 +61,6 @@ public class Vp8LPrefixCodeEncoderTests
 
         int decoded = Vp8LBackwardReferenceTables.DecodePrefixCodeValue(symbol, reader);
 
-        Assert.Equal(value, decoded);
+        return decoded == value;
     }
 }

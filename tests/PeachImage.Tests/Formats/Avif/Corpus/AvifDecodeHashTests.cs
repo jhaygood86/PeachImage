@@ -15,6 +15,7 @@ namespace PeachImage.Tests.Formats.Avif.Corpus;
 /// feature turning a SKIPPED entry into real pixels, for instance). It does always mean "look at this and
 /// decide", and the fix is to regenerate the baseline in the same commit as the change that caused it.
 /// </remarks>
+[Trait("Category", "Corpus")]
 public class AvifDecodeHashTests
 {
     [Fact]

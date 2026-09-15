@@ -6,6 +6,7 @@ namespace PeachImage.Tests.Formats.Gif.Corpus;
 /// (transparency), wedge.gif. Specifically exercises interlacing, transparency, and general LZW correctness
 /// against real-world-encoded files (not just PeachImage's own encoder output).
 /// </summary>
+[Trait("Category", "Corpus")]
 public class GiflibCorpusTests
 {
     [Theory]

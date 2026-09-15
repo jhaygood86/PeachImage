@@ -41,11 +41,13 @@ internal static class CorpusFileSource
     public static IEnumerable<string> MozjpegFilePaths() =>
         EnumerateJpegFiles(Path.Combine(CorpusPaths.ImazenRoot, "mozjpeg")).Take(10);
 
-    public static IEnumerable<TheoryDataRow<string>> ZuneFuzzFiles() =>
-        // Fuzz inputs are named by content hash with no file extension (they're arbitrary byte sequences,
-        // not necessarily even well-formed enough to deserve a ".jpg" name) — enumerate everything, not
-        // just files that already look like JPEGs by name.
-        ToTheoryData(EnumerateAllFiles(Path.Combine(CorpusPaths.ImazenRoot, "zune", "fuzz-corpus", "jpeg")));
+    /// <summary>The zune-image fuzz corpus's files, as plain paths for a single aggregate <c>[Fact]</c> that
+    /// loops (and parallelizes over) the corpus itself rather than driving one <c>[Theory]</c> case per file.
+    /// Fuzz inputs are named by content hash with no file extension (they're arbitrary byte sequences, not
+    /// necessarily even well-formed enough to deserve a ".jpg" name) — enumerate everything, not just files
+    /// that already look like JPEGs by name.</summary>
+    public static IEnumerable<string> ZuneFuzzFilePaths() =>
+        EnumerateAllFiles(Path.Combine(CorpusPaths.ImazenRoot, "zune", "fuzz-corpus", "jpeg"));
 
     public static IEnumerable<TheoryDataRow<string>> ImageRsCrashtestFiles() =>
         ToTheoryData(EnumerateJpegFiles(Path.Combine(CorpusPaths.ImageRsRoot, "tests", "crashtest", "images")));

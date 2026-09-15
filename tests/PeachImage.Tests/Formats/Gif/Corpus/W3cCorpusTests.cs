@@ -4,6 +4,7 @@ namespace PeachImage.Tests.Formats.Gif.Corpus;
 /// The W3C image-format test page's GIF assets (w3.org/People/mimasa/test/imgformat/): standard, 256-color,
 /// grayscale, and black/white GIFs plus an animated GIF.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class W3cCorpusTests
 {
     [Theory]

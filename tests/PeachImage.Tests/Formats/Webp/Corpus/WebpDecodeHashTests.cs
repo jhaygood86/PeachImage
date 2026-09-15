@@ -15,6 +15,7 @@ namespace PeachImage.Tests.Formats.Webp.Corpus;
 /// always mean "look at this and decide", and the fix is to justify the change via
 /// <see cref="WebpCorpusTests"/> and regenerate the baseline in the same commit.
 /// </remarks>
+[Trait("Category", "Corpus")]
 public class WebpDecodeHashTests
 {
     /// <summary>Runs as one test rather than a per-file theory so a change reports as a single aggregated diff, and so write mode can rewrite the whole file atomically.</summary>

@@ -17,6 +17,7 @@ namespace PeachImage.Tests.Formats.Avif.Corpus;
 /// empirical investigation (a genuine, now-fixed decoder bug, plus a legitimate, already-documented
 /// floating-point/chroma-upsampling divergence) that established why.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class AvifFfmpegReferenceTests
 {
     /// <summary>

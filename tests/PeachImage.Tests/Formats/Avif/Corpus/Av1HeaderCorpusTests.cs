@@ -21,6 +21,7 @@ namespace PeachImage.Tests.Formats.Avif.Corpus;
 /// trailing-bits state at the very end of every tile in every real file tested is about as strong a
 /// signal as is obtainable without an independent reference decoder.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class Av1HeaderCorpusTests
 {
     [Theory]

@@ -7,6 +7,7 @@ namespace PeachImage.Tests.Formats.Webp.Corpus;
 /// bad_palette_index.webp). Exercises real-world-encoded files (not just PeachImage's own decoder-adjacent
 /// hand-built fixtures) across both VP8 and VP8L bitstreams and the ALPH chunk.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class WebpCorpusTests
 {
     [Theory]
