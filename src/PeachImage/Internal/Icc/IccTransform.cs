@@ -38,7 +38,11 @@ internal abstract class IccTransform
     {
         get
         {
-            var w = Tags.MediaWhite.Value!;
+            if (Tags.MediaWhite.Value is not { } w)
+            {
+                throw new NotSupportedException("This ICC profile has no media white point (wtpt) tag, which AbsoluteColorimetric rendering intent requires (ICC.1:2010 Annex A.2) to adapt the profile's media white to the PCS illuminant.");
+            }
+
             return new IccVector3(w.X, w.Y, w.Z);
         }
     }
