@@ -4,6 +4,7 @@ namespace PeachImage.Tests.Formats.Jpeg.Corpus;
 /// The mozjpeg reference sample set: progressive JPEGs, ICC-profile-carrying files, and a 12-bit sample
 /// (out of scope — expected to be rejected with a JpegFormatException, not decoded).
 /// </summary>
+[Trait("Category", "Corpus")]
 public class MozjpegCorpusTests
 {
     [Theory]

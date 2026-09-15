@@ -9,6 +9,7 @@ namespace PeachImage.Tests.Formats.Tiff.Corpus;
 /// but uncommon — multi-IFD documents, SubIFD chains, GeoTIFF metadata), and <c>robustness</c> (malformed —
 /// circular/self-referential IFD chains, a truncated LZW stream) subsets.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class TiffConformanceCorpusTests
 {
     [Theory]

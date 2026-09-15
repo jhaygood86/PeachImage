@@ -13,6 +13,22 @@ internal static class CorpusFileSource
 {
     public static IEnumerable<TheoryDataRow<string>> WebpFiles() => EnumerateFiles(CorpusPaths.LibwebpTestDataRoot);
 
+    /// <summary>The same files as <see cref="WebpFiles"/>, as plain paths rather than
+    /// <see cref="TheoryDataRow{T}"/> — for a single aggregate <c>[Fact]</c> that loops (and parallelizes over)
+    /// the corpus itself rather than driving one <c>[Theory]</c> case per file.</summary>
+    public static IEnumerable<string> WebpFilePaths()
+    {
+        if (!CorpusFixture.IsAvailable || !Directory.Exists(CorpusPaths.LibwebpTestDataRoot))
+        {
+            yield break;
+        }
+
+        foreach (var file in Directory.EnumerateFiles(CorpusPaths.LibwebpTestDataRoot, "*.webp", SearchOption.AllDirectories))
+        {
+            yield return file;
+        }
+    }
+
     /// <summary>
     /// Every <c>.webp</c> file under Skia's <c>resources/images</c> fixture set (see <see cref="SkiaCorpusFetcher"/>)
     /// that's actually animated — auto-detected via <see cref="WebpDecoder.Identify"/>'s

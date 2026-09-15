@@ -6,6 +6,7 @@ namespace PeachImage.Tests.Formats.Bmp.Corpus;
 /// compression mode, and bitfield mask combination. Split into <c>valid</c>, <c>non-conformant</c>, and
 /// <c>invalid</c> subsets.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class BmpConformanceCorpusTests
 {
     [Theory]

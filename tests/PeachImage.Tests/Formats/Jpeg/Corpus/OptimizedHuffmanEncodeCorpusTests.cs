@@ -13,6 +13,7 @@ namespace PeachImage.Tests.Formats.Jpeg.Corpus;
 /// asks for, aggregated across files rather than asserted per-file since any single near-optimal file could
 /// legitimately tie.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class OptimizedHuffmanEncodeCorpusTests
 {
     private static readonly TimeSpan PerFileTimeout = TimeSpan.FromSeconds(45);

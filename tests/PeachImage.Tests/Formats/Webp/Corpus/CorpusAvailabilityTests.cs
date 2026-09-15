@@ -5,6 +5,7 @@ namespace PeachImage.Tests.Formats.Webp.Corpus;
 /// couldn't be fetched (no network, opted out via PEACHIMAGE_SKIP_CORPUS_FETCH), this reports as Skipped so
 /// it's obvious from the test run output, instead of corpus-driven tests just quietly vanishing.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class CorpusAvailabilityTests
 {
     [Fact]

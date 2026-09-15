@@ -6,6 +6,7 @@ namespace PeachImage.Tests.Formats.Avif.Corpus;
 /// Skipped so it's obvious from the test run output, instead of corpus-driven tests just quietly
 /// vanishing.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class CorpusAvailabilityTests
 {
     [Fact]

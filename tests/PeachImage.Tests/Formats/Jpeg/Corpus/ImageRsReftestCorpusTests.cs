@@ -5,6 +5,7 @@ namespace PeachImage.Tests.Formats.Jpeg.Corpus;
 /// broader "imagetestsuite" fuzz corpus), reference images (paired .jpg/.png in <c>tests/reftest/images</c>,
 /// including lossless-JPEG and mozilla-sourced samples), and ICC-chunking edge cases.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class ImageRsReftestCorpusTests
 {
     [Theory]

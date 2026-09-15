@@ -5,6 +5,7 @@ namespace PeachImage.Tests.Formats.Webp.Corpus;
 /// <see cref="SkiaCorpusFetcher"/>) — libwebp-test-data (<see cref="WebpCorpusTests"/>'s source) has no
 /// animated WebP files at all, so this is the only real-world (not hand-built) animated-WebP corpus coverage.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class WebpAnimatedCorpusTests
 {
     [Theory]

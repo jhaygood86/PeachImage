@@ -25,6 +25,7 @@ namespace PeachImage.Tests.Formats.Tiff.Corpus;
 /// excluding every alpha-bearing file from this specific comparison is simpler and safer than trying to
 /// detect just the premultiplied ones.
 /// </remarks>
+[Trait("Category", "Corpus")]
 public class TiffFfmpegReferenceTests
 {
     [Fact]

@@ -4,6 +4,7 @@ namespace PeachImage.Tests.Formats.Jpeg.Corpus;
 /// The Imazen <c>codec-corpus</c> JPEG conformance set: valid, invalid, non-conformant, and crash-reproducer
 /// files spanning 12 camera manufacturers, CMYK/YCCK color spaces, and various sampling configurations.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class ImazenConformanceCorpusTests
 {
     [Theory]

@@ -12,6 +12,7 @@ namespace PeachImage.Tests.Formats.Avif.Corpus;
 /// which is a scope fact, not a failure. The ffmpeg-differential pixel comparison this doc comment used to
 /// point at as future work now exists: see <c>AvifFfmpegReferenceTests</c>.
 /// </summary>
+[Trait("Category", "Corpus")]
 public class AvifCorpusTests
 {
     [Theory]

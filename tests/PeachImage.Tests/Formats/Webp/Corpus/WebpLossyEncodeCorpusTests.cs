@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using PeachImage.Formats.Webp;
 using PeachImage.Formats.Webp.Decoding;
 using PeachImage.Formats.Webp.Decoding.Vp8;
@@ -26,24 +27,44 @@ namespace PeachImage.Tests.Formats.Webp.Corpus;
 /// skipped (not failed) to keep this test's runtime bounded, since re-encoding is materially more expensive
 /// than the pure-decode differential test <see cref="WebpCorpusTests"/> runs.
 /// </remarks>
+[Trait("Category", "Corpus")]
 public class WebpLossyEncodeCorpusTests
 {
     private const int MaxDimension = 256;
     private static readonly TimeSpan PerFileTimeout = TimeSpan.FromSeconds(45);
 
-    [Theory]
-    [MemberData(nameof(CorpusFileSource.WebpFiles), MemberType = typeof(CorpusFileSource))]
-    public void ReEncodedLossy_DecodesGracefullyAndMatchesSkiaWhenBothSucceed(string path)
+    /// <summary>
+    /// One aggregate <c>[Fact]</c> parallelized over every corpus file, rather than one xUnit <c>[Theory]</c>
+    /// case per file: with one case per collection-thread, this class's ~146 cases would otherwise run
+    /// serially, and each case can individually cost up to <see cref="PerFileTimeout"/> re-encoding. Each
+    /// file's re-encode/compare is independent, so <see cref="Parallel.ForEach{TSource}(IEnumerable{TSource},Action{TSource})"/>
+    /// lets this actually use more than one core while still reporting exactly which file(s) failed.
+    /// </summary>
+    [Fact]
+    public void ReEncodedLossy_DecodesGracefullyAndMatchesSkiaWhenBothSucceed()
     {
-        if (!CorpusHangGuard.TryRun(() => TryReEncodeAndCompare(path), PerFileTimeout, out var result))
+        if (!CorpusFixture.IsAvailable)
         {
-            Assert.Fail($"Re-encoding/comparing {Path.GetFileName(path)} did not complete within {PerFileTimeout.TotalSeconds:F0}s (possible hang).");
+            return;
         }
 
-        if (result is { Failed: true } failure)
+        var failures = new ConcurrentBag<string>();
+
+        Parallel.ForEach(CorpusFileSource.WebpFilePaths(), path =>
         {
-            Assert.Fail(failure.Message);
-        }
+            if (!CorpusHangGuard.TryRun(() => TryReEncodeAndCompare(path), PerFileTimeout, out var result))
+            {
+                failures.Add($"Re-encoding/comparing {Path.GetFileName(path)} did not complete within {PerFileTimeout.TotalSeconds:F0}s (possible hang).");
+                return;
+            }
+
+            if (result is { Failed: true } failure)
+            {
+                failures.Add(failure.Message!);
+            }
+        });
+
+        Assert.True(failures.IsEmpty, $"{failures.Count} file(s) failed:{Environment.NewLine}{string.Join(Environment.NewLine, failures)}");
     }
 
     private static ComparisonResult TryReEncodeAndCompare(string path)
