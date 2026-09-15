@@ -49,4 +49,5 @@ internal static class IccSignatures
     internal const string ParametricCurve = "para";
 
     internal const string MediaWhitePoint = "wtpt";
+    internal const string MediaBlackPoint = "bkpt";
 }

@@ -76,6 +76,9 @@ internal static class IccColorMath
     {
         double clamped = Math.Clamp(linear, 0.0, 1.0);
         double companded = clamped <= 0.0031308 ? clamped * 12.92 : (1.055 * Math.Pow(clamped, 1 / 2.4)) - 0.055;
-        return (byte)Math.Clamp(Math.Round(companded * 255.0), 0, 255);
+        return NormalizedToByte(companded);
     }
+
+    /// <summary>Scales a normalized (0-1, but not clamped going in) value to a byte, rounding and clamping to [0, 255].</summary>
+    internal static byte NormalizedToByte(double normalized) => (byte)Math.Clamp(Math.Round(normalized * 255.0), 0, 255);
 }

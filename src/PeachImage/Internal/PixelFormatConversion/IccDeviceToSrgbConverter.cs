@@ -31,7 +31,7 @@ internal static class IccDeviceToSrgbConverter
             return false;
         }
 
-        Convert(deviceValues, rgba, pixelCount, profile, profile.ChannelCount, intent);
+        Convert(deviceValues, rgba, pixelCount, profile, profile.ChannelCount, intent, blackPointCompensation: false);
         return true;
     }
 
@@ -39,8 +39,8 @@ internal static class IccDeviceToSrgbConverter
     /// Attempts to convert using an already-parsed <paramref name="profile"/>, for callers (the public ICC API)
     /// that parse once and convert many times rather than re-parsing per call.
     /// </summary>
-    internal static void Convert(ReadOnlySpan<byte> deviceValues, Span<byte> rgba, int pixelCount, IccProfile profile, IccIntent intent) =>
-        Convert(deviceValues, rgba, pixelCount, profile, profile.ChannelCount, intent);
+    internal static void Convert(ReadOnlySpan<byte> deviceValues, Span<byte> rgba, int pixelCount, IccProfile profile, IccIntent intent, bool blackPointCompensation = false) =>
+        Convert(deviceValues, rgba, pixelCount, profile, profile.ChannelCount, intent, blackPointCompensation);
 
     /// <summary>
     /// Parses <paramref name="iccProfileBytes"/> and resolves the intent to use when <paramref name="intent"/>
@@ -67,12 +67,20 @@ internal static class IccDeviceToSrgbConverter
         return true;
     }
 
-    private static void Convert(ReadOnlySpan<byte> deviceValues, Span<byte> rgba, int pixelCount, IccProfile profile, int channelCount, IccIntent intent)
+    // sRGB's own black point, in D50 PCS XYZ: display luminance 0 -> linear sRGB (0,0,0) -> XYZ (0,0,0),
+    // exactly, since every stage from there to D50 PCS is a linear matrix multiply (0 maps to 0 regardless of
+    // which fixed matrix is used). No profile object is needed to know this, unlike an arbitrary destination.
+    private static readonly IccVector3 SrgbBlackXyzD50 = new(0, 0, 0);
+
+    private static void Convert(ReadOnlySpan<byte> deviceValues, Span<byte> rgba, int pixelCount, IccProfile profile, int channelCount, IccIntent intent, bool blackPointCompensation)
     {
         Span<double> xs = stackalloc double[BatchSize];
         Span<double> ys = stackalloc double[BatchSize];
         Span<double> zs = stackalloc double[BatchSize];
         Span<double> normalizedDevice = stackalloc double[channelCount];
+
+        bool applyBpc = blackPointCompensation && IccBlackPointCompensation.AppliesTo(intent);
+        var sourceBlack = applyBpc ? profile.GetBlackPointXyzD50(intent) : default;
 
         int processed = 0;
         while (processed < pixelCount)
@@ -90,6 +98,11 @@ internal static class IccDeviceToSrgbConverter
                 }
 
                 var xyz = profile.ToXyzD50(normalizedDevice, intent);
+                if (applyBpc)
+                {
+                    xyz = IccBlackPointCompensation.Apply(xyz, sourceBlack, SrgbBlackXyzD50);
+                }
+
                 xs[i] = xyz.X;
                 ys[i] = xyz.Y;
                 zs[i] = xyz.Z;
