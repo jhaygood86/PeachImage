@@ -13,6 +13,7 @@ public static class PixelFormatExtensions
         PixelFormat.Gray16 => 2,
         PixelFormat.Rgb48 => 6,
         PixelFormat.Rgba64 => 8,
+        PixelFormat.Ycck32 => 4,
         _ => throw new ArgumentOutOfRangeException(nameof(format), format, message: null),
     };
 
@@ -26,6 +27,7 @@ public static class PixelFormatExtensions
         PixelFormat.Gray16 => 1,
         PixelFormat.Rgb48 => 3,
         PixelFormat.Rgba64 => 4,
+        PixelFormat.Ycck32 => 4,
         _ => throw new ArgumentOutOfRangeException(nameof(format), format, message: null),
     };
 

@@ -47,12 +47,15 @@ internal static class FrameReconstructor
             }
 
             int pixelCount = width * height;
+            bool invertCmyk = frame.IsAdobeInverted && !(options?.KeepAdobeCmykInverted ?? false);
+            bool decodeRawYcck = options?.DecodeRawYcck ?? false;
             return frame.ColorSpace switch
             {
                 JpegColorSpace.Grayscale => BuildGrayscaleImage(planes[0], width, height, pixelCount),
                 JpegColorSpace.YCbCr => BuildYCbCrImage(planes, width, height),
                 JpegColorSpace.Rgb => BuildDirectRgbImage(planes, width, height),
-                JpegColorSpace.Cmyk => BuildDirectCmykImage(planes, width, height, frame.IsAdobeInverted),
+                JpegColorSpace.Cmyk => BuildDirectCmykImage(planes, width, height, invertCmyk),
+                JpegColorSpace.Ycck when decodeRawYcck => BuildRawYcckImage(planes, width, height),
                 JpegColorSpace.Ycck => BuildYcckImage(planes, width, height),
                 _ => throw new JpegDecodingException($"Unsupported JPEG color space: {frame.ColorSpace}."),
             };
@@ -220,19 +223,7 @@ internal static class FrameReconstructor
 
     private static Image BuildDirectCmykImage(byte[][] planes, int width, int height, bool isAdobeInverted)
     {
-        int pixelCount = width * height;
-        byte[] cmyk = ImageBufferPool.Shared.Rent(pixelCount * 4);
-        RowParallel.For(height, y =>
-        {
-            int rowOffset = y * width;
-            InterleaveFour(
-                planes[0].AsSpan(rowOffset, width),
-                planes[1].AsSpan(rowOffset, width),
-                planes[2].AsSpan(rowOffset, width),
-                planes[3].AsSpan(rowOffset, width),
-                cmyk.AsSpan(rowOffset * 4, width * 4),
-                width);
-        });
+        byte[] cmyk = InterleaveFourPlanes(planes, width, height);
 
         if (isAdobeInverted)
         {
@@ -267,6 +258,32 @@ internal static class FrameReconstructor
         });
 
         return Image.FromBuffer(width, height, PixelFormat.Cmyk32, cmyk, owned: true);
+    }
+
+    /// <summary>Interleaves the raw, unconverted Y/Cb/Cr/K planes of a YCCK frame with no color-space transform applied.</summary>
+    private static Image BuildRawYcckImage(byte[][] planes, int width, int height)
+    {
+        byte[] ycck = InterleaveFourPlanes(planes, width, height);
+        return Image.FromBuffer(width, height, PixelFormat.Ycck32, ycck, owned: true);
+    }
+
+    private static byte[] InterleaveFourPlanes(byte[][] planes, int width, int height)
+    {
+        int pixelCount = width * height;
+        byte[] interleaved = ImageBufferPool.Shared.Rent(pixelCount * 4);
+        RowParallel.For(height, y =>
+        {
+            int rowOffset = y * width;
+            InterleaveFour(
+                planes[0].AsSpan(rowOffset, width),
+                planes[1].AsSpan(rowOffset, width),
+                planes[2].AsSpan(rowOffset, width),
+                planes[3].AsSpan(rowOffset, width),
+                interleaved.AsSpan(rowOffset * 4, width * 4),
+                width);
+        });
+
+        return interleaved;
     }
 
     private static void InterleaveThree(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, ReadOnlySpan<byte> c, Span<byte> destination, int pixelCount)

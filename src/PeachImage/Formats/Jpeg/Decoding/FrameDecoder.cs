@@ -17,9 +17,10 @@ internal static class FrameDecoder
 
     /// <summary>
     /// Reads just enough of <paramref name="stream"/> to determine its frame header (dimensions, precision,
-    /// component sampling), stopping as soon as a SOF marker is parsed without decoding any scan data.
+    /// component sampling) and resolved color space, stopping as soon as a SOF marker is parsed without
+    /// decoding any scan data.
     /// </summary>
-    public static JpegFrameHeader IdentifyFrameHeader(Stream stream)
+    public static (JpegFrameHeader FrameHeader, JpegColorSpace ColorSpace, bool IsAdobeInverted) IdentifyFrameHeader(Stream stream)
     {
         var source = new JpegByteSource(stream);
         var markerReader = new JpegMarkerReader(source);
@@ -28,6 +29,8 @@ internal static class FrameDecoder
         {
             throw new JpegDecodingException("Not a JPEG file: missing SOI marker.");
         }
+
+        JpegAdobeSegment? adobe = null;
 
         while (true)
         {
@@ -40,7 +43,8 @@ internal static class FrameDecoder
                 {
                     var frameHeader = JpegFrameHeader.Parse(ReadSegment(markerReader), isProgressive: marker == JpegMarker.Sof2);
                     ThrowIfDimensionsExceedLimits(frameHeader);
-                    return frameHeader;
+                    var (colorSpace, isAdobeInverted) = ColorSpaceResolver.Resolve(frameHeader.Components.Length, adobe);
+                    return (frameHeader, colorSpace, isAdobeInverted);
                 }
 
                 case JpegMarker.Sof1 or JpegMarker.Sof3 or JpegMarker.Sof5 or JpegMarker.Sof6 or JpegMarker.Sof7
@@ -52,6 +56,17 @@ internal static class FrameDecoder
 
                 case JpegMarker.Eoi:
                     throw new JpegDecodingException("Reached end of image before a frame header (SOF) was found.");
+
+                case JpegMarker.App14:
+                {
+                    var payload = ReadSegment(markerReader);
+                    if (JpegAdobeSegment.TryParse(payload, out var segment))
+                    {
+                        adobe = segment;
+                    }
+
+                    break;
+                }
 
                 default:
                     int length = markerReader.ReadSegmentLength();

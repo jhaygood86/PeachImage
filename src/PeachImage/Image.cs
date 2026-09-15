@@ -190,6 +190,44 @@ public sealed class Image : IDisposable
         return copy;
     }
 
+    /// <summary>
+    /// Color-manages this image using its own embedded ICC profile (<see cref="ImageMetadata.GetIccColorProfile"/>),
+    /// producing a new <see cref="PixelFormat.Rgba32"/> <see cref="Image"/> — the high-level convenience over
+    /// <see cref="IccColorProfile.ConvertToSrgb"/> for the common case of "just color-manage this image for me."
+    /// A missing or unusable embedded profile is a normal, expected outcome (most images don't carry one) rather
+    /// than an error: when there's nothing to convert — no usable profile, its channel count doesn't match this
+    /// image's own pixel format, or <see cref="PixelFormat"/> isn't one ICC conversion applies to (it's already
+    /// <see cref="PixelFormat.Rgba32"/>, for instance) — this same instance is returned unchanged rather than
+    /// throwing or allocating a needless copy, the same "may return <c>this</c>" contract <see cref="Resize"/>
+    /// documents (see its own remarks for the disposal implications of that).
+    /// </summary>
+    public Image ConvertToSrgb()
+    {
+        if (PixelFormat is not (PixelFormat.Gray8 or PixelFormat.Rgb24 or PixelFormat.Cmyk32))
+        {
+            return this;
+        }
+
+        var iccProfile = Metadata.GetIccColorProfile();
+        if (iccProfile is null || iccProfile.ChannelCount != PixelFormat.GetChannelCount())
+        {
+            return this;
+        }
+
+        var result = Create(Width, Height, PixelFormat.Rgba32);
+        iccProfile.ConvertToSrgb(GetPixelSpan(), result.GetPixelSpan(), Width * Height);
+
+        result.Metadata.HorizontalResolution = Metadata.HorizontalResolution;
+        result.Metadata.VerticalResolution = Metadata.VerticalResolution;
+        foreach (var profile in Metadata.Profiles)
+        {
+            result.Metadata.Profiles.Add(profile);
+        }
+
+        result.HasAlpha = false;
+        return result;
+    }
+
     /// <summary>Loads an image from <paramref name="path"/>, auto-detecting its format.</summary>
     public static Image Load(string path, DecoderOptions? options = null)
     {

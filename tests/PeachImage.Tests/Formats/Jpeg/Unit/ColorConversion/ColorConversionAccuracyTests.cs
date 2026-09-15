@@ -53,6 +53,57 @@ public class ColorConversionAccuracyTests
         AssertYCbCrToRgbAgree(new ScalarColorConverter(), new Vector256ColorConverter(), seed);
     }
 
+    [Fact]
+    public void YcckToCmyk_AtZeroChroma_InvertsLumaAndPassesKThrough()
+    {
+        var converter = new ScalarColorConverter();
+        Span<byte> y = stackalloc byte[1];
+        Span<byte> cb = [128];
+        Span<byte> cr = [128];
+        Span<byte> k = [200];
+        Span<byte> cmyk = stackalloc byte[4];
+        for (int yValue = 0; yValue <= 255; yValue++)
+        {
+            y[0] = (byte)yValue;
+            converter.YcckToCmyk(y, cb, cr, k, cmyk, 1);
+
+            // Zero chroma should map to a neutral gray R=G=B=~yValue, then invert to C=M=Y=~255-yValue.
+            int expected = 255 - yValue;
+            Assert.True(Math.Abs(cmyk[0] - expected) <= 1);
+            Assert.True(Math.Abs(cmyk[1] - expected) <= 1);
+            Assert.True(Math.Abs(cmyk[2] - expected) <= 1);
+            Assert.Equal(200, cmyk[3]);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void Vector128YcckToCmyk_MatchesScalarReference(int seed)
+    {
+        if (!Vector128.IsHardwareAccelerated)
+        {
+            Assert.Skip("No 128-bit SIMD hardware acceleration available on this machine.");
+        }
+
+        AssertYcckToCmykAgree(new ScalarColorConverter(), new Vector128ColorConverter(), seed);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void Vector256YcckToCmyk_MatchesScalarReference(int seed)
+    {
+        if (!Vector256.IsHardwareAccelerated)
+        {
+            Assert.Skip("No 256-bit SIMD hardware acceleration (AVX/AVX2) available on this machine.");
+        }
+
+        AssertYcckToCmykAgree(new ScalarColorConverter(), new Vector256ColorConverter(), seed);
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
@@ -95,6 +146,31 @@ public class ColorConversionAccuracyTests
         var simdOut = new byte[pixelCount * 3];
         scalar.YCbCrToRgb(y, cb, cr, scalarOut, pixelCount);
         simd.YCbCrToRgb(y, cb, cr, simdOut, pixelCount);
+
+        for (int i = 0; i < scalarOut.Length; i++)
+        {
+            Assert.True(Math.Abs(scalarOut[i] - simdOut[i]) <= 1, $"Byte {i}: scalar={scalarOut[i]}, simd={simdOut[i]}");
+        }
+    }
+
+    private static void AssertYcckToCmykAgree(IColorConverter scalar, IColorConverter simd, int seed)
+    {
+        // Deliberately odd, non-vector-width-aligned pixel count to exercise the scalar tail loop too.
+        const int pixelCount = 37;
+        var random = new Random(seed);
+        var y = new byte[pixelCount];
+        var cb = new byte[pixelCount];
+        var cr = new byte[pixelCount];
+        var k = new byte[pixelCount];
+        random.NextBytes(y);
+        random.NextBytes(cb);
+        random.NextBytes(cr);
+        random.NextBytes(k);
+
+        var scalarOut = new byte[pixelCount * 4];
+        var simdOut = new byte[pixelCount * 4];
+        scalar.YcckToCmyk(y, cb, cr, k, scalarOut, pixelCount);
+        simd.YcckToCmyk(y, cb, cr, k, simdOut, pixelCount);
 
         for (int i = 0; i < scalarOut.Length; i++)
         {

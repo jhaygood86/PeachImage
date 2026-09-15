@@ -23,4 +23,11 @@ public enum PixelFormat : byte
 
     /// <summary>Four-channel 16-bit red/green/blue/alpha, tightly interleaved.</summary>
     Rgba64,
+
+    /// <summary>
+    /// Four-channel 8-bit luma/blue-chroma/red-chroma/key, tightly interleaved, exactly as decoded from a JPEG
+    /// YCCK frame with no color-space transform applied. No colorimetric meaning is imposed — see
+    /// <c>JpegDecoderOptions.DecodeRawYcck</c>.
+    /// </summary>
+    Ycck32,
 }

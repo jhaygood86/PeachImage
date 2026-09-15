@@ -15,12 +15,20 @@ internal static class ColorSpaceResolver
         componentCount switch
         {
             1 => (JpegColorSpace.Grayscale, false),
-            3 => adobe is { Transform: 0 }
-                ? (JpegColorSpace.Rgb, false)
-                : (JpegColorSpace.YCbCr, false),
-            4 => adobe is { Transform: 2 }
-                ? (JpegColorSpace.Ycck, false)
-                : (JpegColorSpace.Cmyk, adobe.HasValue),
+            3 => adobe switch
+            {
+                null => (JpegColorSpace.YCbCr, false),
+                { Transform: 0 } => (JpegColorSpace.Rgb, false),
+                { Transform: 1 } => (JpegColorSpace.YCbCr, false),
+                { Transform: var transform } => throw new JpegDecodingException($"Unsupported Adobe APP14 transform {transform} for a 3-component JPEG (expected 0 or 1)."),
+            },
+            4 => adobe switch
+            {
+                null => (JpegColorSpace.Cmyk, false),
+                { Transform: 0 } => (JpegColorSpace.Cmyk, true),
+                { Transform: 2 } => (JpegColorSpace.Ycck, false),
+                { Transform: var transform } => throw new JpegDecodingException($"Unsupported Adobe APP14 transform {transform} for a 4-component JPEG (expected 0 or 2)."),
+            },
             _ => throw new JpegDecodingException($"Unsupported JPEG component count: {componentCount}."),
         };
 }
