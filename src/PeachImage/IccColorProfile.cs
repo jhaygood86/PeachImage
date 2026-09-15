@@ -84,8 +84,18 @@ public sealed class IccColorProfile
     /// </param>
     /// <param name="pixelCount">The number of pixels to convert.</param>
     /// <param name="intent">The rendering intent to use, or <see langword="null"/> to use <see cref="DefaultRenderingIntent"/>.</param>
+    /// <param name="blackPointCompensation">
+    /// Whether to scale this profile's black point to sRGB's own black point (ICC.1:2010 Annex A), reducing
+    /// shadow clipping/crushing for a source profile whose darkest achievable device value isn't quite true
+    /// black. Meaningful for <see cref="IccRenderingIntent.Perceptual"/>, <see cref="IccRenderingIntent.RelativeColorimetric"/>,
+    /// and <see cref="IccRenderingIntent.Saturation"/>; ignored for <see cref="IccRenderingIntent.AbsoluteColorimetric"/>,
+    /// which preserves absolute media black by definition. Under <see cref="IccRenderingIntent.Perceptual"/>
+    /// specifically, this compounds with that intent's own built-in shadow handling (distinct from this flag,
+    /// and always applied regardless of it) -- if shadows look over-compressed with both in play, try
+    /// <see cref="IccRenderingIntent.RelativeColorimetric"/> instead.
+    /// </param>
     /// <exception cref="ArgumentException"><paramref name="deviceValues"/> or <paramref name="destination"/> isn't sized as documented above.</exception>
-    public void ConvertToSrgb(ReadOnlySpan<byte> deviceValues, Span<byte> destination, int pixelCount, IccRenderingIntent? intent = null)
+    public void ConvertToSrgb(ReadOnlySpan<byte> deviceValues, Span<byte> destination, int pixelCount, IccRenderingIntent? intent = null, bool blackPointCompensation = false)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(pixelCount);
 
@@ -102,7 +112,66 @@ public sealed class IccColorProfile
         }
 
         var resolvedIntent = intent is { } requestedIntent ? ToInternalIntent(requestedIntent) : defaultIntent;
-        IccDeviceToSrgbConverter.Convert(deviceValues, destination, pixelCount, profile, resolvedIntent);
+        IccDeviceToSrgbConverter.Convert(deviceValues, destination, pixelCount, profile, resolvedIntent, blackPointCompensation);
+    }
+
+    /// <summary>
+    /// Converts <paramref name="pixelCount"/> pixels of normalized device values from this profile's device
+    /// space to <paramref name="destination"/>'s device space, routing both profiles' device↔PCS transforms
+    /// through the shared D50 profile connection space they each resolve to internally -- so this is the same
+    /// operation whether <paramref name="destination"/> is a CMYK output-intent profile (converting
+    /// RGB-authored content into it) or another device space entirely (e.g. one CMYK profile into another).
+    /// <see cref="ConvertToSrgb"/> is this same conversion against a fixed, built-in sRGB destination,
+    /// independently optimized since sRGB's device→PCS direction never varies.
+    /// </summary>
+    /// <param name="destination">The destination ICC profile.</param>
+    /// <param name="deviceValues">
+    /// <paramref name="pixelCount"/> * <see cref="ChannelCount"/> bytes: this profile's own device values,
+    /// tightly interleaved (see <see cref="ConvertToSrgb"/>'s remarks on channel order).
+    /// </param>
+    /// <param name="destinationValues">
+    /// <paramref name="pixelCount"/> * <paramref name="destination"/>'s own <see cref="ChannelCount"/> bytes:
+    /// the converted device values in <paramref name="destination"/>'s color space, tightly interleaved.
+    /// </param>
+    /// <param name="pixelCount">The number of pixels to convert.</param>
+    /// <param name="intent">
+    /// The rendering intent to use for both this profile's forward transform and <paramref name="destination"/>'s
+    /// reverse transform, or <see langword="null"/> to use this profile's own <see cref="DefaultRenderingIntent"/>.
+    /// </param>
+    /// <param name="blackPointCompensation">
+    /// Whether to scale this profile's black point to <paramref name="destination"/>'s black point
+    /// (ICC.1:2010 Annex A), reducing shadow clipping/crushing when the two profiles' darkest achievable
+    /// device values differ. Meaningful for <see cref="IccRenderingIntent.Perceptual"/>,
+    /// <see cref="IccRenderingIntent.RelativeColorimetric"/>, and <see cref="IccRenderingIntent.Saturation"/>;
+    /// ignored for <see cref="IccRenderingIntent.AbsoluteColorimetric"/>, which preserves absolute media black
+    /// by definition. Under <see cref="IccRenderingIntent.Perceptual"/> specifically, this compounds with that
+    /// intent's own built-in shadow handling (distinct from this flag, and always applied regardless of it) --
+    /// if shadows look over-compressed with both in play, try <see cref="IccRenderingIntent.RelativeColorimetric"/> instead.
+    /// </param>
+    /// <exception cref="ArgumentException"><paramref name="deviceValues"/> or <paramref name="destinationValues"/> isn't sized as documented above.</exception>
+    /// <exception cref="NotSupportedException">
+    /// <paramref name="destination"/> has no reverse (PCS→device) transform to convert into -- e.g. an
+    /// AToB-only profile (such as a scanner "input" profile) with no corresponding BToA tag.
+    /// </exception>
+    public void ConvertTo(IccColorProfile destination, ReadOnlySpan<byte> deviceValues, Span<byte> destinationValues, int pixelCount, IccRenderingIntent? intent = null, bool blackPointCompensation = false)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentOutOfRangeException.ThrowIfNegative(pixelCount);
+
+        int expectedDeviceLength = pixelCount * ChannelCount;
+        if (deviceValues.Length != expectedDeviceLength)
+        {
+            throw new ArgumentException($"Expected {expectedDeviceLength} device value bytes ({pixelCount} pixels x {ChannelCount} channels), but got {deviceValues.Length}.", nameof(deviceValues));
+        }
+
+        int expectedDestinationLength = pixelCount * destination.ChannelCount;
+        if (destinationValues.Length != expectedDestinationLength)
+        {
+            throw new ArgumentException($"Expected {expectedDestinationLength} destination value bytes ({pixelCount} pixels x {destination.ChannelCount} channels), but got {destinationValues.Length}.", nameof(destinationValues));
+        }
+
+        var resolvedIntent = intent is { } requestedIntent ? ToInternalIntent(requestedIntent) : defaultIntent;
+        IccDeviceToDeviceConverter.Convert(deviceValues, destinationValues, pixelCount, profile, destination.profile, resolvedIntent, blackPointCompensation);
     }
 
     private static IccColorSpace ToPublicColorSpace(string dataColorSpace) => dataColorSpace switch

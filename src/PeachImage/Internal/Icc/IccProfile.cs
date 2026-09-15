@@ -78,8 +78,39 @@ internal sealed class IccProfile
     /// <summary>Converts normalized (0-1) device values (e.g. 4 CMYK channels) to the profile's own D50 profile connection space.</summary>
     internal IccVector3 ToXyzD50(ReadOnlySpan<double> deviceValues, IccIntent intent) => transform.ToXyz(deviceValues, intent);
 
-    /// <summary>Converts a D50 profile-connection-space value back to normalized (0-1) device values. Used for round-trip verification, not by the main conversion kernel.</summary>
+    /// <summary>
+    /// Converts a D50 profile-connection-space value back to normalized (0-1) device values. Used both for
+    /// round-trip verification and, as the sink stage of <see cref="IccColorProfile.ConvertTo"/>, as an actual
+    /// per-pixel conversion kernel when this profile is a conversion's destination.
+    /// </summary>
     internal void FromXyzD50(IccVector3 xyzD50, IccIntent intent, Span<double> deviceValues) => transform.FromXyz(xyzD50, intent, deviceValues);
+
+    /// <summary>
+    /// This profile's black point in D50 PCS XYZ, in the same (possibly perceptually-adjusted) PCS space
+    /// <see cref="ToXyzD50"/> itself produces under <paramref name="intent"/> -- for black point compensation
+    /// (<see cref="IccBlackPointCompensation"/>, ICC.1:2010 Annex A). Prefers the profile's own <c>bkpt</c> tag
+    /// when present (a CMM-consumed hint some real profiles declare specifically for this purpose), adjusted
+    /// the same way a device→PCS conversion would be since the tag itself is stored as an unadjusted
+    /// colorimetric PCS value; otherwise estimates it by running the profile's own darkest achievable device
+    /// value through its forward transform under <paramref name="intent"/> -- all-zero for an additive
+    /// Gray/RGB device (0 = no light), all-one for a subtractive CMYK device (full ink coverage on every
+    /// channel, the darkest a real press can produce).
+    /// </summary>
+    internal IccVector3 GetBlackPointXyzD50(IccIntent intent)
+    {
+        if (tags.MediaBlack.Value is { } bkpt)
+        {
+            return transform.AdjustBlackPointXyz(new IccVector3(bkpt.X, bkpt.Y, bkpt.Z), intent);
+        }
+
+        Span<double> deviceBlack = stackalloc double[ChannelCount];
+        if (DataColorSpace == IccSignatures.Cmyk)
+        {
+            deviceBlack.Fill(1.0);
+        }
+
+        return transform.ToXyz(deviceBlack, intent);
+    }
 
     /*
      * Transform tag precedence for input/display/output/color-space profile types (ICC.1:2010 Annex B):

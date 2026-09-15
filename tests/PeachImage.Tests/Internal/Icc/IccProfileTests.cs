@@ -184,4 +184,65 @@ public class IccProfileTests
         var blackRgb = IccColorMath.XyzD50ToLinearSrgb.Multiply(black);
         Assert.True(IccColorMath.LinearToSrgbByte(blackRgb.Y) < 20);
     }
+
+    [Fact]
+    public void GetBlackPointXyzD50_NoTag_FallsBackToDeviceBlackEstimate()
+    {
+        // No bkpt tag: falls back to converting device black (0.0 for an additive Gray device) through the
+        // profile's own forward transform -- for a linear grey TRC, that's exactly PCS (0,0,0).
+        var profile = new IccProfile(SyntheticIccProfileBuilder.BuildGrayTrcProfile());
+        var blackPoint = profile.GetBlackPointXyzD50(IccIntent.RelativeColorimetric);
+
+        Assert.Equal(0.0, blackPoint.X, precision: 9);
+        Assert.Equal(0.0, blackPoint.Y, precision: 9);
+        Assert.Equal(0.0, blackPoint.Z, precision: 9);
+    }
+
+    [Fact]
+    public void GetBlackPointXyzD50_WithTag_ReturnsDeclaredValue()
+    {
+        var profile = new IccProfile(SyntheticIccProfileBuilder.BuildGrayTrcProfile(blackPointX: 0.04821, blackPointY: 0.05, blackPointZ: 0.041245));
+        var blackPoint = profile.GetBlackPointXyzD50(IccIntent.RelativeColorimetric);
+
+        Assert.Equal(0.04821, blackPoint.X, precision: 4);
+        Assert.Equal(0.05, blackPoint.Y, precision: 4);
+        Assert.Equal(0.041245, blackPoint.Z, precision: 4);
+    }
+
+    [Fact]
+    public void GetBlackPointXyzD50_WithTag_AppliesSamePcsAdjustmentAsToXyzUnderPerceptualIntent()
+    {
+        // The bkpt tag is stored as an unadjusted colorimetric PCS value (ICC.1:2010), but every other value
+        // flowing through this profile under Perceptual intent (via ToXyzD50) gets a PCS adjustment applied
+        // (grey TRC transforms always apply it for Perceptual -- see hasPerceptualHandling: false). Black
+        // point compensation compares this value directly against those, so it must be adjusted the same way,
+        // not returned raw.
+        var profile = new IccProfile(SyntheticIccProfileBuilder.BuildGrayTrcProfile(blackPointX: 0.04821, blackPointY: 0.05, blackPointZ: 0.041245));
+
+        var unadjusted = profile.GetBlackPointXyzD50(IccIntent.RelativeColorimetric);
+        var perceptuallyAdjusted = profile.GetBlackPointXyzD50(IccIntent.Perceptual);
+
+        Assert.NotEqual(unadjusted.Y, perceptuallyAdjusted.Y, precision: 6);
+    }
+
+    [Fact]
+    public void BlackPointCompensationApply_SourceBlackAtOrAboveWhite_ProducesFiniteOutputInsteadOfDivideByZero()
+    {
+        // A malformed bkpt tag or an out-of-gamut CLUT extrapolation could report a "black" point at or past
+        // the PCS white on some axis. Without clamping, that would make the scaling math's denominator zero
+        // (NaN/Infinity) or negative (a sign-flipped, photo-negative-like result); clamping the black point
+        // away from white keeps the result finite and correctly signed even for this maximally-degenerate
+        // input (declared black exactly equal to white -- any real profile's own device-black estimate or a
+        // legitimate bkpt tag would never land this close to white).
+        var white = IccColorMath.IccPcsWhite;
+        var xyz = new IccVector3(0.5, 0.5, 0.5);
+        var sourceBlack = new IccVector3(white.X, white.Y, white.Z);
+        var destinationBlack = new IccVector3(0, 0, 0);
+
+        var result = IccBlackPointCompensation.Apply(xyz, sourceBlack, destinationBlack);
+
+        Assert.True(double.IsFinite(result.X), $"Expected a finite X, got {result.X}.");
+        Assert.True(double.IsFinite(result.Y), $"Expected a finite Y, got {result.Y}.");
+        Assert.True(double.IsFinite(result.Z), $"Expected a finite Z, got {result.Z}.");
+    }
 }

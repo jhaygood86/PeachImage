@@ -15,11 +15,13 @@ internal static class SyntheticIccProfileBuilder
 
     /// <summary>
     /// A minimal RGB-matrix-TRC profile: linear rTRC/gTRC/bTRC curves plus the standard sRGB primaries
-    /// (D50-adapted XYZ, the widely-published values used to derive the real sRGB ICC profile).
+    /// (D50-adapted XYZ, the widely-published values used to derive the real sRGB ICC profile). Optionally
+    /// declares an explicit <c>bkpt</c> tag (for black point compensation tests) -- otherwise the profile has
+    /// none, and its black point must be estimated from device black instead.
     /// </summary>
-    internal static byte[] BuildRgbTrcMatrixProfile()
+    internal static byte[] BuildRgbTrcMatrixProfile(double? blackPointX = null, double? blackPointY = null, double? blackPointZ = null)
     {
-        var curveTags = new (string Signature, byte[] Data)[]
+        var tags = new List<(string Signature, byte[] Data)>
         {
             ("rTRC", BuildLinearCurve()),
             ("gTRC", BuildLinearCurve()),
@@ -27,20 +29,36 @@ internal static class SyntheticIccProfileBuilder
             ("rXYZ", BuildXyzType(0.4360747, 0.2225045, 0.0139322)),
             ("gXYZ", BuildXyzType(0.3850649, 0.7168786, 0.0971045)),
             ("bXYZ", BuildXyzType(0.1430804, 0.0606169, 0.7141733)),
+            ("wtpt", BuildXyzType(0.9642, 1.0000, 0.8249)),
         };
 
-        return BuildProfile("RGB ", curveTags);
+        if (blackPointX is { } bx && blackPointY is { } by && blackPointZ is { } bz)
+        {
+            tags.Add(("bkpt", BuildXyzType(bx, by, bz)));
+        }
+
+        return BuildProfile("RGB ", tags.ToArray());
     }
 
-    /// <summary>A minimal single-curve grey profile: a linear kTRC curve.</summary>
-    internal static byte[] BuildGrayTrcProfile()
+    /// <summary>
+    /// A minimal single-curve grey profile: a linear kTRC curve. Optionally declares an explicit <c>bkpt</c>
+    /// tag (for black point compensation tests) -- otherwise the profile has none, and its black point must
+    /// be estimated from device black instead.
+    /// </summary>
+    internal static byte[] BuildGrayTrcProfile(double? blackPointX = null, double? blackPointY = null, double? blackPointZ = null)
     {
-        var curveTags = new (string Signature, byte[] Data)[]
+        var tags = new List<(string Signature, byte[] Data)>
         {
             ("kTRC", BuildLinearCurve()),
+            ("wtpt", BuildXyzType(0.9642, 1.0000, 0.8249)),
         };
 
-        return BuildProfile("GRAY", curveTags);
+        if (blackPointX is { } bx && blackPointY is { } by && blackPointZ is { } bz)
+        {
+            tags.Add(("bkpt", BuildXyzType(bx, by, bz)));
+        }
+
+        return BuildProfile("GRAY", tags.ToArray());
     }
 
     private static byte[] BuildProfile(string dataColorSpace, (string Signature, byte[] Data)[] tags)

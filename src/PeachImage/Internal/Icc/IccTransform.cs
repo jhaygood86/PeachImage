@@ -54,6 +54,16 @@ internal abstract class IccTransform
     /// <summary>Converts D50 PCS-space <paramref name="xyz"/> to device-space values, writing them into <paramref name="deviceValues"/>.</summary>
     internal abstract void FromXyz(IccVector3 xyz, IccIntent intent, Span<double> deviceValues);
 
+    /// <summary>
+    /// Applies this transform's device→PCS rendering-intent adjustment (<see cref="AdjustXyz"/>) to a PCS
+    /// value that didn't itself come from <see cref="ToXyz"/> -- specifically, a profile's own declared
+    /// <c>bkpt</c> media black point tag, which ICC.1:2010 stores as an unadjusted colorimetric PCS value.
+    /// Black point compensation needs that value in the same (possibly perceptually-adjusted) PCS space every
+    /// other value flowing through <see cref="ToXyz"/> under the same intent ends up in, or the two won't be
+    /// comparable.
+    /// </summary>
+    internal IccVector3 AdjustBlackPointXyz(IccVector3 xyz, IccIntent intent) => AdjustXyz(xyz, intent, isDeviceToPcs: true);
+
     /// <summary>A -&gt; CLUT -&gt; B (device -&gt; CLUT -&gt; PCS, or the reverse).</summary>
     protected static void Ab(ReadOnlySpan<double> aCurveInputs, IccCurve[] aCurves, IccClut clut, IccCurve[] bCurves, Span<double> output)
     {
