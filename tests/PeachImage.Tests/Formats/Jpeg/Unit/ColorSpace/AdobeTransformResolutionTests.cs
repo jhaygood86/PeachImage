@@ -70,6 +70,22 @@ public class AdobeTransformResolutionTests
         Assert.Throws<JpegDecodingException>(() => ColorSpaceResolver.Resolve(componentCount, adobe: null));
     }
 
+    [Theory]
+    [InlineData(2)]
+    [InlineData(5)]
+    public void ThreeComponents_WithUnsupportedAdobeTransform_ThrowsJpegDecodingException(byte transform)
+    {
+        Assert.Throws<JpegDecodingException>(() => ColorSpaceResolver.Resolve(3, new JpegAdobeSegment(transform)));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(5)]
+    public void FourComponents_WithUnsupportedAdobeTransform_ThrowsJpegDecodingException(byte transform)
+    {
+        Assert.Throws<JpegDecodingException>(() => ColorSpaceResolver.Resolve(4, new JpegAdobeSegment(transform)));
+    }
+
     [Fact]
     public void AdobeSegment_TryParse_RejectsPayloadWithoutSignature()
     {
@@ -83,9 +99,18 @@ public class AdobeTransformResolutionTests
     {
         byte[] payload = new byte[12];
         "Adobe"u8.CopyTo(payload);
+        payload[5] = 0x00;
+        payload[6] = 0x64;
+        payload[7] = 0x40;
+        payload[8] = 0x00;
+        payload[9] = 0x00;
+        payload[10] = 0x00;
         payload[11] = 2;
 
         Assert.True(JpegAdobeSegment.TryParse(payload, out var segment));
         Assert.Equal(2, segment.Transform);
+        Assert.Equal(0x0064, segment.DctEncodeVersion);
+        Assert.Equal(0x4000, segment.Flags0);
+        Assert.Equal(0x0000, segment.Flags1);
     }
 }

@@ -22,10 +22,10 @@ internal static class PixelFormatConverter
             (PixelFormat.Rgb24, PixelFormat.Gray8) => Convert(image, PixelFormat.Gray8, PixelFormatConversionKernels.ComputeLumaFromRgb24),
             (PixelFormat.Rgba32, PixelFormat.Gray8) => Convert(image, PixelFormat.Gray8, PixelFormatConversionKernels.ComputeLumaFromRgba32),
 
-            // Naive (non-ICC, non-colorimetric) additive-CMYK->RGB: R = 255 - min(255, C + K), etc. `image.PixelFormat`
-            // is always standard (non-inverted) CMYK here regardless of source encoding -- FrameReconstructor already
-            // undoes Adobe's inverted-CMYK convention and YCCK's transform before producing PixelFormat.Cmyk32.
-            (PixelFormat.Cmyk32, PixelFormat.Rgba32) => Convert(image, PixelFormat.Rgba32, PixelFormatConversionKernels.ConvertCmyk32ToRgba32),
+            // `image.PixelFormat` is always standard (non-inverted) CMYK here regardless of source encoding --
+            // FrameReconstructor already undoes Adobe's inverted-CMYK convention and YCCK's transform before
+            // producing PixelFormat.Cmyk32, so this one conversion point covers all three uniformly.
+            (PixelFormat.Cmyk32, PixelFormat.Rgba32) => ConvertCmykToRgba32(image),
 
             _ => throw new JpegDecodingException($"Cannot convert decoded {image.PixelFormat} pixels to requested format {targetFormat}."),
         };
@@ -39,6 +39,31 @@ internal static class PixelFormatConverter
     {
         var dest = Image.Create(source.Width, source.Height, destFormat);
         kernel(source.GetPixelSpan(), dest.GetPixelSpan(), source.Width * source.Height);
+        return dest;
+    }
+
+    /// <summary>
+    /// Uses the image's embedded ICC profile (<see cref="IccDeviceToSrgbConverter"/>) for a colorimetric
+    /// CMYK->RGBA32 conversion when one is present and usable, falling back to the naive additive formula
+    /// (<see cref="PixelFormatConversionKernels.ConvertCmyk32ToRgba32"/>) otherwise -- never throws on a
+    /// missing, corrupt, or unsupported profile.
+    /// </summary>
+    private static Image ConvertCmykToRgba32(Image image)
+    {
+        var dest = Image.Create(image.Width, image.Height, PixelFormat.Rgba32);
+        int pixelCount = image.Width * image.Height;
+        var source = image.GetPixelSpan();
+        var destination = dest.GetPixelSpan();
+
+        foreach (var profile in image.Metadata.Profiles)
+        {
+            if (profile.Kind == MetadataProfileKind.Icc && IccDeviceToSrgbConverter.TryConvert(source, destination, pixelCount, profile.Data))
+            {
+                return dest;
+            }
+        }
+
+        PixelFormatConversionKernels.ConvertCmyk32ToRgba32(source, destination, pixelCount);
         return dest;
     }
 }
