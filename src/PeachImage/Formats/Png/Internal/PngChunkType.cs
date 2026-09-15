@@ -21,6 +21,7 @@ internal readonly record struct PngChunkType(uint Value)
     public static readonly PngChunkType Itxt = FromAscii("iTXt");
     public static readonly PngChunkType Time = FromAscii("tIME");
     public static readonly PngChunkType Bkgd = FromAscii("bKGD");
+    public static readonly PngChunkType Actl = FromAscii("acTL");
 
     /// <summary>Whether this chunk must be understood by every conformant decoder (uppercase first letter).</summary>
     public bool IsCritical => (Value & 0x2000_0000) == 0;

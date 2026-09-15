@@ -10,7 +10,8 @@ internal static class PngTestFileBuilder
     private static readonly byte[] Signature = [137, 80, 78, 71, 13, 10, 26, 10];
 
     /// <param name="scanlines">Each element is one already-filtered scanline: 1 filter-type byte followed by the filtered row bytes.</param>
-    public static byte[] Build(int width, int height, byte bitDepth, byte colorType, byte[]? palette, byte[]? trns, IEnumerable<byte[]> scanlines, bool interlace = false)
+    /// <param name="extraChunks">Additional chunks (type, data) to write immediately after IHDR/PLTE/tRNS and before IDAT, e.g. <c>("acTL", ...)</c> for an APNG test.</param>
+    public static byte[] Build(int width, int height, byte bitDepth, byte colorType, byte[]? palette, byte[]? trns, IEnumerable<byte[]> scanlines, bool interlace = false, IEnumerable<(string Type, byte[] Data)>? extraChunks = null)
     {
         using var ms = new MemoryStream();
         ms.Write(Signature);
@@ -33,6 +34,14 @@ internal static class PngTestFileBuilder
         if (trns is not null)
         {
             WriteChunk(ms, "tRNS", trns);
+        }
+
+        if (extraChunks is not null)
+        {
+            foreach (var (type, data) in extraChunks)
+            {
+                WriteChunk(ms, type, data);
+            }
         }
 
         using var raw = new MemoryStream();

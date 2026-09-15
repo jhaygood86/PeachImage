@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using PeachImage.Formats.Png;
 using PeachImage.Formats.Png.Internal;
 
 namespace PeachImage.Formats.Png.Decoding;

@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using System.IO.Compression;
+using PeachImage.Formats.Png;
 using PeachImage.Formats.Png.Filtering;
 using PeachImage.Formats.Png.Internal;
 
