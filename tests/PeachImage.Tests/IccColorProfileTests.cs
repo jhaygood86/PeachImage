@@ -191,4 +191,28 @@ public class IccColorProfileTests
 
         Assert.Equal(withoutBpc[0], withBpc[0]);
     }
+
+    [Fact]
+    public void ConvertToSrgb_AbsoluteColorimetric_NoMediaWhitePointTag_ThrowsNotSupportedExceptionNotNullReferenceException()
+    {
+        // A profile missing its (ICC.1:2010 §8.2-mandatory) wtpt tag is malformed, but AbsoluteColorimetric is
+        // the only intent that ever reads it -- this should surface as a clear NotSupportedException the first
+        // time it's actually needed, not a bare NullReferenceException deep in the engine.
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildGrayTrcProfileWithoutWhitePoint());
+
+        var exception = Assert.Throws<NotSupportedException>(() =>
+            profile.ConvertToSrgb([128], stackalloc byte[4], pixelCount: 1, intent: IccRenderingIntent.AbsoluteColorimetric));
+        Assert.Contains("wtpt", exception.Message);
+    }
+
+    [Fact]
+    public void ConvertTo_AbsoluteColorimetric_NoMediaWhitePointTag_ThrowsNotSupportedExceptionNotNullReferenceException()
+    {
+        var source = new IccColorProfile(SyntheticIccProfileBuilder.BuildGrayTrcProfileWithoutWhitePoint());
+        var destination = new IccColorProfile(SyntheticIccProfileBuilder.BuildGrayTrcProfile());
+
+        var exception = Assert.Throws<NotSupportedException>(() =>
+            source.ConvertTo(destination, [128], stackalloc byte[1], pixelCount: 1, intent: IccRenderingIntent.AbsoluteColorimetric));
+        Assert.Contains("wtpt", exception.Message);
+    }
 }

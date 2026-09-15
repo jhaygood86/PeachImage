@@ -61,6 +61,21 @@ internal static class SyntheticIccProfileBuilder
         return BuildProfile("GRAY", tags.ToArray());
     }
 
+    /// <summary>
+    /// A minimal single-curve grey profile with no <c>wtpt</c> tag -- deliberately spec-incomplete (ICC.1:2010
+    /// §8.2 declares it mandatory), for testing how the engine handles a real-world profile that's missing or
+    /// corrupted it under AbsoluteColorimetric intent, the only intent that reads it.
+    /// </summary>
+    internal static byte[] BuildGrayTrcProfileWithoutWhitePoint()
+    {
+        var tags = new (string Signature, byte[] Data)[]
+        {
+            ("kTRC", BuildLinearCurve()),
+        };
+
+        return BuildProfile("GRAY", tags);
+    }
+
     private static byte[] BuildProfile(string dataColorSpace, (string Signature, byte[] Data)[] tags)
     {
         int tagTableSize = 4 + (tags.Length * 12);

@@ -95,6 +95,10 @@ public sealed class IccColorProfile
     /// <see cref="IccRenderingIntent.RelativeColorimetric"/> instead.
     /// </param>
     /// <exception cref="ArgumentException"><paramref name="deviceValues"/> or <paramref name="destination"/> isn't sized as documented above.</exception>
+    /// <exception cref="NotSupportedException">
+    /// <paramref name="intent"/> resolves to <see cref="IccRenderingIntent.AbsoluteColorimetric"/> and this
+    /// profile has no media white point (<c>wtpt</c>) tag, which that intent requires.
+    /// </exception>
     public void ConvertToSrgb(ReadOnlySpan<byte> deviceValues, Span<byte> destination, int pixelCount, IccRenderingIntent? intent = null, bool blackPointCompensation = false)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(pixelCount);
@@ -150,8 +154,10 @@ public sealed class IccColorProfile
     /// </param>
     /// <exception cref="ArgumentException"><paramref name="deviceValues"/> or <paramref name="destinationValues"/> isn't sized as documented above.</exception>
     /// <exception cref="NotSupportedException">
-    /// <paramref name="destination"/> has no reverse (PCS→device) transform to convert into -- e.g. an
-    /// AToB-only profile (such as a scanner "input" profile) with no corresponding BToA tag.
+    /// Either <paramref name="destination"/> has no reverse (PCS→device) transform to convert into -- e.g. an
+    /// AToB-only profile (such as a scanner "input" profile) with no corresponding BToA tag -- or
+    /// <paramref name="intent"/> resolves to <see cref="IccRenderingIntent.AbsoluteColorimetric"/> and either
+    /// profile has no media white point (<c>wtpt</c>) tag, which that intent requires.
     /// </exception>
     public void ConvertTo(IccColorProfile destination, ReadOnlySpan<byte> deviceValues, Span<byte> destinationValues, int pixelCount, IccRenderingIntent? intent = null, bool blackPointCompensation = false)
     {
