@@ -23,4 +23,5 @@ internal static class TiffTags
     public const ushort InkSet = 332;
     public const ushort ExtraSamples = 338;
     public const ushort SampleFormat = 339;
+    public const ushort IccProfile = 34675;
 }

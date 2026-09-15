@@ -19,7 +19,17 @@ internal static class TiffImageDecoder
 
         var image = Image.Create(descriptor.Width, descriptor.Height, descriptor.PixelFormat);
         DecodeStrips(reader, descriptor, palette, image);
+        ReadIccProfile(ifd, image);
         return image;
+    }
+
+    private static void ReadIccProfile(TiffIfd ifd, Image image)
+    {
+        byte[]? profileBytes = ifd.TryGetBytes(TiffTags.IccProfile);
+        if (profileBytes is not null)
+        {
+            image.Metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Icc, Data = profileBytes });
+        }
     }
 
     private static void DecodeStrips(TiffReader reader, TiffImageDescriptor descriptor, byte[] palette, Image image)
