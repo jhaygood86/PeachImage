@@ -94,6 +94,12 @@ internal sealed class Av1FrameDecodeResult
 }
 
 /// <summary>
+/// The result of <see cref="Av1FrameDecoder.ParseFrameHeader"/>: the sequence/frame headers plus the
+/// byte range of the following tile group, before any tile/residual decode has run.
+/// </summary>
+internal readonly record struct Av1ParsedFrameHeader(Av1SequenceHeader Sequence, Av1FrameHeader Frame, int TileGroupOffset, int TileGroupLength);
+
+/// <summary>
 /// Top-level per-item AV1 decode orchestrator (direct analog of <c>Vp8FrameDecoder</c>): parses the
 /// sequence header and (the single, since AVIF still images have exactly one frame) frame header, resolves
 /// tile boundaries via <c>tile_group_obu()</c>, and runs each tile's partition tree + mode-info decode via
@@ -108,6 +114,20 @@ internal sealed class Av1FrameDecodeResult
 internal static class Av1FrameDecoder
 {
     public static Av1FrameDecodeResult Decode(byte[] tileBytes)
+    {
+        var parsed = ParseFrameHeader(tileBytes);
+        return DecodeTileGroup(tileBytes, parsed.Sequence, parsed.Frame, parsed.TileGroupOffset, parsed.TileGroupLength);
+    }
+
+    /// <summary>
+    /// Parses OBUs through the sequence header and (single) frame header and locates the tile group's
+    /// byte range, without running tile/residual decode -- the expensive, O(pixels) part of
+    /// <see cref="Decode"/>. This alone is enough to inspect frame-header-level properties (e.g.
+    /// <see cref="Av1FrameHeader.AllLossless"/>) at O(header-bits) cost, which is why
+    /// <see cref="AvifDecoder.Identify"/> can call this directly to populate
+    /// <see cref="ImageInfo.IsLosslessEncoding"/> without a full pixel decode.
+    /// </summary>
+    public static Av1ParsedFrameHeader ParseFrameHeader(byte[] tileBytes)
     {
         var obus = Av1ObuReader.ReadObus(tileBytes, 0, tileBytes.Length);
 
@@ -141,7 +161,7 @@ internal static class Av1FrameDecoder
                     // (now byte-aligned) left off.
                     int tileGroupOffset = reader.BytePosition;
                     int tileGroupLength = obu.PayloadOffset + obu.PayloadLength - tileGroupOffset;
-                    return DecodeTileGroup(tileBytes, sequence, frame, tileGroupOffset, tileGroupLength);
+                    return new Av1ParsedFrameHeader(sequence, frame, tileGroupOffset, tileGroupLength);
                 }
 
                 // OBU_FRAME_HEADER: the tile group is a separate, later OBU_TILE_GROUP.
@@ -149,7 +169,7 @@ internal static class Av1FrameDecoder
                 {
                     if (obus[j].Type == Av1ObuType.TileGroup)
                     {
-                        return DecodeTileGroup(tileBytes, sequence, frame, obus[j].PayloadOffset, obus[j].PayloadLength);
+                        return new Av1ParsedFrameHeader(sequence, frame, obus[j].PayloadOffset, obus[j].PayloadLength);
                     }
                 }
 

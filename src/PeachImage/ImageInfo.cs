@@ -23,6 +23,27 @@ namespace PeachImage;
 /// to <see cref="Formats.Jpeg.JpegDecoderOptions.DecodeRawYcck"/> — by default, a full decode converts YCCK to
 /// CMYK regardless of this flag.
 /// </param>
+/// <param name="IsLosslessEncoding">
+/// Whether the source's pixel data was encoded losslessly by its original codec, so a caller can avoid
+/// silently re-encoding an already-lossy source under a full-fidelity assumption. Semantics are
+/// format-specific:
+/// <list type="bullet">
+/// <item>WebP: <see langword="true"/> for a VP8L (lossless) bitstream, <see langword="false"/> for VP8
+/// (lossy). Always <see langword="false"/> for an animated WebP — lossy/lossless is genuinely a
+/// per-frame (<c>ANMF</c>) property there, so a single file-level answer isn't well-defined.</item>
+/// <item>AVIF: <see langword="true"/> only when every AV1 tile's frame header reports the coded stream
+/// as fully lossless (identity-transform, qindex/delta-q all zero, and no superres upscaling) —
+/// AND'd across every tile of a HEIF grid composite. A malformed AV1 tile bitstream degrades this to
+/// <see langword="false"/> rather than throwing, matching <see cref="Image.Identify(Stream)"/>'s
+/// "header-level info only" leniency elsewhere.</item>
+/// <item>TIFF: <see langword="true"/> when the Compression tag is 1 (none), 5 (LZW), or 32773
+/// (PackBits) — this decoder's entire supported compression set, which is lossless by construction, so
+/// this is always <see langword="true"/> for any TIFF that decodes successfully today.</item>
+/// <item>Always <see langword="false"/> for every other format, including JPEG (always lossy) and PNG/BMP/GIF
+/// (not format-specific here since they have no lossy mode at all — see the general opaque-source handling
+/// elsewhere rather than this flag).</item>
+/// </list>
+/// </param>
 public readonly record struct ImageInfo(
     int Width,
     int Height,
@@ -31,4 +52,5 @@ public readonly record struct ImageInfo(
     bool IsAnimated = false,
     bool HasAlpha = false,
     bool IsAdobeInvertedCmyk = false,
-    bool IsYcck = false);
+    bool IsYcck = false,
+    bool IsLosslessEncoding = false);

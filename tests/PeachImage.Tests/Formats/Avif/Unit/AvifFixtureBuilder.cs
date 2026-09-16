@@ -22,12 +22,20 @@ internal static class AvifFixtureBuilder
         bool subsamplingY = true,
         bool includeAlpha = false,
         string majorBrand = "avif",
-        string[]? compatibleBrands = null)
+        string[]? compatibleBrands = null,
+        byte[]? iccProfile = null)
     {
         var items = new List<(uint Id, byte[] Data)> { (1, DummyAv1Bytes(16)) };
 
         var ipcoProps = new List<byte[]> { Ispe(width, height), Av1C(0, 0, false, highBitdepth, twelveBit, monochrome, subsamplingX, subsamplingY, 0) };
-        var ipmaEntries = new List<byte[]> { IpmaEntry(1, 1, 2) };
+        var itemOneProps = new List<int> { 1, 2 };
+        if (iccProfile is not null)
+        {
+            ipcoProps.Add(Colr(iccProfile));
+            itemOneProps.Add(ipcoProps.Count);
+        }
+
+        var ipmaEntries = new List<byte[]> { IpmaEntry(1, [.. itemOneProps]) };
         var infeEntries = new List<byte[]> { Infe(1, "av01") };
         var irefEntries = new List<byte[]>();
 
@@ -148,6 +156,9 @@ internal static class AvifFixtureBuilder
     }
 
     private static byte[] Ispe(int width, int height) => Box("ispe", FullBoxPayload(0, 0, Concat(BEUInt32((uint)width), BEUInt32((uint)height))));
+
+    /// <summary>A <c>colr</c> property carrying an embedded ICC profile (<c>rICC</c> colour type) -- a plain <c>Box</c>, not a <c>FullBox</c>, per <see cref="PeachImage.Formats.Avif.Container.AvifColrBox"/>.</summary>
+    private static byte[] Colr(byte[] iccProfile) => Box("colr", Concat(Encoding.ASCII.GetBytes("rICC"), iccProfile));
 
     private static byte[] AuxC(string urn = "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha")
     {

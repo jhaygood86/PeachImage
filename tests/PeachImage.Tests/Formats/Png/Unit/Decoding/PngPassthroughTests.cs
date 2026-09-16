@@ -127,6 +127,56 @@ public class PngPassthroughTests
     }
 
     [Fact]
+    public void PngWithIccp_ReturnsInflatedProfileBytes()
+    {
+        byte[] profile = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]; // a real ICC profile's structure is irrelevant to passthrough
+        byte[] iccpChunk = BuildIccpChunk("test-profile", profile);
+        byte[] row = [0, 1, 2, 3];
+        byte[] file = PngTestFileBuilder.Build(
+            width: 1,
+            height: 1,
+            bitDepth: 8,
+            colorType: 2,
+            palette: null,
+            trns: null,
+            scanlines: [row],
+            extraChunks: [("iCCP", iccpChunk)]);
+
+        bool ok = PngPassthrough.TryRead(new MemoryStream(file), out var info);
+
+        Assert.True(ok);
+        Assert.Equal(profile, info.IccProfileData);
+    }
+
+    [Fact]
+    public void PngWithoutIccp_ReturnsNullIccProfileData()
+    {
+        byte[] row = [0, 1, 2, 3];
+        byte[] file = PngTestFileBuilder.Build(1, 1, 8, colorType: 2, palette: null, trns: null, scanlines: [row]);
+
+        bool ok = PngPassthrough.TryRead(new MemoryStream(file), out var info);
+
+        Assert.True(ok);
+        Assert.Null(info.IccProfileData);
+    }
+
+    private static byte[] BuildIccpChunk(string profileName, byte[] profileBytes)
+    {
+        using var compressed = new MemoryStream();
+        using (var zlib = new ZLibStream(compressed, CompressionMode.Compress, leaveOpen: true))
+        {
+            zlib.Write(profileBytes);
+        }
+
+        using var chunk = new MemoryStream();
+        chunk.Write(System.Text.Encoding.Latin1.GetBytes(profileName));
+        chunk.WriteByte(0); // null terminator
+        chunk.WriteByte(0); // compression method: zlib/deflate
+        chunk.Write(compressed.ToArray());
+        return chunk.ToArray();
+    }
+
+    [Fact]
     public void NonPngStream_ReturnsFalse()
     {
         byte[] notAPng = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];

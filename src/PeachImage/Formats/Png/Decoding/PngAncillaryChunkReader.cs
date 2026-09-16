@@ -65,24 +65,36 @@ internal static class PngAncillaryChunkReader
 
     private static void TryReadIccp(byte[] data, ImageMetadata metadata)
     {
+        byte[]? profileBytes = TryReadIccpBytes(data);
+        if (profileBytes is not null)
+        {
+            metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Icc, Data = profileBytes });
+        }
+    }
+
+    /// <summary>
+    /// Parses an <c>iCCP</c> chunk payload (profile name, null terminator, compression method byte, then
+    /// a zlib-compressed ICC profile) and returns the inflated profile bytes, or <see langword="null"/>
+    /// if the chunk is malformed or uses an unrecognized compression method. Shared by the full-decode
+    /// path (<see cref="TryReadIccp"/>) and <see cref="PngPassthrough"/>, which also needs the raw
+    /// profile bytes without running a full pixel decode.
+    /// </summary>
+    internal static byte[]? TryReadIccpBytes(byte[] data)
+    {
         int nullIndex = Array.IndexOf(data, (byte)0);
         if (nullIndex < 0 || nullIndex + 1 >= data.Length)
         {
-            return;
+            return null;
         }
 
         byte compressionMethod = data[nullIndex + 1];
         if (compressionMethod != 0)
         {
-            return;
+            return null;
         }
 
         var compressed = data.AsSpan(nullIndex + 2).ToArray();
-        byte[]? profileBytes = TryInflate(compressed);
-        if (profileBytes is not null)
-        {
-            metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Icc, Data = profileBytes });
-        }
+        return TryInflate(compressed);
     }
 
     private static void TryReadPhys(byte[] data, ImageMetadata metadata)

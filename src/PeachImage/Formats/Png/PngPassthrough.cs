@@ -4,10 +4,11 @@ using PeachImage.Formats.Png.Internal;
 namespace PeachImage.Formats.Png;
 
 /// <summary>
-/// Reads a PNG's IHDR/PLTE/tRNS/IDAT chunk data verbatim, with no pixel decode (no inflate), for callers
-/// that want to re-embed the original compressed pixel stream in another container — e.g. a PDF
-/// <c>/FlateDecode</c> image stream, which can consume a PNG's zlib-compressed IDAT data directly — rather
-/// than decode it into an <see cref="Image"/> and re-encode it.
+/// Reads a PNG's IHDR/PLTE/tRNS/iCCP/IDAT chunk data verbatim, with no pixel decode (no inflate of IDAT),
+/// for callers that want to re-embed the original compressed pixel stream in another container — e.g. a
+/// PDF <c>/FlateDecode</c> image stream, which can consume a PNG's zlib-compressed IDAT data directly —
+/// rather than decode it into an <see cref="Image"/> and re-encode it. The embedded ICC profile (if any)
+/// is inflated, since <c>iCCP</c>'s own compressed form has no equivalent "verbatim" target container.
 /// </summary>
 public static class PngPassthrough
 {
@@ -42,6 +43,7 @@ public static class PngPassthrough
 
         byte[]? paletteData = null;
         byte[]? trnsData = null;
+        byte[]? iccProfileData = null;
         bool isAnimated = false;
 
         var chunkHeader = PngChunkReader.ReadHeader(stream);
@@ -59,6 +61,11 @@ public static class PngPassthrough
             else if (chunkHeader.Type == PngChunkType.Trns)
             {
                 trnsData = PngChunkReader.ReadDataAndValidateCrc(stream, chunkHeader);
+            }
+            else if (chunkHeader.Type == PngChunkType.Iccp)
+            {
+                byte[] rawIccp = PngChunkReader.ReadDataAndValidateCrc(stream, chunkHeader);
+                iccProfileData = PngAncillaryChunkReader.TryReadIccpBytes(rawIccp);
             }
             else
             {
@@ -93,6 +100,7 @@ public static class PngPassthrough
             IsAnimated: isAnimated,
             IdatData: idatBuffer.ToArray(),
             PaletteData: paletteData,
-            TrnsData: trnsData);
+            TrnsData: trnsData,
+            IccProfileData: iccProfileData);
     }
 }
