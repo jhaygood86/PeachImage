@@ -76,7 +76,7 @@ internal static class PngImageDecoder
         var idatStream = new PngIdatStream(stream);
         idatStream.BeginChunk(chunkHeader);
 
-        DecodePixels(idatStream, header, palette, grayOrRgbTrnsKey, sampleLut, is16BitOutput, gammaCorrectionActive, outputFormat, image);
+        DecodePixels(idatStream, header, palette, grayOrRgbTrnsKey, sampleLut.Span, is16BitOutput, gammaCorrectionActive, outputFormat, image);
 
         idatStream.DrainToNextChunk();
         var nextHeader = idatStream.PendingNonIdatHeader!.Value;
@@ -100,7 +100,7 @@ internal static class PngImageDecoder
         return image;
     }
 
-    private static void DecodePixels(Stream idatStream, PngHeader header, PngPalette? palette, ushort[]? grayOrRgbTrnsKey, ushort[] sampleLut, bool is16BitOutput, bool gammaCorrectionActive, PixelFormat outputFormat, Image image)
+    private static void DecodePixels(Stream idatStream, PngHeader header, PngPalette? palette, ushort[]? grayOrRgbTrnsKey, ReadOnlySpan<ushort> sampleLut, bool is16BitOutput, bool gammaCorrectionActive, PixelFormat outputFormat, Image image)
     {
         using var zlib = new ZLibStream(idatStream, CompressionMode.Decompress);
 

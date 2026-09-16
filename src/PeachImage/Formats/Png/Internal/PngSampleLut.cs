@@ -64,7 +64,13 @@ internal static class PngSampleLut
 
     private static readonly object CorrectedTablesLock = new();
 
-    public static ushort[] Build(int bitDepth, double? fileGamma, double? screenGamma)
+    /// <summary>
+    /// The table for these inputs, which may be a cached instance shared with every other decode
+    /// using the same gamma exponent — hence <see cref="ReadOnlyMemory{T}"/> rather than the array:
+    /// writing through it would corrupt every later decode that reads the same entry, so the caller's
+    /// read-only contract is carried by the type instead of by a comment.
+    /// </summary>
+    public static ReadOnlyMemory<ushort> Build(int bitDepth, double? fileGamma, double? screenGamma)
     {
         var gammaExponent = EffectiveGammaExponent(fileGamma, screenGamma);
 

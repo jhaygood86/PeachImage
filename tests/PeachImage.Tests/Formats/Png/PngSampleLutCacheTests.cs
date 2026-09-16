@@ -24,6 +24,15 @@ public class PngSampleLutCacheTests
 {
     public PngSampleLutCacheTests() => PngSampleLut.ClearCorrectedTables();
 
+    /// <summary>
+    /// Same underlying table, not merely equal contents — <c>ReadOnlySpan&lt;T&gt;</c>'s <c>==</c> is
+    /// true only when both point at the same memory with the same length, which is the reference
+    /// identity <c>Assert.Same</c> gave before <c>Build</c> started returning a
+    /// <c>ReadOnlyMemory&lt;ushort&gt;</c> (a struct, which <c>Assert.Same</c> cannot compare).
+    /// </summary>
+    private static bool IsSameTable(ReadOnlyMemory<ushort> left, ReadOnlyMemory<ushort> right) =>
+        left.Span == right.Span;
+
     [Fact]
     public void Depth16_ReturnsTheSameTableForTheSameGamma()
     {
@@ -32,7 +41,7 @@ public class PngSampleLutCacheTests
 
         // By reference, deliberately. Two independently built tables are equal element for element,
         // so Assert.Equal would pass against uncached code and prove nothing at all.
-        Assert.Same(first, second);
+        Assert.True(IsSameTable(first, second));
     }
 
     [Fact]
@@ -41,8 +50,8 @@ public class PngSampleLutCacheTests
         var plain = PngSampleLut.Build(16, null, null);
         var corrected = PngSampleLut.Build(16, 1.0 / 2.2, 2.2);
 
-        Assert.NotSame(plain, corrected);
-        Assert.NotEqual(plain, corrected);
+        Assert.False(IsSameTable(plain, corrected));
+        Assert.NotEqual(plain.ToArray(), corrected.ToArray());
     }
 
     [Fact]
@@ -56,8 +65,8 @@ public class PngSampleLutCacheTests
         var srgb = PngSampleLut.Build(16, 1.0 / 2.2, null);
         var unusual = PngSampleLut.Build(16, 1.0 / 1.0, null);
 
-        Assert.Same(none, srgb);
-        Assert.Same(none, unusual);
+        Assert.True(IsSameTable(none, srgb));
+        Assert.True(IsSameTable(none, unusual));
         Assert.Equal(0, PngSampleLut.CachedCorrectedTableCount);
     }
 
@@ -69,7 +78,7 @@ public class PngSampleLutCacheTests
         var first = PngSampleLut.Build(16, 0.5, 1.0);
         var second = PngSampleLut.Build(16, 1.1, 2.2);
 
-        Assert.Same(first, second);
+        Assert.True(IsSameTable(first, second));
         Assert.Equal(1, PngSampleLut.CachedCorrectedTableCount);
     }
 
@@ -87,8 +96,8 @@ public class PngSampleLutCacheTests
         var lut = PngSampleLut.Build(bitDepth, null, null);
 
         Assert.Equal(inputMax + 1, lut.Length);
-        Assert.Equal(0, lut[0]);
-        Assert.Equal(outputMax, lut[inputMax]);
+        Assert.Equal(0, lut.Span[0]);
+        Assert.Equal(outputMax, lut.Span[inputMax]);
     }
 
     [Theory]
@@ -115,23 +124,26 @@ public class PngSampleLutCacheTests
                 0,
                 outputMax);
 
-            Assert.Equal(expected, lut[i]);
+            Assert.Equal(expected, lut.Span[i]);
         }
     }
 
     [Fact]
     public void ACachedTableIsNotObservablySharedMutableState()
     {
-        // The table is handed out by reference and consumed as ReadOnlySpan<ushort> by
-        // PngRowResolver, so nothing writes to it. This pins the contract that makes sharing safe:
-        // a caller that did mutate it would corrupt every later decode, and this test would be the
-        // thing that noticed.
+        // Build hands out a ReadOnlyMemory<ushort>, so the contract that makes sharing safe — nobody
+        // writes to a cached table — is now carried by the type rather than by this comment. What the
+        // type cannot state is that the instance stays put and keeps its contents across handouts,
+        // which is what this pins: a cache that rebuilt, evicted or rewrote an entry underneath a
+        // caller would show up here.
         var lut = PngSampleLut.Build(16, null, null);
-        var sentinel = lut[1234];
+        var sentinel = lut.Span[1234];
 
         _ = PngSampleLut.Build(16, null, null);
 
-        Assert.Equal(sentinel, PngSampleLut.Build(16, null, null)[1234]);
+        var later = PngSampleLut.Build(16, null, null);
+        Assert.True(IsSameTable(lut, later));
+        Assert.Equal(sentinel, later.Span[1234]);
     }
 
     [Fact]
@@ -150,8 +162,8 @@ public class PngSampleLutCacheTests
         var first = PngSampleLut.Build(16, overflow, 2.2);
         var second = PngSampleLut.Build(16, overflow, 2.2);
 
-        Assert.NotSame(first, second);
-        Assert.Equal(first, second);
+        Assert.False(IsSameTable(first, second));
+        Assert.Equal(first.ToArray(), second.ToArray());
         Assert.Equal(PngSampleLut.MaxEntries, PngSampleLut.CachedCorrectedTableCount);
     }
 
