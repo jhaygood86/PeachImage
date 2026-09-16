@@ -55,7 +55,7 @@ internal static class WebpDecoder
         }
 
         var format = hasAlpha ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
-        return new ImageInfo(width, height, format, FormatName, HasAlpha: format.HasAlpha());
+        return new ImageInfo(width, height, format, FormatName, HasAlpha: format.HasAlpha(), IsLosslessEncoding: container.Format == WebpBitstreamFormat.Lossless);
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>. Decodes just the first, fully composited frame if the file is animated.</summary>

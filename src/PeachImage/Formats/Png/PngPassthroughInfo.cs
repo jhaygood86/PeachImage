@@ -15,6 +15,12 @@ namespace PeachImage.Formats.Png;
 /// <param name="IdatData">The concatenated, CRC-validated <c>IDAT</c> chunk payloads, in file order — a complete zlib (RFC 1950) stream, byte-for-byte as it appears in the file.</param>
 /// <param name="PaletteData">The raw <c>PLTE</c> chunk bytes (tightly packed RGB triples), or <see langword="null"/> if <paramref name="ColorType"/> is not <see cref="PngColorType.Palette"/>.</param>
 /// <param name="TrnsData">The raw <c>tRNS</c> chunk bytes, or <see langword="null"/> if <paramref name="HasTrns"/> is <see langword="false"/>.</param>
+/// <param name="IccProfileData">
+/// The inflated ICC profile bytes from an <c>iCCP</c> chunk (already zlib-decompressed — unlike every
+/// other field on this type, since the profile itself is stored compressed in the file and there is no
+/// byte-for-byte "verbatim" form to hand back), or <see langword="null"/> if no <c>iCCP</c> chunk is
+/// present or it could not be parsed/decompressed.
+/// </param>
 public readonly record struct PngPassthroughInfo(
     int Width,
     int Height,
@@ -25,4 +31,5 @@ public readonly record struct PngPassthroughInfo(
     bool IsAnimated,
     byte[] IdatData,
     byte[]? PaletteData,
-    byte[]? TrnsData);
+    byte[]? TrnsData,
+    byte[]? IccProfileData = null);

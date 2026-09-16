@@ -18,7 +18,12 @@ internal static class TiffDecoder
         var ifd = TiffIfdReader.Read(reader, header.FirstIfdOffset);
         var descriptor = TiffValidation.Validate(ifd);
 
-        return new ImageInfo(descriptor.Width, descriptor.Height, descriptor.PixelFormat, FormatName, HasAlpha: descriptor.PixelFormat.HasAlpha());
+        // This decoder's entire supported Compression set (1=none, 5=LZW, 32773=PackBits, enforced by
+        // TiffValidation.Validate above) is lossless by construction — deriving from the tag rather than
+        // hardcoding true keeps this correct if lossy (JPEG-in-TIFF) compression is ever supported later.
+        bool isLosslessEncoding = descriptor.Compression is 1 or 5 or 32773;
+
+        return new ImageInfo(descriptor.Width, descriptor.Height, descriptor.PixelFormat, FormatName, HasAlpha: descriptor.PixelFormat.HasAlpha(), IsLosslessEncoding: isLosslessEncoding);
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>

@@ -51,7 +51,35 @@ internal static class AvifDecoder
         var metadata = new ImageMetadata();
         var container = AvifContainerReader.Read(stream, metadata);
         var pixelFormat = AvifPixelFormatSelector.Choose(container.BitDepth, container.Monochrome, container.HasAlpha);
-        return new ImageInfo(container.Width, container.Height, pixelFormat, FormatName, HasAlpha: pixelFormat.HasAlpha());
+
+        // Cheap (O(header bits), no tile/residual decode) per AV1 spec §5.9.12's "all lossless" condition
+        // -- AllLossless additionally requires no superres upscaling, unlike CodedLossless alone, since a
+        // superres frame's *decoded* output is interpolated (lossy) even when its coded residuals were
+        // quantizer-lossless. AND'd across every color tile of a HEIF grid composite (alpha tiles aren't
+        // considered, matching HasAlpha/PixelFormat's own "describes color" convention). Wrapped in a
+        // try/catch matching GifDecoder.Identify's "header-level info only, degrade gracefully" posture:
+        // Identify otherwise never touches the AV1 bitstream itself (only container/box parsing), so a
+        // malformed or synthetic (e.g. test-fixture placeholder) tile payload that would fail a full AV1
+        // parse must not turn an otherwise-successful dimensions/format lookup into a thrown exception.
+        bool isLosslessEncoding = false;
+        try
+        {
+            isLosslessEncoding = true;
+            foreach (byte[] tile in container.ColorTiles)
+            {
+                if (!Av1FrameDecoder.ParseFrameHeader(tile).Frame.AllLossless)
+                {
+                    isLosslessEncoding = false;
+                    break;
+                }
+            }
+        }
+        catch (AvifFormatException)
+        {
+            isLosslessEncoding = false;
+        }
+
+        return new ImageInfo(container.Width, container.Height, pixelFormat, FormatName, HasAlpha: pixelFormat.HasAlpha(), IsLosslessEncoding: isLosslessEncoding);
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>
