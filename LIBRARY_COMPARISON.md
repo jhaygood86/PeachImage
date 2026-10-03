@@ -22,7 +22,7 @@ generation entirely) and `--affinity <mask>` to pin to a couple of P-core thread
 pinning note below. The numbers in this document were collected with:
 
 ```bash
-dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*JpegDecodeBenchmarks*" "*JpegEncodeBenchmarks*" "*BmpDecodeBenchmarks*" "*BmpEncodeBenchmarks*" "*PngDecodeBenchmarks*" "*PngEncodeBenchmarks*" "*WebpDecodeBenchmarks*" "*AvifDecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
+dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*JpegDecodeBenchmarks*" "*JpegEncodeBenchmarks*" "*BmpDecodeBenchmarks*" "*BmpEncodeBenchmarks*" "*PngDecodeBenchmarks*" "*PngEncodeBenchmarks*" "*WebpDecodeBenchmarks*" "*WebpEncodeBenchmarks*" "*AvifDecodeBenchmarks*" "*GifDecodeBenchmarks*" "*TiffDecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
 ```
 
 The GIF section and the WebP/GIF "Animated" rows were collected separately (same methodology, same
@@ -31,10 +31,6 @@ session, same machine) with a filter scoped to just the `Animated-MultiFrame` ca
 ```bash
 dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*AnimatedAllFrames*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
 ```
-
-The static (non-animated) GIF decode scenarios in `GifDecodeBenchmarks.cs` (low-color graphic,
-dithered photographic) were run with the same `*GifDecodeBenchmarks*` filter as the GIF section's
-`--filter "*"` command above.
 
 The Resize section's numbers were collected separately, with a reduced iteration count (3 warmup + 8
 iterations rather than the 20-iteration job above) given how many scenarios `ResizeBenchmarks.cs`
@@ -46,7 +42,7 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 ```
 
 **Environment**: BenchmarkDotNet v0.15.8, Windows 11, Intel Core i9-14900K (24 physical / 32 logical
-cores), .NET 10.0.11 (SDK 10.0.400), X64 RyuJIT x86-64-v3, AVX2-capable. PeachImage also targets
+cores), .NET 10.0.12 (SDK 10.0.401), X64 RyuJIT x86-64-v3, AVX2-capable. PeachImage also targets
 .NET 8.0 (see [README](README.md)), but these numbers were not re-measured there — .NET 8's JIT lacks
 some of .NET 9/10's auto-vectorization and dynamic PGO refinements, so net8.0 consumers may see
 somewhat different throughput than what's reported below.
@@ -67,17 +63,17 @@ quality 85.
 
 | Scenario | PeachImage | SkiaSharp | Ratio |
 |---|---:|---:|---:|
-| 1080p, 4:2:0 | 8.94 ms | 9.74 ms | 0.92× |
-| 1080p, 4:4:4 | 10.85 ms | 11.82 ms | 0.92× |
-| 1080p, Grayscale | 5.15 ms | 5.96 ms | 0.86× |
-| 12MP, 4:2:0 | 53.24 ms | 56.75 ms | 0.94× |
+| 1080p, 4:2:0 | 8.52 ms | 9.87 ms | 0.86× |
+| 1080p, 4:4:4 | 10.71 ms | 11.84 ms | 0.90× |
+| 1080p, Grayscale | 4.71 ms | 6.02 ms | 0.78× |
+| 12MP, 4:2:0 | 48.47 ms | 56.89 ms | 0.85× |
 
 ### Encode
 
 | Scenario | PeachImage | SkiaSharp | Ratio |
 |---|---:|---:|---:|
-| 1080p, 4:2:0 | 26.89 ms | 19.90 ms | 1.35× |
-| 1080p, 4:4:4 | 32.83 ms | 27.74 ms | 1.18× |
+| 1080p, 4:2:0 | 27.61 ms | 20.10 ms | 1.37× |
+| 1080p, 4:4:4 | 35.60 ms | 29.11 ms | 1.22× |
 
 ## BMP
 
@@ -87,19 +83,19 @@ SkiaSharp's encoder doesn't support BMP output, so encode has no SkiaSharp basel
 
 | Scenario | PeachImage | SkiaSharp | Ratio |
 |---|---:|---:|---:|
-| 24bpp Truecolor | 2.39 ms | 2.51 ms | **0.95×** |
-| 32bpp Alpha | 3.60 ms | 9.37 ms | **0.38×** |
-| 8bpp Indexed | 2.23 ms | 2.15 ms | 1.04× |
-| 8bpp Indexed, RLE | 6.15 ms | 8.30 ms | **0.74×** |
+| 24bpp Truecolor | 2.35 ms | 2.09 ms | 1.13× |
+| 32bpp Alpha | 3.89 ms | 9.19 ms | **0.42×** |
+| 8bpp Indexed | 2.75 ms | 2.10 ms | 1.31× |
+| 8bpp Indexed, RLE | 7.47 ms | 8.54 ms | **0.88×** |
 
 ### Encode (PeachImage only — no SkiaSharp baseline)
 
 | Scenario | PeachImage Mean |
 |---|---:|
-| 24bpp Truecolor | 3.94 ms |
-| 32bpp Alpha | 5.22 ms |
-| 8bpp Indexed | 0.60 ms |
-| 8bpp Indexed, RLE | 4.19 ms |
+| 24bpp Truecolor | 5.10 ms |
+| 32bpp Alpha | 6.34 ms |
+| 8bpp Indexed | 0.50 ms |
+| 8bpp Indexed, RLE | 3.83 ms |
 
 ## PNG
 
@@ -107,20 +103,20 @@ SkiaSharp's encoder doesn't support BMP output, so encode has no SkiaSharp basel
 
 | Scenario | PeachImage | SkiaSharp | Ratio |
 |---|---:|---:|---:|
-| 24bpp Truecolor | 18.35 ms | 16.72 ms | 1.10× |
-| 32bpp RGBA | 23.36 ms | 22.10 ms | 1.06× |
-| 48bpp (16-bit) Truecolor | 4.65 ms | 3.41 ms | 1.36× |
-| 8bpp Grayscale | 8.68 ms | 9.41 ms | **0.92×** |
-| Interlaced (Adam7) Truecolor | 26.13 ms | 27.21 ms | **0.96×** |
+| 24bpp Truecolor | 18.72 ms | 17.02 ms | 1.10× |
+| 32bpp RGBA | 23.55 ms | 21.74 ms | 1.08× |
+| 48bpp (16-bit) Truecolor | 4.59 ms | 3.39 ms | 1.35× |
+| 8bpp Grayscale | 8.60 ms | 9.25 ms | **0.93×** |
+| Interlaced (Adam7) Truecolor | 27.40 ms | 27.01 ms | 1.01× |
 
 ### Encode
 
 | Scenario | PeachImage | SkiaSharp | Ratio |
 |---|---:|---:|---:|
-| 24bpp Truecolor | 122.08 ms | 148.98 ms | **0.82×** |
-| 32bpp RGBA | 148.28 ms | 225.23 ms | **0.66×** |
-| 8bpp Grayscale | 49.96 ms | 43.41 ms | 1.15× |
-| Low-color graphic (16 colors), indexed | 6.08 ms | 4.09 ms | 1.49× |
+| 24bpp Truecolor | 79.31 ms | 147.42 ms | **0.54×** |
+| 32bpp RGBA | 101.88 ms | 225.03 ms | **0.45×** |
+| 8bpp Grayscale | 30.06 ms | 42.77 ms | **0.70×** |
+| Low-color graphic (16 colors), indexed | 5.82 ms | 4.13 ms | 1.41× |
 
 Indexed-color (PLTE) encoding is not held to the 10% throughput target the other rows track — its
 point is file size, not speed. On the low-color scenario above (640×480, 16 distinct colors),
@@ -142,17 +138,17 @@ for PeachImage alone, over time.
 
 | Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
 |---|---:|---:|---:|---:|
-| Low-color graphic, single frame (640×480) | 0.91 ms | 0.28 ms | **3.29×** | 941 KB |
-| Photographic dithered, single frame (1920×1080) | 11.50 ms | 5.53 ms | **2.08×** | 6.24 MB |
-| Animated, all frames (24×, 320×240) | 3.61 ms | 0.53 ms | **6.77×** | 711 KB |
+| Low-color graphic, single frame (640×480) | 1.30 ms | 0.26 ms | **5.01×** | 1,042 KB |
+| Photographic dithered, single frame (1920×1080) | 12.86 ms | 5.47 ms | **2.35×** | 8.02 MB |
+| Animated, all frames (24×, 320×240) | 3.67 ms | 0.54 ms | **6.77×** | 695 KB |
 
-This is the largest gap measured anywhere in this document — everything else stays under ~2.3×.
+This is the largest gap measured anywhere in this document — outside GIF, nothing exceeds ~2.2×.
 
 ### Encode (PeachImage only — no SkiaSharp baseline)
 
 | Scenario | PeachImage Mean |
 |---|---:|
-| Animated, all frames (24×, 320×240) | 13.51 ms |
+| Animated, all frames (24×, 320×240) | 14.83 ms |
 
 ## WebP
 
@@ -166,16 +162,16 @@ directly comparable). Encode covers both the lossless (VP8L, default) and lossy 
 
 | Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
 |---|---:|---:|---:|---:|
-| Lossless, Photographic | 43.82 ms | 24.02 ms | **1.82×** | 10.9 MB |
-| Lossy, Photographic | 29.33 ms | 14.32 ms | **2.05×** | 6.9 MB |
-| Lossless, Graphic (flat color) | 0.76 ms | 0.35 ms | 2.17× | 0.96 MB |
-| Lossy, Alpha | 33.49 ms | 19.85 ms | **1.69×** | 11.1 MB |
-| Lossless, Alpha | 45.62 ms | 24.82 ms | **1.84×** | 13.0 MB |
-| Small image (32×24) | 14.24 µs | 12.69 µs | **1.12×** | 44 KB |
-| Animated, all frames (24×, 320×240) | 1.14 ms | 4.15 ms | **0.27×** | 1.9 MB |
+| Lossless, Photographic | 43.83 ms | 23.98 ms | **1.83×** | 12.5 MB |
+| Lossy, Photographic | 29.03 ms | 13.80 ms | **2.10×** | 14.6 MB |
+| Lossless, Graphic (flat color) | 0.69 ms | 0.32 ms | **2.14×** | 1.04 MB |
+| Lossy, Alpha | 31.68 ms | 18.95 ms | **1.67×** | 18.6 MB |
+| Lossless, Alpha | 44.90 ms | 25.04 ms | **1.79×** | 12.5 MB |
+| Small image (32×24) | 14.34 µs | 12.43 µs | 1.15× | 45 KB |
+| Animated, all frames (24×, 320×240) | 0.93 ms | 4.12 ms | **0.23×** | 1.22 MB |
 
 The animated scenario is the strongest result in this whole document: PeachImage decodes it roughly
-**3.6× faster** than SkiaSharp, consistent across repeated runs. As with the small-image lossless
+**4.4× faster** than SkiaSharp, consistent across repeated runs. As with the small-image lossless
 encode case below, SkiaSharp pays fixed per-call native marshaling overhead on every one of the 24
 `GetPixels` calls, while PeachImage's decode is pure managed code with lower fixed per-frame cost
 (`WebpFrameCompositor`/`GifFrameCompositor` reuse one persistent canvas in place rather than
@@ -187,14 +183,14 @@ per-frame cost.
 
 | Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
 |---|---:|---:|---:|---:|
-| Photographic | 241.78 ms | 237.21 ms | 1.02× | 15.0 MB |
-| Graphic (flat color, palette) | 2.16 ms | 1.51 ms | **1.44×** | 666 KB |
-| Alpha | 265.11 ms | 262.98 ms | 1.01× | 9.5 MB |
-| Small image (32×24) | 38.09 µs | 240.64 µs | **0.16×** | 78 KB |
+| Photographic | 261.42 ms | 254.67 ms | 1.03× | 14.3 MB |
+| Graphic (flat color, palette) | 2.18 ms | 1.51 ms | **1.44×** | 650 KB |
+| Alpha | 282.18 ms | 285.88 ms | 0.99× | 9.5 MB |
+| Small image (32×24) | 36.79 µs | 238.94 µs | **0.15×** | 77 KB |
 
 Photographic and alpha are near parity with SkiaSharp (both are dominated by the same LZ77-style
 backward-reference search either way); the small-image case is where SkiaSharp's fixed per-call
-native marshaling overhead dominates instead, and PeachImage's pure-managed path is ~6× faster.
+native marshaling overhead dominates instead, and PeachImage's pure-managed path is ~6.5× faster.
 
 ### Encode (lossy)
 
@@ -204,9 +200,9 @@ libwebp encoder on throughput at the same quality setting:
 
 | Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
 |---|---:|---:|---:|---:|
-| Photographic (quality 75) | 102.8 ms | 111.0 ms | **0.93×** | 8.29 MB |
+| Photographic (quality 75) | 35.0 ms | 112.1 ms | **0.31×** | 7.90 MB |
 
-The remaining allocation gap (8.3 MB vs. SkiaSharp's ~1 KB) comes from one-time per-image buffers
+The remaining allocation gap (7.9 MB vs. SkiaSharp's ~1 KB) comes from one-time per-image buffers
 (RGB-to-YUV conversion, final bitstream chunk assembly); libwebp's encoder works in unmanaged memory
 throughout, so its managed allocation is near zero regardless of image size. The per-macroblock
 scratch allocations that previously dominated this figure (a fresh `short[16]`/`short[16][]` per
@@ -226,27 +222,27 @@ for gaps in SkiaSharp's own API surface.
 
 | Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
 |---|---:|---:|---:|---:|
-| NearestNeighbor | 0.41 ms | 0.32 ms | 1.29× | 389 KB |
-| Bilinear | 4.25 ms | 1.19 ms | **3.58×** | 446 KB |
-| Bicubic | 5.11 ms | 3.68 ms | **1.39×** | 470 KB |
-| MitchellNetravali | 6.57 ms | 5.14 ms | 1.28× | 471 KB |
-| Hermite | 5.07 ms | 3.84 ms | **1.32×** | 470 KB |
-| Spline | 5.12 ms | 3.55 ms | **1.44×** | 470 KB |
-| Robidoux | 5.25 ms | 3.74 ms | **1.40×** | 470 KB |
-| RobidouxSharp | 5.16 ms | 3.68 ms | **1.40×** | 470 KB |
+| NearestNeighbor | 0.37 ms | 0.31 ms | 1.20× | 512 KB |
+| Bilinear | 3.51 ms | 1.18 ms | **2.97×** | 568 KB |
+| Bicubic | 4.63 ms | 3.74 ms | 1.24× | 591 KB |
+| MitchellNetravali | 4.84 ms | 3.93 ms | 1.23× | 591 KB |
+| Hermite | 4.66 ms | 3.84 ms | 1.22× | 591 KB |
+| Spline | 4.60 ms | 3.69 ms | 1.25× | 592 KB |
+| Robidoux | 4.63 ms | 3.71 ms | 1.25× | 591 KB |
+| RobidouxSharp | 4.65 ms | 3.67 ms | 1.27× | 591 KB |
 
 ### Upscale (1920×1080 → 3840×2160)
 
 | Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
 |---|---:|---:|---:|---:|
-| NearestNeighbor | 22.92 ms | 16.27 ms | 1.41× | 24.9 MB |
-| Bilinear | 41.93 ms | 70.98 ms | **0.59×** | 25.1 MB |
-| Bicubic | 49.79 ms | 230.46 ms | **0.22×** | 25.1 MB |
-| MitchellNetravali | 45.20 ms | 243.44 ms | **0.19×** | 25.1 MB |
-| Hermite | 46.32 ms | 240.13 ms | **0.19×** | 25.1 MB |
-| Spline | 48.41 ms | 225.21 ms | **0.21×** | 25.1 MB |
-| Robidoux | 48.26 ms | 229.43 ms | **0.21×** | 25.1 MB |
-| RobidouxSharp | 49.88 ms | 227.89 ms | **0.22×** | 25.1 MB |
+| NearestNeighbor | 22.78 ms | 16.38 ms | 1.39× | 32.0 MB |
+| Bilinear | 53.32 ms | 71.46 ms | **0.75×** | 32.2 MB |
+| Bicubic | 55.72 ms | 231.33 ms | **0.24×** | 32.2 MB |
+| MitchellNetravali | 58.88 ms | 232.85 ms | **0.25×** | 32.2 MB |
+| Hermite | 57.48 ms | 233.11 ms | **0.25×** | 32.2 MB |
+| Spline | 57.15 ms | 230.41 ms | **0.25×** | 32.2 MB |
+| Robidoux | 56.00 ms | 232.13 ms | **0.24×** | 32.2 MB |
+| RobidouxSharp | 57.52 ms | 234.25 ms | **0.25×** | 32.2 MB |
 
 Downscale and upscale pull in opposite directions. On downscale, PeachImage widens the filter's radius by
 the scale factor before convolving (the standard "scaled filter" anti-aliasing technique — see
@@ -260,15 +256,15 @@ both directions.
 
 Four perf/allocation changes landed after this comparison was first written, all covered by
 `ResizeSkiaSharpQualityTests`/the resize unit suite so none change observable output — cumulatively, roughly
-halving the downscale ratio (e.g. Bicubic 3.42× → 1.39×) and taking the cubic-family upscale ratio well
-under half of where it started (e.g. Bicubic 0.47× → 0.22×):
+halving the downscale ratio (e.g. Bicubic 3.42× → 1.24×) and taking the cubic-family upscale ratio well
+under half of where it started (e.g. Bicubic 0.47× → 0.24×):
 
 - **Pooled convolution buffers.** `ImageResizer` rents its intermediate `float[]` buffers from
   `ArrayPool<float>.Shared` instead of allocating fresh ones per call, and `AnimatedImage.Resize` builds each
   axis's `ResamplingWeightMap` once and reuses it across every frame rather than rebuilding it per frame (see
   `AnimatedImage.ResizeFrames`). Allocation dropped from 44.0 MB (480×270 downscale) / 257 MB (3840×2160
-  upscale) to 389 KB–471 KB / 24.9–25.1 MB — a ~100× reduction downscale, ~10× upscale. What's left is
-  essentially the unavoidable output `Image`'s own pixel buffer (24.9 MB for a 3840×2160 24bpp image), not
+  upscale) to 512–592 KB / 32.0–32.2 MB — a ~75× reduction downscale, ~8× upscale. What's left is
+  essentially the unavoidable output `Image`'s own pixel buffer and the working buffers, not
   pooling waste.
 - **Flat weight-map storage.** `ResamplingWeightMap.Weights` is one contiguous `float[]` (sliced per
   destination index via `GetWeights`) instead of a `float[][]` with one small array per destination index —
@@ -298,12 +294,12 @@ under half of where it started (e.g. Bicubic 0.47× → 0.22×):
 
 | Scenario | Downscale | Upscale |
 |---|---:|---:|
-| Box | 4.00 ms | 44.49 ms |
-| Welch | 4.19 ms | 47.45 ms |
-| Lanczos2 | 6.97 ms | 47.78 ms |
-| Lanczos3 | 6.96 ms | 55.99 ms |
-| Lanczos5 | 9.50 ms | 59.74 ms |
-| Lanczos8 | 18.33 ms | 78.72 ms |
+| Box | 3.56 ms | 53.14 ms |
+| Welch | 3.77 ms | 53.17 ms |
+| Lanczos2 | 4.79 ms | 56.42 ms |
+| Lanczos3 | 5.95 ms | 60.07 ms |
+| Lanczos5 | 8.49 ms | 68.75 ms |
+| Lanczos8 | 11.69 ms | 106.94 ms |
 
 ### SIMD convolver tier (Vector128 vs. Vector256)
 
@@ -314,8 +310,8 @@ measured before parallelization, not just relative to each other):
 
 | Pass | Vector128 | Vector256 | Ratio |
 |---|---:|---:|---:|
-| Horizontal | 2.301 ms | 2.377 ms | 1.03× |
-| Vertical | 0.726 ms | 0.386 ms | **0.53×** |
+| Horizontal | 2.199 ms | 2.186 ms | 0.99× |
+| Vertical | 0.693 ms | 0.400 ms | **0.58×** |
 
 Matches the design intent: the vertical pass's genuine 8-lane width shows a consistent ~35-47% speedup
 across runs; the horizontal pass (which delegates straight to the Vector128 tier — see
@@ -334,11 +330,11 @@ this document. `ffmpeg`'s number wasn't re-measured this session; only PeachImag
 
 | Scenario | PeachImage | `ffmpeg` (context only) | Allocated |
 |---|---:|---:|---:|
-| Photographic, 8-bit 4:2:0 | 145.3 ms | 68.6 ms | 17.8 MB |
-| Photographic, 8-bit 4:2:0 + alpha | 162.0 ms | — | 19.8 MB |
-| Small image (32×24) | 116.4 µs | — | 213 KB |
+| Photographic, 8-bit 4:2:0 | 134.2 ms | 68.6 ms | 33.0 MB |
+| Photographic, 8-bit 4:2:0 + alpha | 150.9 ms | — | 34.5 MB |
+| Small image (32×24) | 124.4 µs | — | 260 KB |
 
-PeachImage is roughly **2.12×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario.
+PeachImage is roughly **1.96×** `ffmpeg`'s process-spawn-inclusive time on the 1080p scenario.
 
 ### Encode (lossless size)
 
@@ -362,16 +358,16 @@ process-spawn-inclusive time as context only, not a directly comparable Benchmar
 
 | Scenario | PeachImage | `ffmpeg` (context only) | Allocated |
 |---|---:|---:|---:|
-| 1080p, Uncompressed | 5.46 ms | ~49 ms | 39.9 MB |
-| 1080p, LZW | 24.20 ms | ~69 ms | 41.7 MB |
-| 1080p, PackBits | 3.96 ms | ~48 ms | 40.0 MB |
+| 1080p, Uncompressed | 7.11 ms | ~49 ms | 39.9 MB |
+| 1080p, LZW | 23.94 ms | ~69 ms | 41.7 MB |
+| 1080p, PackBits | 8.26 ms | ~48 ms | 40.0 MB |
 
 Unlike AVIF's comparison (where AV1's entropy/transform pipeline dominates and PeachImage trails
 `ffmpeg`'s decade-tuned native decoder), TIFF's baseline compression modes are each cheap enough that
 `ffmpeg`'s fixed per-invocation process-spawn overhead (visible in the PackBits row: the fastest and
 simplest of the three, yet not meaningfully faster in wall-clock terms than Uncompressed) dominates its own
 number — these ratios say more about process-spawn cost than about decoder throughput, and shouldn't be
-read as "PeachImage is 9-12× faster than a real TIFF decoder." LZW is the slowest of the three for both
+read as "PeachImage is 3-7× faster than a real TIFF decoder." LZW is the slowest of the three for both
 implementations, consistent with it being the only one doing real dictionary-based decompression work
 rather than a fixed per-byte reshape.
 
@@ -379,19 +375,19 @@ rather than a fixed per-byte reshape.
 
 | Format | Decode | Encode |
 |---|---|---|
-| JPEG | 1.16×–1.37× | 1.18×–1.35× |
-| BMP | 0.38×–1.04× | no baseline (PeachImage-only) |
-| GIF | **2.08×–6.77× (animated: 6.77×, static: 2.08×–3.29×)** | no SkiaSharp baseline (PeachImage-only) |
-| PNG | 0.92×–1.36× | 0.66×–1.15× |
-| WebP | 0.27×–2.17× (animated: **0.27×**, static: 1.12×–2.17×) | 1.01×–1.44× lossless (0.16× small-image outlier), 0.88× lossy |
-| AVIF | ~2.12× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented; lossy fixed 8x8 blocks, lossless has a real partition-tree RDO search up to 64x64 (see Encode (lossless size) above); throughput not yet measured here |
-| TIFF | ~0.08×–0.35× vs. `ffmpeg` (no SkiaSharp baseline available; ratios dominated by `ffmpeg`'s process-spawn overhead, not decoder throughput) | not implemented (decode-only) |
-| Resize | — | Downscale: 1.28×–3.58× (NearestNeighbor closest, Bilinear/cubic slower); Upscale: 1.41× (NearestNeighbor) or **0.19×–0.59×** (Bilinear/cubic family, faster than SkiaSharp) |
+| JPEG | 0.78×–0.90× | 1.22×–1.37× |
+| BMP | 0.42×–1.31× | no baseline (PeachImage-only) |
+| GIF | **2.35×–6.77× (animated: 6.77×, static: 2.35×–5.01×)** | no SkiaSharp baseline (PeachImage-only) |
+| PNG | 0.93×–1.35× | 0.45×–1.41× |
+| WebP | 0.23×–2.14× (animated: **0.23×**, static: 1.15×–2.14×) | 0.99×–1.44× lossless (0.15× small-image outlier), 0.31× lossy |
+| AVIF | ~1.96× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented; lossy fixed 8x8 blocks, lossless has a real partition-tree RDO search up to 64x64 (see Encode (lossless size) above); throughput not yet measured here |
+| TIFF | ~0.15×–0.35× vs. `ffmpeg` (no SkiaSharp baseline available; ratios dominated by `ffmpeg`'s process-spawn overhead, not decoder throughput) | not implemented (decode-only) |
+| Resize | — | Downscale: 1.20×–2.97× (NearestNeighbor closest, Bilinear/cubic slower); Upscale: 1.39× (NearestNeighbor) or **0.24×–0.75×** (Bilinear/cubic family, faster than SkiaSharp) |
 
 BMP is fully within target and often faster. PNG is within target on every scenario and beats
 SkiaSharp outright on 8bpp grayscale/interlaced decode and on truecolor/RGBA encode; its remaining
-gap is the 16-bit decode path, now 1.36× (down from 2.3×). JPEG has the largest gap on both sides
-among the mature formats. WebP's static
+gap is the 16-bit decode path, now 1.35×. JPEG decode now beats SkiaSharp on every scenario, while its encode keeps the
+largest gap among the mature formats. WebP's static
 decode and AVIF are the furthest from the 10% target on large images, but WebP's *animated* decode is
 actually the single best result in this document (SkiaSharp's fixed per-frame native marshaling
 overhead losing badly to PeachImage's managed decode loop). GIF's animated decode is the worst result
