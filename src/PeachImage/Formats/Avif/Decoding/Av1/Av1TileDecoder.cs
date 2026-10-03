@@ -2719,6 +2719,18 @@ internal sealed class Av1TileDecoder
                         clamped.StoreUnsafe(ref destPlane[rowBase + j]);
                     }
                 }
+                else if (Vector128.IsHardwareAccelerated)
+                {
+                    var zero128 = Vector128<int>.Zero;
+                    var max128 = Vector128.Create(maxSample);
+                    for (; j + 4 <= w; j += 4)
+                    {
+                        var pred = Vector128.LoadUnsafe(ref destPlane[rowBase + j]);
+                        var res = Vector128.LoadUnsafe(ref _reconResidual[resBase + j]);
+                        var clamped = Vector128.Min(Vector128.Max(pred + res, zero128), max128);
+                        clamped.StoreUnsafe(ref destPlane[rowBase + j]);
+                    }
+                }
 
                 for (; j < w; j++)
                 {

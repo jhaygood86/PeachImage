@@ -348,11 +348,16 @@ internal static class Av1Cdef
             return;
         }
 
-        if (interior && w == 4 && Vector128.IsHardwareAccelerated)
+        // 8-wide blocks without Vector256 (Arm64 NEON is 128-bit only) run as two independent 4-lane halves:
+        // each column's result depends only on currPlane, which is read-only here, so the halves don't interact.
+        if (interior && (w == 4 || w == 8) && Vector128.IsHardwareAccelerated)
         {
             for (int i = 0; i < h; i++)
             {
-                CdefFilterRow128(currPlane, cdefPlane, stride, x0, y0 + i, priTap0, priTap1, secTap0, secTap1, priStr, secStr, priDampingAdj, secDampingAdj, pDy0, pDx0, pDy1, pDx1, aDy0, aDx0, aDy1, aDx1, bDy0, bDx0, bDy1, bDx1);
+                for (int xOff = 0; xOff < w; xOff += 4)
+                {
+                    CdefFilterRow128(currPlane, cdefPlane, stride, x0 + xOff, y0 + i, priTap0, priTap1, secTap0, secTap1, priStr, secStr, priDampingAdj, secDampingAdj, pDy0, pDx0, pDy1, pDx1, aDy0, aDx0, aDy1, aDx1, bDy0, bDx0, bDy1, bDx1);
+                }
             }
 
             return;
