@@ -62,7 +62,7 @@ internal static class Av1CdefSearch
         var seq = BuildSequenceHeader(monoChrome);
 
         var bestChoice = Av1CdefChoice.Off;
-        long bestSse = ComputeSse(reconY, sourceY, lumaLen) + ComputeSse(reconU, sourceU, chromaLen) + ComputeSse(reconV, sourceV, chromaLen);
+        long bestSse = Av1SquaredError.Compute(reconY, sourceY, lumaLen) + Av1SquaredError.Compute(reconU, sourceU, chromaLen) + Av1SquaredError.Compute(reconV, sourceV, chromaLen);
 
         foreach ((int pri, int sec) in Candidates)
         {
@@ -73,7 +73,7 @@ internal static class Av1CdefSearch
             var result = BuildDecodeResult(seq, frame, trialY, trialU, trialV, miCols, miRows, width, height, chromaWidth, chromaHeight);
             Av1Cdef.Apply(result);
 
-            long sse = ComputeSse(result.Planes[0], sourceY, lumaLen) + ComputeSse(monoChrome ? null : result.Planes[1], sourceU, chromaLen) + ComputeSse(monoChrome ? null : result.Planes[2], sourceV, chromaLen);
+            long sse = Av1SquaredError.Compute(result.Planes[0], sourceY, lumaLen) + Av1SquaredError.Compute(monoChrome ? null : result.Planes[1], sourceU, chromaLen) + Av1SquaredError.Compute(monoChrome ? null : result.Planes[2], sourceV, chromaLen);
             ReturnPlanes(result, monoChrome);
 
             if (sse < bestSse)
@@ -129,23 +129,6 @@ internal static class Av1CdefSearch
             ArrayPool<int>.Shared.Return(result.Planes[1]);
             ArrayPool<int>.Shared.Return(result.Planes[2]);
         }
-    }
-
-    private static long ComputeSse(int[]? filtered, int[]? source, int length)
-    {
-        if (filtered is null || source is null)
-        {
-            return 0;
-        }
-
-        long sse = 0;
-        for (int i = 0; i < length; i++)
-        {
-            int diff = filtered[i] - source[i];
-            sse += (long)diff * diff;
-        }
-
-        return sse;
     }
 
     /// <summary>Same fixed-configuration <see cref="Av1SequenceHeader"/> shape as <see cref="Av1InLoopFilterSearch"/>'s own builder, except <c>EnableCdef</c> is always <see langword="true"/> here regardless of what the real sequence header ends up signaling -- this search only ever runs for the CDEF filter, which needs it on to do anything at all (see <see cref="Av1Cdef.Apply"/>'s own early-return gate).</summary>
