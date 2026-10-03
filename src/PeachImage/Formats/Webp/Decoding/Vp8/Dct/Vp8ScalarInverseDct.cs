@@ -37,6 +37,14 @@ internal static class Vp8ScalarInverseDct
             return;
         }
 
+        // Bit-identical to the scalar butterfly (Vp8VectorInverseDctTests holds it to exactly that), so callers
+        // that don't pick a kernel themselves -- the encoder's reconstruction pass -- get the faster one.
+        if (Vp8VectorInverseDct.CanTransform)
+        {
+            Vp8VectorInverseDct.TransformFullAndAdd(coefficients, dst, offset, stride);
+            return;
+        }
+
         TransformFullAndAdd(coefficients, dst, offset, stride);
     }
 

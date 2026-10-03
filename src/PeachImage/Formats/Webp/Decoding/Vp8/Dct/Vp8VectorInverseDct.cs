@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8.Dct;
@@ -88,9 +89,10 @@ internal static class Vp8VectorInverseDct
         AddClipStoreRow(dst, offset + (3 * stride), row3);
     }
 
+    /// <summary>Four consecutive coefficients, sign-extended to 32-bit lanes (one 8-byte load plus a widen, not four scalar loads).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector128<int> LoadRowOfColumns(ReadOnlySpan<short> coefficients, int baseIndex) =>
-        Vector128.Create((int)coefficients[baseIndex], coefficients[baseIndex + 1], coefficients[baseIndex + 2], coefficients[baseIndex + 3]);
+        Vector128.WidenLower(Vector128.CreateScalar(MemoryMarshal.Read<ulong>(MemoryMarshal.AsBytes(coefficients.Slice(baseIndex, 4)))).AsInt16());
 
     /// <summary>The scalar kernel's <c>Mul1(v) = v + ((v*C1) &gt;&gt; 16)</c>, lane-wise. <c>Vector128.Multiply</c> on <see cref="int"/> truncates to the low 32 bits exactly as C#'s <c>int * int</c> does, so this matches the scalar form bit for bit, wraparound included.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -108,7 +110,7 @@ internal static class Vp8VectorInverseDct
     /// <c>Vp8VectorLoopFilter</c>'s 16x8 transpose already documents and works around the same way.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Transpose4x4(
+    internal static void Transpose4x4(
         Vector128<int> row0, Vector128<int> row1, Vector128<int> row2, Vector128<int> row3,
         out Vector128<int> col0, out Vector128<int> col1, out Vector128<int> col2, out Vector128<int> col3)
     {
@@ -128,12 +130,12 @@ internal static class Vp8VectorInverseDct
     private static void AddClipStoreRow(Span<byte> dst, int rowOffset, Vector128<int> deltas)
     {
         var shifted = Vector128.ShiftRightArithmetic(deltas, 3);
-        var basePixels = Vector128.Create((int)dst[rowOffset], dst[rowOffset + 1], dst[rowOffset + 2], dst[rowOffset + 3]);
-        var clamped = Vector128.Min(Vector128.Max(basePixels + shifted, Zero), TwoFiftyFive);
+        var row = dst.Slice(rowOffset, 4);
+        var basePixels = Vector128.WidenLower(Vector128.WidenLower(Vector128.CreateScalar(MemoryMarshal.Read<uint>(row)).AsByte())).AsInt32();
+        var clamped = Vector128.Min(Vector128.Max(basePixels + shifted, Zero), TwoFiftyFive).AsUInt32();
 
-        dst[rowOffset + 0] = (byte)clamped.GetElement(0);
-        dst[rowOffset + 1] = (byte)clamped.GetElement(1);
-        dst[rowOffset + 2] = (byte)clamped.GetElement(2);
-        dst[rowOffset + 3] = (byte)clamped.GetElement(3);
+        // Every lane is in [0,255], so the truncating narrows keep the values and put the four bytes in lane 0.
+        var bytes = Vector128.Narrow(Vector128.Narrow(clamped, clamped), Vector128.Narrow(clamped, clamped));
+        MemoryMarshal.Write(row, bytes.AsUInt32().ToScalar());
     }
 }
