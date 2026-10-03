@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Png.Decoding;
 
@@ -29,24 +31,46 @@ internal static class PngBitUnpacker
                 return;
 
             case 8:
-                for (int i = 0; i < sampleCount; i++)
                 {
-                    samplesOut[i] = packedRow[i];
-                }
+                    int i = 0;
+                    if (Vector128.IsHardwareAccelerated && sampleCount >= Vector128<byte>.Count)
+                    {
+                        _ = packedRow[sampleCount - 1];
+                        _ = samplesOut[sampleCount - 1];
+                        ref byte src = ref MemoryMarshal.GetReference(packedRow);
+                        ref ushort dst = ref MemoryMarshal.GetReference(samplesOut);
+                        for (; i + Vector128<byte>.Count <= sampleCount; i += Vector128<byte>.Count)
+                        {
+                            var bytes = Vector128.LoadUnsafe(ref src, (nuint)i);
+                            Vector128.WidenLower(bytes).StoreUnsafe(ref dst, (nuint)i);
+                            Vector128.WidenUpper(bytes).StoreUnsafe(ref dst, (nuint)(i + (Vector128<byte>.Count / 2)));
+                        }
+                    }
 
-                return;
+                    for (; i < sampleCount; i++)
+                    {
+                        samplesOut[i] = packedRow[i];
+                    }
+
+                    return;
+                }
 
             case 4:
             case 2:
             case 1:
-                int samplesPerByte = 8 / bitDepth;
-                byte mask = (byte)((1 << bitDepth) - 1);
-                for (int i = 0; i < sampleCount; i++)
                 {
-                    int byteIndex = i / samplesPerByte;
-                    int sampleInByte = i % samplesPerByte;
-                    int shift = 8 - bitDepth - (sampleInByte * bitDepth);
-                    samplesOut[i] = (ushort)((packedRow[byteIndex] >> shift) & mask);
+                    // Each source byte holds 8 / bitDepth samples, most significant first; walk them with a
+                    // shift per sample rather than dividing the sample index by the samples-per-byte count.
+                    byte mask = (byte)((1 << bitDepth) - 1);
+                    int i = 0;
+                    for (int byteIndex = 0; i < sampleCount; byteIndex++)
+                    {
+                        int packed = packedRow[byteIndex];
+                        for (int shift = 8 - bitDepth; shift >= 0 && i < sampleCount; shift -= bitDepth)
+                        {
+                            samplesOut[i++] = (ushort)((packed >> shift) & mask);
+                        }
+                    }
                 }
 
                 return;

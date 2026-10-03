@@ -13,7 +13,34 @@ internal sealed class PngPalette
 
     public int EntryCount => _rgb.Length / 3;
 
-    public void SetAlpha(byte[] alpha) => _alpha = alpha;
+    public void SetAlpha(byte[] alpha)
+    {
+        _alpha = alpha;
+        _rgbaLut = null;
+    }
+
+    /// <summary>The palette's RGB triples, three bytes per entry.</summary>
+    public ReadOnlySpan<byte> Rgb => _rgb;
+
+    private uint[]? _rgbaLut;
+
+    /// <summary>
+    /// One packed little-endian <c>R,G,B,A</c> word per entry (alpha 255 where tRNS has no entry), built on
+    /// first use, so a whole pixel resolves with one load and one 4-byte store.
+    /// </summary>
+    public ReadOnlySpan<uint> RgbaLut => _rgbaLut ??= BuildRgbaLut();
+
+    private uint[] BuildRgbaLut()
+    {
+        var lut = new uint[EntryCount];
+        for (int i = 0; i < lut.Length; i++)
+        {
+            byte alpha = _alpha is { } a ? (i < a.Length ? a[i] : (byte)255) : (byte)255;
+            lut[i] = _rgb[i * 3] | ((uint)_rgb[(i * 3) + 1] << 8) | ((uint)_rgb[(i * 3) + 2] << 16) | ((uint)alpha << 24);
+        }
+
+        return lut;
+    }
 
     public (byte R, byte G, byte B, byte A) Resolve(int index)
     {
