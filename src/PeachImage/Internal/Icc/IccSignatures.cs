@@ -50,4 +50,5 @@ internal static class IccSignatures
 
     internal const string MediaWhitePoint = "wtpt";
     internal const string MediaBlackPoint = "bkpt";
+    internal const string ProfileDescription = "desc";
 }

@@ -49,6 +49,9 @@ internal sealed class IccProfile
         _ => 0,
     };
 
+    /// <summary>The profile's human-readable description (<c>desc</c> tag), or <see langword="null"/> if absent or unreadable.</summary>
+    internal string? Description => tags.Description.Value;
+
     private bool IsTransformSupported => transform is IccTransformAToB or IccTransformTrcMatrix or IccTransformTrcGrey;
 
     /// <summary>Throws if this profile isn't one PeachImage's ICC engine can use, so callers can fall back to a naive conversion instead.</summary>
