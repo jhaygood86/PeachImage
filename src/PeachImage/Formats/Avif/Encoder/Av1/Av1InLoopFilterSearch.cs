@@ -49,7 +49,7 @@ internal static class Av1InLoopFilterSearch
         var seq = BuildSequenceHeader(monoChrome);
 
         int bestLevel = 0;
-        long bestSse = ComputeSse(reconY, sourceY) + ComputeSse(reconU, sourceU) + ComputeSse(reconV, sourceV);
+        long bestSse = Av1SquaredError.Compute(reconY, sourceY) + Av1SquaredError.Compute(reconU, sourceU) + Av1SquaredError.Compute(reconV, sourceV);
 
         // Best-so-far filtered planes, only allocated once a candidate actually beats level 0 (the common
         // case for already-clean content, where the unfiltered reconstruction is the correct final answer
@@ -75,7 +75,7 @@ internal static class Av1InLoopFilterSearch
             var result = BuildDecodeResult(seq, frame, trialY, trialU, trialV, miCols, miRows, width, height, chromaWidth, chromaHeight);
             Av1DeblockingFilter.Apply(result);
 
-            long sse = ComputeSse(trialY, sourceY) + ComputeSse(trialU, sourceU) + ComputeSse(trialV, sourceV);
+            long sse = Av1SquaredError.Compute(trialY, sourceY) + Av1SquaredError.Compute(trialU, sourceU) + Av1SquaredError.Compute(trialV, sourceV);
             if (sse < bestSse)
             {
                 bestSse = sse;
@@ -97,23 +97,6 @@ internal static class Av1InLoopFilterSearch
         }
 
         return bestLevel;
-    }
-
-    private static long ComputeSse(int[]? filtered, int[]? source)
-    {
-        if (filtered is null || source is null)
-        {
-            return 0;
-        }
-
-        long sse = 0;
-        for (int i = 0; i < filtered.Length; i++)
-        {
-            int diff = filtered[i] - source[i];
-            sse += (long)diff * diff;
-        }
-
-        return sse;
     }
 
     /// <summary>
