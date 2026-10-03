@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Shared.Resampling;
@@ -153,13 +154,20 @@ internal static class ImageResizer
         int width = source.Width;
         int rowBytes = width * bytesPerPixel;
         int rowFloats = width * FloatsPerPixel;
+        bool useVector8 = CanVectorize8(is16Bit, channelCount);
 
         RowParallel.For(source.Height, y =>
         {
             var rowPixels = pixelMemory.Span.Slice(y * rowBytes, rowBytes);
             var rowBuffer = buffer.AsSpan(y * rowFloats, rowFloats);
 
-            for (int x = 0; x < width; x++)
+            int x = 0;
+            if (useVector8)
+            {
+                x = WidenRow8(rowPixels, rowBuffer, width, channelCount, hasAlpha);
+            }
+
+            for (; x < width; x++)
             {
                 int bufferOffset = x * FloatsPerPixel;
                 var pixelBytes = rowPixels.Slice(x * bytesPerPixel, bytesPerPixel);
@@ -228,6 +236,7 @@ internal static class ImageResizer
         float fullScale = is16Bit ? 65535f : 255f;
         int rowBytes = width * bytesPerPixel;
         int rowFloats = width * FloatsPerPixel;
+        bool useVector8 = CanVectorize8(is16Bit, channelCount);
 
         RowParallel.For(height, y =>
         {
@@ -235,7 +244,13 @@ internal static class ImageResizer
             var rowBuffer = buffer.AsSpan(y * rowFloats, rowFloats);
             var rowPixels = pixelMemory.Span.Slice(y * rowBytes, rowBytes);
 
-            for (int x = 0; x < width; x++)
+            int x = 0;
+            if (useVector8)
+            {
+                x = NarrowRow8(rowBuffer, rowPixels, width, channelCount, hasAlpha, fullScale);
+            }
+
+            for (; x < width; x++)
             {
                 rowBuffer.Slice(x * FloatsPerPixel, FloatsPerPixel).CopyTo(channels);
 
@@ -264,6 +279,118 @@ internal static class ImageResizer
         });
 
         return destination;
+    }
+
+    // The 8-bit 3- and 4-channel paths below process four pixels per iteration with Vector128. Every
+    // operation is the same IEEE single-precision multiply/divide/round the scalar WritePixel and
+    // FromFloatBuffer loops perform, in the same order, so output is bit-identical; the scalar loops
+    // handle whatever tail the vector loop leaves.
+    private static bool CanVectorize8(bool is16Bit, int channelCount) =>
+        Vector128.IsHardwareAccelerated && !is16Bit && channelCount is 3 or 4;
+
+    private static readonly Vector128<byte> Rgb24ToPixelLanes = Vector128.Create(
+        (byte)0, 1, 2, 255, 3, 4, 5, 255, 6, 7, 8, 255, 9, 10, 11, 255);
+
+    /// <summary>
+    /// Widens as many whole groups of four 8-bit pixels as it can into <paramref name="buffer"/>, returning the
+    /// number of pixels converted (a multiple of four); the caller converts the rest.
+    /// </summary>
+    private static int WidenRow8(ReadOnlySpan<byte> row, Span<float> buffer, int width, int channelCount, bool hasAlpha)
+    {
+        // Rgb24 groups load 16 bytes for 12 bytes of pixels, so they stop one group early to stay in bounds.
+        int limit = channelCount == 4 ? width : width - 2;
+        int x = 0;
+        for (; x + 4 <= limit; x += 4)
+        {
+            Vector128<byte> bytes;
+            if (channelCount == 4)
+            {
+                bytes = Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(row), (nuint)(x * 4));
+            }
+            else
+            {
+                bytes = Vector128.Shuffle(Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(row), (nuint)(x * 3)), Rgb24ToPixelLanes);
+            }
+
+            var lo = Vector128.WidenLower(bytes);
+            var hi = Vector128.WidenUpper(bytes);
+            var p0 = Vector128.ConvertToSingle(Vector128.WidenLower(lo));
+            var p1 = Vector128.ConvertToSingle(Vector128.WidenUpper(lo));
+            var p2 = Vector128.ConvertToSingle(Vector128.WidenLower(hi));
+            var p3 = Vector128.ConvertToSingle(Vector128.WidenUpper(hi));
+
+            if (hasAlpha)
+            {
+                p0 = Premultiply(p0);
+                p1 = Premultiply(p1);
+                p2 = Premultiply(p2);
+                p3 = Premultiply(p3);
+            }
+
+            ref float dst = ref buffer[x * FloatsPerPixel];
+            p0.StoreUnsafe(ref dst, 0);
+            p1.StoreUnsafe(ref dst, 4);
+            p2.StoreUnsafe(ref dst, 8);
+            p3.StoreUnsafe(ref dst, 12);
+        }
+
+        return x;
+    }
+
+    private static Vector128<float> Premultiply(Vector128<float> pixel)
+    {
+        float alpha = pixel.GetElement(3);
+        return (pixel * Vector128.Create(alpha / 255f)).WithElement(3, alpha);
+    }
+
+    /// <summary>The mirror of <see cref="WidenRow8"/>: rounds, clamps and narrows groups of four pixels, returning how many it wrote.</summary>
+    private static int NarrowRow8(ReadOnlySpan<float> buffer, Span<byte> row, int width, int channelCount, bool hasAlpha, float fullScale)
+    {
+        int limit = channelCount == 4 ? width : width - 2;
+        var zero = Vector128<float>.Zero;
+        var max = Vector128.Create(fullScale);
+        int x = 0;
+        for (; x + 4 <= limit; x += 4)
+        {
+            ref readonly float src = ref buffer[x * FloatsPerPixel];
+            var p0 = Vector128.LoadUnsafe(in src, 0);
+            var p1 = Vector128.LoadUnsafe(in src, 4);
+            var p2 = Vector128.LoadUnsafe(in src, 8);
+            var p3 = Vector128.LoadUnsafe(in src, 12);
+
+            if (hasAlpha)
+            {
+                p0 = Unpremultiply(p0, fullScale);
+                p1 = Unpremultiply(p1, fullScale);
+                p2 = Unpremultiply(p2, fullScale);
+                p3 = Unpremultiply(p3, fullScale);
+            }
+
+            var i0 = Vector128.ConvertToUInt32(Vector128.Min(Vector128.Max(Vector128.Round(p0), zero), max));
+            var i1 = Vector128.ConvertToUInt32(Vector128.Min(Vector128.Max(Vector128.Round(p1), zero), max));
+            var i2 = Vector128.ConvertToUInt32(Vector128.Min(Vector128.Max(Vector128.Round(p2), zero), max));
+            var i3 = Vector128.ConvertToUInt32(Vector128.Min(Vector128.Max(Vector128.Round(p3), zero), max));
+
+            var packed = Vector128.Narrow(Vector128.Narrow(i0, i1), Vector128.Narrow(i2, i3));
+            if (channelCount == 3)
+            {
+                packed = Vector128.Shuffle(packed, Vector128.Create((byte)0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 255, 255, 255, 255));
+            }
+
+            // Rgb24 stores 16 bytes for 12 bytes of pixels; the extra four land on the next group's pixels,
+            // which that group (or the scalar tail) overwrites.
+            packed.StoreUnsafe(ref MemoryMarshal.GetReference(row), (nuint)(x * channelCount));
+        }
+
+        return x;
+    }
+
+    private static Vector128<float> Unpremultiply(Vector128<float> pixel, float fullScale)
+    {
+        float alpha = Math.Clamp(pixel.GetElement(3), 0f, fullScale);
+        float scale = alpha > 0f ? fullScale / alpha : 0f;
+        var scaled = Vector128.Min(Vector128.Max(pixel * Vector128.Create(scale), Vector128<float>.Zero), Vector128.Create(fullScale));
+        return scaled.WithElement(3, alpha);
     }
 
     private static void UnpremultiplyInPlace(Span<float> channels, float fullScale)
