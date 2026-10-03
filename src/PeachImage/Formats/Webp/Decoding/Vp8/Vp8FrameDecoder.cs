@@ -248,8 +248,8 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
 
         if ((acBlocks & (1u << blockIndex)) != 0)
         {
-            // Vp8VectorInverseDct.CanTransform checks Sse2.IsSupported, which RyuJIT treats as a JIT-time
-            // intrinsic constant on x86 -- this branch is resolved once per process, not re-evaluated per
+            // Vp8VectorInverseDct.CanTransform checks Sse2/AdvSimd.Arm64.IsSupported, which RyuJIT treats as a JIT-time
+            // intrinsic constant -- this branch is resolved once per process, not re-evaluated per
             // block, the same way every other Sse2.IsSupported/Vector128.IsHardwareAccelerated gate in this
             // decoder is checked inline rather than cached behind a selector.
             if (Vp8VectorInverseDct.CanTransform)

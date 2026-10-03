@@ -1,6 +1,5 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8.Dct;
 
@@ -28,8 +27,8 @@ namespace PeachImage.Formats.Webp.Decoding.Vp8.Dct;
 /// </remarks>
 internal static class Vp8VectorInverseDct
 {
-    /// <summary>Whether <see cref="TransformFullAndAdd"/> is usable — the 4x4 transpose is built from <see cref="Sse2.UnpackLow(Vector128{int}, Vector128{int})"/>/<see cref="Sse2.UnpackHigh(Vector128{int}, Vector128{int})"/>, which have no portable equivalent (see the type's remarks).</summary>
-    public static bool CanTransform => Sse2.IsSupported;
+    /// <summary>Whether <see cref="TransformFullAndAdd"/> is usable — the 4x4 transpose is built from <see cref="Vp8Interleave.UnpackLow(Vector128{int}, Vector128{int})"/>/<see cref="Vp8Interleave.UnpackHigh(Vector128{int}, Vector128{int})"/>, which map to <c>punpck*</c> on x86 and <c>zip1/zip2</c> on Arm64 (the portable vector API has no two-vector interleave).</summary>
+    public static bool CanTransform => Vp8Interleave.IsSupported;
 
     private static readonly Vector128<int> C1 = Vector128.Create(Vp8InverseTransformConstants.C1);
     private static readonly Vector128<int> C2 = Vector128.Create(Vp8InverseTransformConstants.C2);
@@ -113,15 +112,15 @@ internal static class Vp8VectorInverseDct
         Vector128<int> row0, Vector128<int> row1, Vector128<int> row2, Vector128<int> row3,
         out Vector128<int> col0, out Vector128<int> col1, out Vector128<int> col2, out Vector128<int> col3)
     {
-        var lo01 = Sse2.UnpackLow(row0, row1);
-        var hi01 = Sse2.UnpackHigh(row0, row1);
-        var lo23 = Sse2.UnpackLow(row2, row3);
-        var hi23 = Sse2.UnpackHigh(row2, row3);
+        var lo01 = Vp8Interleave.UnpackLow(row0, row1);
+        var hi01 = Vp8Interleave.UnpackHigh(row0, row1);
+        var lo23 = Vp8Interleave.UnpackLow(row2, row3);
+        var hi23 = Vp8Interleave.UnpackHigh(row2, row3);
 
-        col0 = Sse2.UnpackLow(lo01.AsInt64(), lo23.AsInt64()).AsInt32();
-        col1 = Sse2.UnpackHigh(lo01.AsInt64(), lo23.AsInt64()).AsInt32();
-        col2 = Sse2.UnpackLow(hi01.AsInt64(), hi23.AsInt64()).AsInt32();
-        col3 = Sse2.UnpackHigh(hi01.AsInt64(), hi23.AsInt64()).AsInt32();
+        col0 = Vp8Interleave.UnpackLow(lo01.AsInt64(), lo23.AsInt64()).AsInt32();
+        col1 = Vp8Interleave.UnpackHigh(lo01.AsInt64(), lo23.AsInt64()).AsInt32();
+        col2 = Vp8Interleave.UnpackLow(hi01.AsInt64(), hi23.AsInt64()).AsInt32();
+        col3 = Vp8Interleave.UnpackHigh(hi01.AsInt64(), hi23.AsInt64()).AsInt32();
     }
 
     /// <summary>Shifts a row's 4 pixel deltas by the final descale, adds them to the existing prediction, clamps to [0,255], and stores.</summary>
