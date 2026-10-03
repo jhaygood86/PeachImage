@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+
 namespace PeachImage.Formats.Jpeg.Markers;
 
 /// <summary>
@@ -163,6 +165,33 @@ internal sealed class JpegByteSource(Stream stream)
         _bufferStart += runLength;
         _position += runLength;
         return runLength;
+    }
+
+    /// <summary>
+    /// Peeks the next eight buffered bytes as a big-endian word, succeeding only when all eight are already
+    /// buffered, no pushed-back bytes are pending, and none of the eight is <c>0xFF</c> (so none can be
+    /// byte-stuffing or a marker). Nothing is consumed; call <see cref="Advance"/> with however many bytes were used.
+    /// </summary>
+    public bool TryPeekCleanWord(out ulong word)
+    {
+        if (_pendingCount > 0 || _bufferEnd - _bufferStart < sizeof(ulong))
+        {
+            word = 0;
+            return false;
+        }
+
+        word = BinaryPrimitives.ReadUInt64BigEndian(_buffer.AsSpan(_bufferStart, sizeof(ulong)));
+
+        // SWAR "has a 0xFF byte" test: a byte of ~word is zero exactly when that byte of word is 0xFF.
+        ulong inverted = ~word;
+        return ((inverted - 0x0101010101010101UL) & ~inverted & 0x8080808080808080UL) == 0;
+    }
+
+    /// <summary>Consumes <paramref name="count"/> bytes already validated by <see cref="TryPeekCleanWord"/>.</summary>
+    public void Advance(int count)
+    {
+        _bufferStart += count;
+        _position += count;
     }
 
     private bool Refill()

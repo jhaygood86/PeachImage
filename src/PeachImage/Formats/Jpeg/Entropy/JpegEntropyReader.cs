@@ -148,6 +148,23 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
 
     private void EnsureBits(int count)
     {
+        // Fast path: when the next eight bytes are buffered and contain no 0xFF, top the buffer up straight
+        // from one word load. This is exactly what the byte-wise loop below would do for the same bytes (it
+        // also fills to a whole number of bytes without exceeding 64 bits), minus its per-refill span copy.
+        if (_bitCount < count && _bitCount >= 0 && !AtMarkerBoundary && source.TryPeekCleanWord(out ulong word))
+        {
+            int bytes = (64 - _bitCount) >> 3;
+            int total = _bitCount + (bytes << 3);
+            ulong keep = total == 64 ? ulong.MaxValue : ~(ulong.MaxValue >> total);
+            _buffer |= (word >> _bitCount) & keep;
+            _bitCount = total;
+            source.Advance(bytes);
+            if (_bitCount >= count)
+            {
+                return;
+            }
+        }
+
         Span<byte> clean = stackalloc byte[8];
         while (_bitCount < count && _bitCount <= 56)
         {
