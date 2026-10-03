@@ -138,7 +138,7 @@ public class Vp8VectorLoopFilterTests
             strided
                 ? Vp8VectorLoopFilter.CanFilterStrided(16, Origin, Stride, Stride * Rows)
                 : Vp8VectorLoopFilter.CanFilter(16, Origin, Stride, Stride * Rows),
-            strided ? "SSE2 is not available here." : "Vector128 is not hardware accelerated here.");
+            strided ? "No two-vector interleave (SSE2 or Arm64 AdvSimd) is available here." : "Vector128 is not hardware accelerated here.");
     }
 
     /// <summary>

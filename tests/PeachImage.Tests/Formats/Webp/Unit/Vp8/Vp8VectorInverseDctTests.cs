@@ -19,7 +19,7 @@ public class Vp8VectorInverseDctTests
     [Fact]
     public void TransformFullAndAdd_MatchesTheScalarKernel_ForEveryBlockShape()
     {
-        Assert.SkipUnless(Vp8VectorInverseDct.CanTransform, "SSE2 is not available here.");
+        Assert.SkipUnless(Vp8VectorInverseDct.CanTransform, "No two-vector interleave (SSE2 or Arm64 AdvSimd) is available here.");
 
         foreach (var coefficients in EnumerateStructuredBlocks())
         {
@@ -36,7 +36,7 @@ public class Vp8VectorInverseDctTests
     [Fact]
     public void TransformFullAndAdd_MatchesTheScalarKernel_AcrossWideRandomCoefficients()
     {
-        Assert.SkipUnless(Vp8VectorInverseDct.CanTransform, "SSE2 is not available here.");
+        Assert.SkipUnless(Vp8VectorInverseDct.CanTransform, "No two-vector interleave (SSE2 or Arm64 AdvSimd) is available here.");
 
         var random = new Random(271828);
 
@@ -67,7 +67,7 @@ public class Vp8VectorInverseDctTests
     [InlineData((byte)255)]
     public void TransformFullAndAdd_MatchesTheScalarKernel_AtEveryBasePixelExtreme(byte basePixel)
     {
-        Assert.SkipUnless(Vp8VectorInverseDct.CanTransform, "SSE2 is not available here.");
+        Assert.SkipUnless(Vp8VectorInverseDct.CanTransform, "No two-vector interleave (SSE2 or Arm64 AdvSimd) is available here.");
 
         var random = new Random(basePixel + 1);
 

@@ -1,7 +1,6 @@
 ﻿using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.X86;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8.LoopFilter;
 
@@ -41,16 +40,15 @@ internal static class Vp8VectorLoopFilter
     /// Whether <see cref="FilterStridedEdge"/> can handle an edge with these dimensions and this hardware.
     /// </summary>
     /// <remarks>
-    /// Requires <see cref="Sse2"/> specifically, not just <see cref="Vector128"/> acceleration. The transpose
-    /// this orientation needs is built from two-vector interleaves, and .NET's portable vector API has no
-    /// equivalent of them — <c>Vector128.Shuffle</c> permutes within a single vector only. Expressing the
-    /// transpose portably would take roughly 120 shuffle/or operations against the ~24 interleaves used here,
-    /// which is the same reason Jpeg's <c>AanVectorButterfly.Transpose8x8</c> reaches for real intrinsics. An
-    /// <c>AdvSimd.Arm64.ZipLow</c>/<c>ZipHigh</c> path would be the direct Arm equivalent and is a
-    /// straightforward follow-up; until then Arm falls back to the scalar filter.
+    /// Requires <see cref="Vp8Interleave.IsSupported"/> (Sse2 or Arm64 AdvSimd), not just <see cref="Vector128"/>
+    /// acceleration. The transpose this orientation needs is built from two-vector interleaves, and .NET's
+    /// portable vector API has no equivalent of them — <c>Vector128.Shuffle</c> permutes within a single vector
+    /// only. Expressing the transpose portably would take roughly 120 shuffle/or operations against the ~24
+    /// interleaves used here, so <see cref="Vp8Interleave"/> maps them to <c>punpck*</c> on x86 and <c>zip1/zip2</c>
+    /// on Arm64.
     /// </remarks>
     public static bool CanFilterStrided(int size, int origin, int stride, int planeLength) =>
-        Sse2.IsSupported
+        Vp8Interleave.IsSupported
         && (size == Vector128<byte>.Count || size == ChromaLanes)
         && origin - (Taps / 2) >= 0
         && origin + ((size - 1) * stride) + (Taps / 2) <= planeLength;
@@ -255,10 +253,10 @@ internal static class Vp8VectorLoopFilter
         var t7 = Vector128.Create(c67.GetUpper(), c67.GetUpper());
 
         StoreEightRows(
-            Sse2.UnpackLow(t0, t1),
-            Sse2.UnpackLow(t2, t3),
-            Sse2.UnpackLow(t4, t5),
-            Sse2.UnpackLow(t6, t7),
+            Vp8Interleave.UnpackLow(t0, t1),
+            Vp8Interleave.UnpackLow(t2, t3),
+            Vp8Interleave.UnpackLow(t4, t5),
+            Vp8Interleave.UnpackLow(t6, t7),
             plane,
             first,
             stride);
@@ -292,35 +290,35 @@ internal static class Vp8VectorLoopFilter
     private static (Vector128<byte> C01, Vector128<byte> C23, Vector128<byte> C45, Vector128<byte> C67) TransposeEightRows(
         Span<byte> plane, int first, int stride)
     {
-        var t0 = Sse2.UnpackLow(LoadRow(plane, first), LoadRow(plane, first + stride));
-        var t1 = Sse2.UnpackLow(LoadRow(plane, first + (2 * stride)), LoadRow(plane, first + (3 * stride)));
-        var t2 = Sse2.UnpackLow(LoadRow(plane, first + (4 * stride)), LoadRow(plane, first + (5 * stride)));
-        var t3 = Sse2.UnpackLow(LoadRow(plane, first + (6 * stride)), LoadRow(plane, first + (7 * stride)));
+        var t0 = Vp8Interleave.UnpackLow(LoadRow(plane, first), LoadRow(plane, first + stride));
+        var t1 = Vp8Interleave.UnpackLow(LoadRow(plane, first + (2 * stride)), LoadRow(plane, first + (3 * stride)));
+        var t2 = Vp8Interleave.UnpackLow(LoadRow(plane, first + (4 * stride)), LoadRow(plane, first + (5 * stride)));
+        var t3 = Vp8Interleave.UnpackLow(LoadRow(plane, first + (6 * stride)), LoadRow(plane, first + (7 * stride)));
 
-        var u0 = Sse2.UnpackLow(t0.AsUInt16(), t1.AsUInt16());
-        var u1 = Sse2.UnpackHigh(t0.AsUInt16(), t1.AsUInt16());
-        var u2 = Sse2.UnpackLow(t2.AsUInt16(), t3.AsUInt16());
-        var u3 = Sse2.UnpackHigh(t2.AsUInt16(), t3.AsUInt16());
+        var u0 = Vp8Interleave.UnpackLow(t0.AsUInt16(), t1.AsUInt16());
+        var u1 = Vp8Interleave.UnpackHigh(t0.AsUInt16(), t1.AsUInt16());
+        var u2 = Vp8Interleave.UnpackLow(t2.AsUInt16(), t3.AsUInt16());
+        var u3 = Vp8Interleave.UnpackHigh(t2.AsUInt16(), t3.AsUInt16());
 
         return (
-            Sse2.UnpackLow(u0.AsUInt32(), u2.AsUInt32()).AsByte(),
-            Sse2.UnpackHigh(u0.AsUInt32(), u2.AsUInt32()).AsByte(),
-            Sse2.UnpackLow(u1.AsUInt32(), u3.AsUInt32()).AsByte(),
-            Sse2.UnpackHigh(u1.AsUInt32(), u3.AsUInt32()).AsByte());
+            Vp8Interleave.UnpackLow(u0.AsUInt32(), u2.AsUInt32()).AsByte(),
+            Vp8Interleave.UnpackHigh(u0.AsUInt32(), u2.AsUInt32()).AsByte(),
+            Vp8Interleave.UnpackLow(u1.AsUInt32(), u3.AsUInt32()).AsByte(),
+            Vp8Interleave.UnpackHigh(u1.AsUInt32(), u3.AsUInt32()).AsByte());
     }
 
     /// <summary>The inverse of <see cref="Transpose16x8"/>: scatters the tap columns back out as 16 rows of <see cref="Taps"/> bytes.</summary>
     private static void Transpose8x16(ReadOnlySpan<Vector128<byte>> taps, Span<byte> plane, int first, int stride)
     {
-        var a0 = Sse2.UnpackLow(taps[0], taps[1]);
-        var a1 = Sse2.UnpackLow(taps[2], taps[3]);
-        var a2 = Sse2.UnpackLow(taps[4], taps[5]);
-        var a3 = Sse2.UnpackLow(taps[6], taps[7]);
+        var a0 = Vp8Interleave.UnpackLow(taps[0], taps[1]);
+        var a1 = Vp8Interleave.UnpackLow(taps[2], taps[3]);
+        var a2 = Vp8Interleave.UnpackLow(taps[4], taps[5]);
+        var a3 = Vp8Interleave.UnpackLow(taps[6], taps[7]);
 
-        var b0 = Sse2.UnpackHigh(taps[0], taps[1]);
-        var b1 = Sse2.UnpackHigh(taps[2], taps[3]);
-        var b2 = Sse2.UnpackHigh(taps[4], taps[5]);
-        var b3 = Sse2.UnpackHigh(taps[6], taps[7]);
+        var b0 = Vp8Interleave.UnpackHigh(taps[0], taps[1]);
+        var b1 = Vp8Interleave.UnpackHigh(taps[2], taps[3]);
+        var b2 = Vp8Interleave.UnpackHigh(taps[4], taps[5]);
+        var b3 = Vp8Interleave.UnpackHigh(taps[6], taps[7]);
 
         StoreEightRows(a0, a1, a2, a3, plane, first, stride);
         StoreEightRows(b0, b1, b2, b3, plane, first + (8 * stride), stride);
@@ -330,15 +328,15 @@ internal static class Vp8VectorLoopFilter
         Vector128<byte> a0, Vector128<byte> a1, Vector128<byte> a2, Vector128<byte> a3,
         Span<byte> plane, int first, int stride)
     {
-        var d0 = Sse2.UnpackLow(a0.AsUInt16(), a1.AsUInt16());
-        var d1 = Sse2.UnpackHigh(a0.AsUInt16(), a1.AsUInt16());
-        var e0 = Sse2.UnpackLow(a2.AsUInt16(), a3.AsUInt16());
-        var e1 = Sse2.UnpackHigh(a2.AsUInt16(), a3.AsUInt16());
+        var d0 = Vp8Interleave.UnpackLow(a0.AsUInt16(), a1.AsUInt16());
+        var d1 = Vp8Interleave.UnpackHigh(a0.AsUInt16(), a1.AsUInt16());
+        var e0 = Vp8Interleave.UnpackLow(a2.AsUInt16(), a3.AsUInt16());
+        var e1 = Vp8Interleave.UnpackHigh(a2.AsUInt16(), a3.AsUInt16());
 
-        StoreRowPair(Sse2.UnpackLow(d0.AsUInt32(), e0.AsUInt32()).AsUInt64(), plane, first, stride);
-        StoreRowPair(Sse2.UnpackHigh(d0.AsUInt32(), e0.AsUInt32()).AsUInt64(), plane, first + (2 * stride), stride);
-        StoreRowPair(Sse2.UnpackLow(d1.AsUInt32(), e1.AsUInt32()).AsUInt64(), plane, first + (4 * stride), stride);
-        StoreRowPair(Sse2.UnpackHigh(d1.AsUInt32(), e1.AsUInt32()).AsUInt64(), plane, first + (6 * stride), stride);
+        StoreRowPair(Vp8Interleave.UnpackLow(d0.AsUInt32(), e0.AsUInt32()).AsUInt64(), plane, first, stride);
+        StoreRowPair(Vp8Interleave.UnpackHigh(d0.AsUInt32(), e0.AsUInt32()).AsUInt64(), plane, first + (2 * stride), stride);
+        StoreRowPair(Vp8Interleave.UnpackLow(d1.AsUInt32(), e1.AsUInt32()).AsUInt64(), plane, first + (4 * stride), stride);
+        StoreRowPair(Vp8Interleave.UnpackHigh(d1.AsUInt32(), e1.AsUInt32()).AsUInt64(), plane, first + (6 * stride), stride);
     }
 
     /// <summary>Reads one lane's <see cref="Taps"/> taps into the low half of a vector; the high half is unused by the interleave ladder.</summary>
