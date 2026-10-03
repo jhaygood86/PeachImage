@@ -1,4 +1,6 @@
 ﻿using System.Numerics;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8;
 
@@ -88,6 +90,38 @@ internal static class Vp8IntraPredictionWholeBlock
     public static void PredictTrueMotion(Span<byte> plane, int origin, int stride, int size)
     {
         int corner = plane[origin - stride - 1];
+
+        // Each pixel is clip(above + left - corner); 16-bit lanes hold the widest intermediate (-255..510)
+        // exactly, so clamping then narrowing matches ClipByte lane for lane.
+        if (Vector128.IsHardwareAccelerated && size is 16 or 8)
+        {
+            var aboveBytes = size == 16
+                ? Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(plane.Slice(origin - stride, 16)))
+                : Vector128.CreateScalar(MemoryMarshal.Read<ulong>(plane.Slice(origin - stride, 8))).AsByte();
+            var aboveLow = Vector128.WidenLower(aboveBytes).AsInt16();
+            var aboveHigh = Vector128.WidenUpper(aboveBytes).AsInt16();
+            var zero = Vector128<short>.Zero;
+            var max = Vector128.Create((short)255);
+
+            for (int y = 0; y < size; y++)
+            {
+                int rowOrigin = origin + (y * stride);
+                var delta = Vector128.Create((short)(plane[rowOrigin - 1] - corner));
+                var low = Vector128.Min(Vector128.Max(aboveLow + delta, zero), max).AsUInt16();
+                if (size == 16)
+                {
+                    var high = Vector128.Min(Vector128.Max(aboveHigh + delta, zero), max).AsUInt16();
+                    Vector128.Narrow(low, high).StoreUnsafe(ref MemoryMarshal.GetReference(plane.Slice(rowOrigin, 16)));
+                }
+                else
+                {
+                    MemoryMarshal.Write(plane.Slice(rowOrigin, 8), Vector128.Narrow(low, low).AsUInt64().ToScalar());
+                }
+            }
+
+            return;
+        }
+
         for (int y = 0; y < size; y++)
         {
             int left = plane[origin + (y * stride) - 1];
