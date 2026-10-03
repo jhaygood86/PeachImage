@@ -97,12 +97,7 @@ internal static class IccDeviceToSrgbConverter
                     normalizedDevice[c] = deviceValues[deviceOffset + c] / 255.0;
                 }
 
-                var xyz = profile.ToXyzD50(normalizedDevice, intent);
-                if (applyBpc)
-                {
-                    xyz = IccBlackPointCompensation.Apply(xyz, sourceBlack, SrgbBlackXyzD50);
-                }
-
+                var xyz = DeviceToSrgbPcs(profile, normalizedDevice, intent, applyBpc, sourceBlack);
                 xs[i] = xyz.X;
                 ys[i] = xyz.Y;
                 zs[i] = xyz.Z;
@@ -112,6 +107,59 @@ internal static class IccDeviceToSrgbConverter
             XyzBatchToRgba(xs[..batchCount], ys[..batchCount], zs[..batchCount], rgbaBatch);
 
             processed += batchCount;
+        }
+    }
+
+    // The per-pixel device -> (optionally black-point-compensated) D50 PCS stage, shared by the batched byte
+    // path and the single-color float path so both run the same engine.
+    private static IccVector3 DeviceToSrgbPcs(IccProfile profile, ReadOnlySpan<double> normalizedDevice, IccIntent intent, bool applyBpc, IccVector3 sourceBlack)
+    {
+        var xyz = profile.ToXyzD50(normalizedDevice, intent);
+        return applyBpc ? IccBlackPointCompensation.Apply(xyz, sourceBlack, SrgbBlackXyzD50) : xyz;
+    }
+
+    /// <summary>
+    /// Converts one color of normalized (0-1) device components to unquantized, clamped, sRGB-encoded 0-1
+    /// floats: the same device→PCS stage and PCS→sRGB matrix as <see cref="Convert(ReadOnlySpan{byte}, Span{byte}, int, IccProfile, IccIntent, bool)"/>,
+    /// minus its 8-bit quantization at both ends. Returns <see langword="false"/> (outputs zero) for a wrong
+    /// component count, a non-finite component, or a transform that can't be evaluated (e.g. AbsoluteColorimetric
+    /// without a <c>wtpt</c> tag).
+    /// </summary>
+    internal static bool TryConvertFloat(ReadOnlySpan<float> deviceComponents, IccProfile profile, IccIntent intent, bool blackPointCompensation, out float r, out float g, out float b)
+    {
+        r = g = b = 0;
+        int channelCount = profile.ChannelCount;
+        if (deviceComponents.Length != channelCount)
+        {
+            return false;
+        }
+
+        Span<double> normalizedDevice = stackalloc double[channelCount];
+        for (int c = 0; c < channelCount; c++)
+        {
+            float component = deviceComponents[c];
+            if (!float.IsFinite(component))
+            {
+                return false;
+            }
+
+            normalizedDevice[c] = Math.Clamp((double)component, 0.0, 1.0);
+        }
+
+        try
+        {
+            bool applyBpc = blackPointCompensation && IccBlackPointCompensation.AppliesTo(intent);
+            var sourceBlack = applyBpc ? profile.GetBlackPointXyzD50(intent) : default;
+            var xyz = DeviceToSrgbPcs(profile, normalizedDevice, intent, applyBpc, sourceBlack);
+            var linear = IccColorMath.XyzD50ToLinearSrgb.Multiply(xyz);
+            r = (float)IccColorMath.LinearToSrgb(linear.X);
+            g = (float)IccColorMath.LinearToSrgb(linear.Y);
+            b = (float)IccColorMath.LinearToSrgb(linear.Z);
+            return true;
+        }
+        catch (NotSupportedException)
+        {
+            return false;
         }
     }
 

@@ -215,4 +215,137 @@ public class IccColorProfileTests
             source.ConvertTo(destination, [128], stackalloc byte[1], pixelCount: 1, intent: IccRenderingIntent.AbsoluteColorimetric));
         Assert.Contains("wtpt", exception.Message);
     }
+
+    [Fact]
+    public void TryConvertToSrgb_Rgb_MatchesByteConvertToSrgbWithinOneLevel()
+    {
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildRgbTrcMatrixProfile());
+        byte[][] samples = [[255, 255, 255], [0, 0, 0], [200, 30, 90], [12, 128, 250]];
+
+        foreach (var device in samples)
+        {
+            var expected = new byte[4];
+            profile.ConvertToSrgb(device, expected, pixelCount: 1);
+
+            float[] components = [device[0] / 255f, device[1] / 255f, device[2] / 255f];
+            Assert.True(profile.TryConvertToSrgb(components, out float r, out float g, out float b));
+
+            Assert.InRange(r * 255f, expected[0] - 0.51f, expected[0] + 0.51f);
+            Assert.InRange(g * 255f, expected[1] - 0.51f, expected[1] + 0.51f);
+            Assert.InRange(b * 255f, expected[2] - 0.51f, expected[2] + 0.51f);
+        }
+    }
+
+    [Fact]
+    public void TryConvertToSrgb_Rgb_IsNotQuantizedToEightBits()
+    {
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildRgbTrcMatrixProfile());
+
+        Assert.True(profile.TryConvertToSrgb([0.4f, 0.4f, 0.4f], out float r, out _, out _));
+
+        Assert.NotEqual(MathF.Round(r * 255f), r * 255f, precision: 3);
+    }
+
+    [Fact]
+    public void TryConvertToSrgb_Gray_WhiteAndBlack()
+    {
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildGrayTrcProfile());
+
+        Assert.True(profile.TryConvertToSrgb([1f], out float wr, out float wg, out float wb));
+        Assert.True(wr > 0.95f && wg > 0.95f && wb > 0.95f);
+        Assert.True(profile.TryConvertToSrgb([0f], out float kr, out float kg, out float kb));
+        Assert.True(kr < 0.05f && kg < 0.05f && kb < 0.05f);
+    }
+
+    [Fact]
+    public void TryConvertToSrgb_OutOfRangeComponents_AreClampedAndOutputStaysInRange()
+    {
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildRgbTrcMatrixProfile());
+
+        Assert.True(profile.TryConvertToSrgb([2f, -1f, 0.5f], out float r, out float g, out float b));
+
+        Assert.InRange(r, 0f, 1f);
+        Assert.InRange(g, 0f, 1f);
+        Assert.InRange(b, 0f, 1f);
+    }
+
+    [Fact]
+    public void TryConvertToSrgb_WrongComponentCount_ReturnsFalse()
+    {
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildRgbTrcMatrixProfile());
+
+        Assert.False(profile.TryConvertToSrgb([0.5f], out float r, out float g, out float b));
+        Assert.Equal(0f, r + g + b);
+        Assert.False(profile.TryConvertToSrgb([0.1f, 0.2f, 0.3f, 0.4f], out _, out _, out _));
+    }
+
+    [Fact]
+    public void TryConvertToSrgb_NonFiniteComponent_ReturnsFalse()
+    {
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildRgbTrcMatrixProfile());
+
+        Assert.False(profile.TryConvertToSrgb([float.NaN, 0f, 0f], out _, out _, out _));
+        Assert.False(profile.TryConvertToSrgb([float.PositiveInfinity, 0f, 0f], out _, out _, out _));
+    }
+
+    [Fact]
+    public void TryConvertToSrgb_AbsoluteColorimetric_NoMediaWhitePointTag_ReturnsFalseInsteadOfThrowing()
+    {
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildGrayTrcProfileWithoutWhitePoint());
+
+        Assert.False(profile.TryConvertToSrgb([0.5f], out _, out _, out _, IccRenderingIntent.AbsoluteColorimetric));
+    }
+
+    [Fact]
+    public void TryConvertToSrgb_BlackPointCompensation_ChangesShadowsForProfileWithRaisedBlack()
+    {
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildRgbTrcMatrixProfile(blackPointX: 0.02, blackPointY: 0.02, blackPointZ: 0.02));
+
+        Assert.True(profile.TryConvertToSrgb([0f, 0f, 0f], out float without, out _, out _, IccRenderingIntent.RelativeColorimetric, blackPointCompensation: false));
+        Assert.True(profile.TryConvertToSrgb([0f, 0f, 0f], out float with, out _, out _, IccRenderingIntent.RelativeColorimetric, blackPointCompensation: true));
+
+        Assert.True(with <= without);
+    }
+
+    [Fact]
+    public void Description_IsNull_WhenProfileHasNoDescTag()
+    {
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildRgbTrcMatrixProfile());
+
+        Assert.Null(profile.Description);
+    }
+
+    [Fact]
+    public void Description_ReadsVersion2TextDescriptionTag()
+    {
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildRgbTrcMatrixProfile(descriptionTag: SyntheticIccProfileBuilder.BuildTextDescriptionTag("Test RGB v2")));
+
+        Assert.Equal("Test RGB v2", profile.Description);
+    }
+
+    [Fact]
+    public void Description_ReadsVersion4MultiLocalizedUnicodeTag_PreferringEnglish()
+    {
+        var tag = SyntheticIccProfileBuilder.BuildMultiLocalizedUnicodeTag(("de", "Testprofil"), ("en", "Test RGB v4 é"));
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildRgbTrcMatrixProfile(descriptionTag: tag));
+
+        Assert.Equal("Test RGB v4 é", profile.Description);
+    }
+
+    [Fact]
+    public void Description_FallsBackToFirstMultiLocalizedUnicodeRecord_WhenNoEnglish()
+    {
+        var tag = SyntheticIccProfileBuilder.BuildMultiLocalizedUnicodeTag(("de", "Testprofil"), ("fr", "Profil"));
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildRgbTrcMatrixProfile(descriptionTag: tag));
+
+        Assert.Equal("Testprofil", profile.Description);
+    }
+
+    [Fact]
+    public void Description_IsNull_ForMalformedDescTag()
+    {
+        var profile = new IccColorProfile(SyntheticIccProfileBuilder.BuildRgbTrcMatrixProfile(descriptionTag: new byte[] { 1, 2, 3 }));
+
+        Assert.Null(profile.Description);
+    }
 }

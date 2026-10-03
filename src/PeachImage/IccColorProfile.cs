@@ -67,6 +67,9 @@ public sealed class IccColorProfile
     /// <summary>The number of device channels <see cref="ConvertToSrgb"/> expects per pixel (1 for <see cref="IccColorSpace.Gray"/>, 3 for <see cref="IccColorSpace.Rgb"/>, 4 for <see cref="IccColorSpace.Cmyk"/>).</summary>
     public int ChannelCount => profile.ChannelCount;
 
+    /// <summary>The profile's human-readable description (its <c>desc</c> tag, v2 or v4 form), or <see langword="null"/> if absent or unreadable. Intended for diagnostics.</summary>
+    public string? Description => profile.Description;
+
     /// <summary>The profile's own declared default rendering intent, used by <see cref="ConvertToSrgb"/> when its <c>intent</c> parameter is <see langword="null"/>.</summary>
     public IccRenderingIntent DefaultRenderingIntent => ToPublicIntent(defaultIntent);
 
@@ -117,6 +120,30 @@ public sealed class IccColorProfile
 
         var resolvedIntent = intent is { } requestedIntent ? ToInternalIntent(requestedIntent) : defaultIntent;
         IccDeviceToSrgbConverter.Convert(deviceValues, destination, pixelCount, profile, resolvedIntent, blackPointCompensation);
+    }
+
+    /// <summary>
+    /// Converts a single color of normalized device components to sRGB-encoded floats, using the same engine
+    /// as <see cref="ConvertToSrgb"/> but without its 8-bit quantization of the input or output -- for callers
+    /// that convert individual colors (e.g. an SVG/CSS <c>icc-color</c>) rather than pixel buffers.
+    /// </summary>
+    /// <param name="deviceComponents">
+    /// This profile's device components, each in 0..1 (clamped if outside); the count must equal <see cref="ChannelCount"/>.
+    /// </param>
+    /// <param name="r">The sRGB-encoded (gamma-companded) red value, clamped to 0..1.</param>
+    /// <param name="g">The sRGB-encoded (gamma-companded) green value, clamped to 0..1.</param>
+    /// <param name="b">The sRGB-encoded (gamma-companded) blue value, clamped to 0..1.</param>
+    /// <param name="intent">The rendering intent to use, or <see langword="null"/> to use <see cref="DefaultRenderingIntent"/>.</param>
+    /// <param name="blackPointCompensation">See <see cref="ConvertToSrgb"/>.</param>
+    /// <returns>
+    /// <see langword="false"/> (with all outputs zero) instead of throwing when <paramref name="deviceComponents"/>
+    /// has the wrong count or a non-finite value, or the transform can't be evaluated (e.g.
+    /// <see cref="IccRenderingIntent.AbsoluteColorimetric"/> with no media white point tag).
+    /// </returns>
+    public bool TryConvertToSrgb(ReadOnlySpan<float> deviceComponents, out float r, out float g, out float b, IccRenderingIntent? intent = null, bool blackPointCompensation = false)
+    {
+        var resolvedIntent = intent is { } requestedIntent ? ToInternalIntent(requestedIntent) : defaultIntent;
+        return IccDeviceToSrgbConverter.TryConvertFloat(deviceComponents, profile, resolvedIntent, blackPointCompensation, out r, out g, out b);
     }
 
     /// <summary>

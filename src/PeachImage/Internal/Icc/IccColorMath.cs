@@ -72,11 +72,13 @@ internal static class IccColorMath
     internal static readonly IccMatrix3x3 XyzD50ToLinearSrgb = XyzD65ToLinearSrgb.Multiply(BradfordD50ToD65);
 
     /// <summary>sRGB's OETF (opto-electronic transfer function) gamma companding, clamping out-of-gamut values to [0, 1] first.</summary>
-    internal static byte LinearToSrgbByte(double linear)
+    internal static byte LinearToSrgbByte(double linear) => NormalizedToByte(LinearToSrgb(linear));
+
+    /// <summary>sRGB's OETF gamma companding, clamping out-of-gamut input to [0, 1] first; the unquantized form of <see cref="LinearToSrgbByte"/>.</summary>
+    internal static double LinearToSrgb(double linear)
     {
         double clamped = Math.Clamp(linear, 0.0, 1.0);
-        double companded = clamped <= 0.0031308 ? clamped * 12.92 : (1.055 * Math.Pow(clamped, 1 / 2.4)) - 0.055;
-        return NormalizedToByte(companded);
+        return clamped <= 0.0031308 ? clamped * 12.92 : (1.055 * Math.Pow(clamped, 1 / 2.4)) - 0.055;
     }
 
     /// <summary>Scales a normalized (0-1, but not clamped going in) value to a byte, rounding and clamping to [0, 255].</summary>

@@ -29,6 +29,8 @@ internal sealed class IccTags
 
     internal Lazy<IccXyzType?> MediaBlack { get; }
 
+    internal Lazy<string?> Description { get; }
+
     internal IccTags(Stream stream)
     {
         // Initialization just gathers the raw byte data for every tag; parsing happens lazily, on demand.
@@ -64,6 +66,20 @@ internal sealed class IccTags
         GreyTrc = new Lazy<IccCurve?>(() => Read(IccSignatures.GreyTrc, IccCurve.FromStream));
         MediaWhite = new Lazy<IccXyzType?>(() => Read(IccSignatures.MediaWhitePoint, IccDataTypes.ReadXyzType));
         MediaBlack = new Lazy<IccXyzType?>(() => Read(IccSignatures.MediaBlackPoint, IccDataTypes.ReadXyzType));
+        Description = new Lazy<string?>(() => FindData(IccSignatures.ProfileDescription) is { } data ? IccDataTypes.ReadTextDescription(data) : null);
+    }
+
+    private byte[]? FindData(string signature)
+    {
+        foreach (var candidate in tags)
+        {
+            if (candidate.Signature == signature)
+            {
+                return candidate.Data;
+            }
+        }
+
+        return null;
     }
 
     internal bool Has(string signature)
