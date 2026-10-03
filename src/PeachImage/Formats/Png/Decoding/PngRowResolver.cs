@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using PeachImage.Formats.Png;
 using PeachImage.Formats.Png.Internal;
@@ -163,21 +164,45 @@ internal static class PngRowResolver
 
     private static void ResolvePalette(ReadOnlySpan<ushort> samples, int pixelCount, PngPalette palette, Span<byte> destination)
     {
-        bool hasAlpha = palette.HasTransparency;
-        int destBpp = hasAlpha ? 4 : 3;
+        int entryCount = palette.EntryCount;
+
+        if (palette.HasTransparency)
+        {
+            // Four bytes out per pixel: one LUT load and one unaligned 4-byte store.
+            var lut = palette.RgbaLut;
+            for (int i = 0; i < pixelCount; i++)
+            {
+                int index = samples[i];
+                if ((uint)index >= (uint)entryCount)
+                {
+                    throw OutOfRange(index, entryCount);
+                }
+
+                BinaryPrimitives.WriteUInt32LittleEndian(destination.Slice(i * 4, 4), lut[index]);
+            }
+
+            return;
+        }
+
+        var rgb = palette.Rgb;
         for (int i = 0; i < pixelCount; i++)
         {
-            var (r, g, b, a) = palette.Resolve(samples[i]);
-            int o = i * destBpp;
-            destination[o] = r;
-            destination[o + 1] = g;
-            destination[o + 2] = b;
-            if (hasAlpha)
+            int index = samples[i];
+            if ((uint)index >= (uint)entryCount)
             {
-                destination[o + 3] = a;
+                throw OutOfRange(index, entryCount);
             }
+
+            int source = index * 3;
+            int o = i * 3;
+            destination[o] = rgb[source];
+            destination[o + 1] = rgb[source + 1];
+            destination[o + 2] = rgb[source + 2];
         }
     }
+
+    private static PngDecodingException OutOfRange(int index, int entryCount) =>
+        new($"Palette index {index} is out of range for a {entryCount}-entry palette.");
 
     private static void ResolveGrayscaleAlpha(ReadOnlySpan<ushort> samples, int pixelCount, ReadOnlySpan<ushort> lut, bool is16, Span<byte> destination)
     {

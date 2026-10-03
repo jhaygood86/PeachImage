@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using PeachImage.Formats.Png;
 
 namespace PeachImage.Formats.Png.Filtering;
@@ -185,8 +187,39 @@ internal static class RowFilter
     public static long ScoreMinimumSumOfAbsoluteDifferences(ReadOnlySpan<byte> filtered)
     {
         long sum = 0;
-        foreach (byte b in filtered)
+        int i = 0;
+
+        if (Vector128.IsHardwareAccelerated && filtered.Length >= Vector128<byte>.Count)
         {
+            // |b| for b read as a signed byte is min(b, 256 - b) as an unsigned byte (0 -> 0, 128 -> 128), so
+            // min(v, 0 - v) with byte wraparound scores 16 bytes at once. Each byte scores at most 128, so a
+            // ushort lane (two bytes widened and added per step, at most 256) holds 255 steps before it could
+            // overflow; flush into uint lanes well before that.
+            const int FlushEvery = 128;
+            var total = Vector128<uint>.Zero;
+            var zero = Vector128<byte>.Zero;
+            int vectorEnd = filtered.Length - Vector128<byte>.Count;
+            ref byte start = ref MemoryMarshal.GetReference(filtered);
+
+            while (i <= vectorEnd)
+            {
+                var partial = Vector128<ushort>.Zero;
+                for (int step = 0; step < FlushEvery && i <= vectorEnd; step++, i += Vector128<byte>.Count)
+                {
+                    var v = Vector128.LoadUnsafe(ref start, (nuint)i);
+                    var scored = Vector128.Min(v, zero - v);
+                    partial += Vector128.WidenLower(scored) + Vector128.WidenUpper(scored);
+                }
+
+                total += Vector128.WidenLower(partial) + Vector128.WidenUpper(partial);
+            }
+
+            sum = Vector128.Sum(total);
+        }
+
+        for (; i < filtered.Length; i++)
+        {
+            byte b = filtered[i];
             sum += b < 128 ? b : 256 - b;
         }
 
