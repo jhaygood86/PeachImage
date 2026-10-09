@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Metadata;
 using PeachImage.Formats.Webp.Decoding;
 
 namespace PeachImage.Formats.Webp;
@@ -28,7 +29,9 @@ internal static class WebpDecoder
             // "header-level info only" leniency (an animated file with a malformed/missing ANIM chunk would
             // still successfully Identify, even though DecodeAnimation would throw on it).
             var pixelFormat = prelude.HasAlpha ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
-            return new ImageInfo(prelude.CanvasWidth!.Value, prelude.CanvasHeight!.Value, pixelFormat, FormatName, IsAnimated: true, HasAlpha: pixelFormat.HasAlpha());
+            var exif = WebpContainerReader.FindExifPayload(stream, prelude, pendingHeader);
+            var animatedOrientation = exif is null ? ImageOrientation.Normal : ExifOrientationReader.Read(exif);
+            return new ImageInfo(prelude.CanvasWidth!.Value, prelude.CanvasHeight!.Value, pixelFormat, FormatName, IsAnimated: true, HasAlpha: pixelFormat.HasAlpha(), Orientation: animatedOrientation);
         }
 
         var metadata = new ImageMetadata();
@@ -55,7 +58,17 @@ internal static class WebpDecoder
         }
 
         var format = hasAlpha ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
-        return new ImageInfo(width, height, format, FormatName, HasAlpha: format.HasAlpha(), IsLosslessEncoding: container.Format == WebpBitstreamFormat.Lossless);
+        var orientation = ImageOrientation.Normal;
+        foreach (var profile in metadata.Profiles)
+        {
+            if (profile.Kind == MetadataProfileKind.Exif)
+            {
+                orientation = ExifOrientationReader.Read(profile.Data);
+                break;
+            }
+        }
+
+        return new ImageInfo(width, height, format, FormatName, HasAlpha: format.HasAlpha(), IsLosslessEncoding: container.Format == WebpBitstreamFormat.Lossless, Orientation: orientation);
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>. Decodes just the first, fully composited frame if the file is animated.</summary>

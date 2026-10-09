@@ -49,6 +49,9 @@ internal sealed class TiffFixtureBuilder
 
     public bool LittleEndian { get; init; } = true;
 
+    /// <summary>When set, writes the Orientation tag (274) with this raw value.</summary>
+    public int? Orientation { get; init; }
+
     public bool OmitStripByteCounts { get; init; }
 
     public bool OmitStripOffsets { get; init; }
@@ -120,6 +123,11 @@ internal sealed class TiffFixtureBuilder
         {
             // Placeholder — real offsets are patched in after external data + strip layout is known.
             AddLongArray(273, new uint[Strips.Length]);
+        }
+
+        if (Orientation is { } orientation)
+        {
+            AddShort(274, orientation);
         }
 
         AddShort(277, SamplesPerPixel); // SamplesPerPixel

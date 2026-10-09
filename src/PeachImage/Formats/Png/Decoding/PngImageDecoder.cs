@@ -10,7 +10,7 @@ namespace PeachImage.Formats.Png.Decoding;
 /// <summary>Top-level PNG decode orchestrator: metadata chunks, a streaming (no-buffering) pixel decode, then trailing chunks.</summary>
 internal static class PngImageDecoder
 {
-    public static Image Decode(Stream stream, PngDecoderOptions? options)
+    public static Image Decode(Stream stream, PngDecoderOptions? options, Action<Image>? previewAvailable = null, PixelFormat? targetPixelFormat = null)
     {
         PngChunkReader.ReadSignature(stream);
         var header = PngHeaderReader.ReadIhdr(stream);
@@ -76,7 +76,7 @@ internal static class PngImageDecoder
         var idatStream = new PngIdatStream(stream);
         idatStream.BeginChunk(chunkHeader);
 
-        DecodePixels(idatStream, header, palette, grayOrRgbTrnsKey, sampleLut.Span, is16BitOutput, gammaCorrectionActive, outputFormat, image);
+        DecodePixels(idatStream, header, palette, grayOrRgbTrnsKey, sampleLut.Span, is16BitOutput, gammaCorrectionActive, outputFormat, image, header.IsInterlaced ? previewAvailable : null, targetPixelFormat);
 
         idatStream.DrainToNextChunk();
         var nextHeader = idatStream.PendingNonIdatHeader!.Value;
@@ -100,7 +100,7 @@ internal static class PngImageDecoder
         return image;
     }
 
-    private static void DecodePixels(Stream idatStream, PngHeader header, PngPalette? palette, ushort[]? grayOrRgbTrnsKey, ReadOnlySpan<ushort> sampleLut, bool is16BitOutput, bool gammaCorrectionActive, PixelFormat outputFormat, Image image)
+    private static void DecodePixels(Stream idatStream, PngHeader header, PngPalette? palette, ushort[]? grayOrRgbTrnsKey, ReadOnlySpan<ushort> sampleLut, bool is16BitOutput, bool gammaCorrectionActive, PixelFormat outputFormat, Image image, Action<Image>? previewAvailable, PixelFormat? targetPixelFormat)
     {
         using var zlib = new ZLibStream(idatStream, CompressionMode.Decompress);
 
@@ -120,8 +120,23 @@ internal static class PngImageDecoder
         bool directCopy16 = header.BitDepth == 16 && grayOrRgbTrnsKey is null && !gammaCorrectionActive &&
             header.ColorType is PngColorType.Grayscale or PngColorType.Truecolor or PngColorType.TruecolorAlpha;
 
-        foreach (var pass in passes)
+        // Previews are emitted after every non-empty pass but the last one (that is the final image).
+        int lastPassIndex = -1;
+        if (previewAvailable is not null)
         {
+            for (int i = 0; i < passes.Length; i++)
+            {
+                var (w, h) = Adam7.GetPassDimensions(header.Width, header.Height, passes[i]);
+                if (w != 0 && h != 0)
+                {
+                    lastPassIndex = i;
+                }
+            }
+        }
+
+        for (int passIndex = 0; passIndex < passes.Length; passIndex++)
+        {
+            var pass = passes[passIndex];
             var (passWidth, passHeight) = header.IsInterlaced
                 ? Adam7.GetPassDimensions(header.Width, header.Height, pass)
                 : (header.Width, header.Height);
@@ -204,7 +219,50 @@ internal static class PngImageDecoder
                     ArrayPool<byte>.Shared.Return(resolvedRowBuffer);
                 }
             }
+
+            if (previewAvailable is not null && passIndex < lastPassIndex)
+            {
+                EmitPreview(image, passIndex, destBpp, targetPixelFormat, previewAvailable);
+            }
         }
+    }
+
+    /// <summary>The pixel lattice known once Adam7 pass <c>i</c> has been decoded: every pixel whose x is a multiple of StrideX and y of StrideY.</summary>
+    private static readonly (int StrideX, int StrideY)[] KnownLatticeAfterPass = [(8, 8), (4, 8), (4, 4), (2, 4), (2, 2), (1, 2), (1, 1)];
+
+    /// <summary>Hands <paramref name="previewAvailable"/> a full-size copy of <paramref name="image"/> in which each not-yet-decoded pixel replicates the decoded pixel at the top-left of its lattice cell, converted like the final image.</summary>
+    private static void EmitPreview(Image image, int passIndex, int bytesPerPixel, PixelFormat? targetPixelFormat, Action<Image> previewAvailable)
+    {
+        var (strideX, strideY) = KnownLatticeAfterPass[passIndex];
+        var filled = Image.Create(image.Width, image.Height, image.PixelFormat);
+        for (int y = 0; y < image.Height; y++)
+        {
+            var destRow = filled.GetRowSpan(y);
+            if (y % strideY != 0)
+            {
+                filled.GetRowSpan(y - (y % strideY)).CopyTo(destRow);
+                continue;
+            }
+
+            var sourceRow = image.GetRowSpan(y);
+            for (int x = 0; x < image.Width; x++)
+            {
+                int sourceX = x - (x % strideX);
+                sourceRow.Slice(sourceX * bytesPerPixel, bytesPerPixel).CopyTo(destRow.Slice(x * bytesPerPixel, bytesPerPixel));
+            }
+        }
+
+        filled.Metadata.HorizontalResolution = image.Metadata.HorizontalResolution;
+        filled.Metadata.VerticalResolution = image.Metadata.VerticalResolution;
+        bool hasAlpha = filled.PixelFormat.HasAlpha();
+        var preview = PixelFormatConverter.ConvertIfNeeded(filled, targetPixelFormat);
+        if (!ReferenceEquals(preview, filled))
+        {
+            filled.Dispose();
+        }
+
+        preview.HasAlpha = hasAlpha;
+        previewAvailable(preview);
     }
 
     /// <summary>Processes an already-read chunk header that is known not to be IDAT/IEND: PLTE, tRNS, or a recognized/unrecognized ancillary chunk.</summary>

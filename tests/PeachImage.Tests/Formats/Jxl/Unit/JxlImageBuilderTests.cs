@@ -39,9 +39,9 @@ public class JxlImageBuilderTests
     [InlineData(6, "10,00|11,01|12,02")]
     [InlineData(7, "12,02|11,01|10,00")]
     [InlineData(8, "02,12|01,11|00,10")]
-    public void ApplyOrientation_MatchesTheExifDefinition(int orientation, string expected)
+    public void TestOrientationHelper_MatchesTheExifDefinition(int orientation, string expected)
     {
-        using var result = JxlImageBuilder.ApplyOrientation(Source(), orientation);
+        using var result = JxlTestOrientation.Apply(Source(), (ImageOrientation)orientation);
 
         Assert.Equal(expected, Dump(result));
     }

@@ -26,6 +26,9 @@ internal sealed class AvifContainerInfo
     public required int GridRows { get; init; }
 
     public required int GridColumns { get; init; }
+
+    /// <summary>Orientation implied by the primary item's <c>irot</c>/<c>imir</c> properties (informational; never applied).</summary>
+    public ImageOrientation Orientation { get; init; } = ImageOrientation.Normal;
 }
 
 /// <summary>
@@ -97,6 +100,7 @@ internal static class AvifContainerReader
             AlphaTiles = assembled.AlphaTiles,
             GridRows = assembled.GridRows,
             GridColumns = assembled.GridColumns,
+            Orientation = assembled.Orientation,
         };
     }
 

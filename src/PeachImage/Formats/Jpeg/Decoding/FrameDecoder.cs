@@ -3,6 +3,7 @@ using PeachImage.Formats.Jpeg.Entropy;
 using PeachImage.Formats.Jpeg.Internal;
 using PeachImage.Formats.Jpeg.Markers;
 using PeachImage.Formats.Jpeg.Markers.Segments;
+using PeachImage.Formats.Shared.Metadata;
 
 namespace PeachImage.Formats.Jpeg.Decoding;
 
@@ -13,14 +14,16 @@ namespace PeachImage.Formats.Jpeg.Decoding;
 /// </summary>
 internal static class FrameDecoder
 {
+    private static readonly byte[] ExifSignature = "Exif\0\0"u8.ToArray();
     private static readonly byte[] IccSignature = "ICC_PROFILE\0"u8.ToArray();
 
     /// <summary>
     /// Reads just enough of <paramref name="stream"/> to determine its frame header (dimensions, precision,
     /// component sampling) and resolved color space, stopping as soon as a SOF marker is parsed without
-    /// decoding any scan data.
+    /// decoding any scan data. Also reports the EXIF orientation of an APP1 segment seen before the SOF marker
+    /// (the norm), or <see cref="ImageOrientation.Normal"/> when there is none.
     /// </summary>
-    public static (JpegFrameHeader FrameHeader, JpegColorSpace ColorSpace, bool IsAdobeInverted) IdentifyFrameHeader(Stream stream)
+    public static (JpegFrameHeader FrameHeader, JpegColorSpace ColorSpace, bool IsAdobeInverted, ImageOrientation Orientation) IdentifyFrameHeader(Stream stream)
     {
         var source = new JpegByteSource(stream);
         var markerReader = new JpegMarkerReader(source);
@@ -31,6 +34,8 @@ internal static class FrameDecoder
         }
 
         JpegAdobeSegment? adobe = null;
+        var orientation = ImageOrientation.Normal;
+        bool sawOrientation = false;
 
         while (true)
         {
@@ -44,7 +49,7 @@ internal static class FrameDecoder
                     var frameHeader = JpegFrameHeader.Parse(ReadSegment(markerReader), isProgressive: marker == JpegMarker.Sof2);
                     ThrowIfDimensionsExceedLimits(frameHeader);
                     var (colorSpace, isAdobeInverted) = ColorSpaceResolver.Resolve(frameHeader.Components.Length, adobe);
-                    return (frameHeader, colorSpace, isAdobeInverted);
+                    return (frameHeader, colorSpace, isAdobeInverted, orientation);
                 }
 
                 case JpegMarker.Sof1 or JpegMarker.Sof3 or JpegMarker.Sof5 or JpegMarker.Sof6 or JpegMarker.Sof7
@@ -56,6 +61,18 @@ internal static class FrameDecoder
 
                 case JpegMarker.Eoi:
                     throw new JpegDecodingException("Reached end of image before a frame header (SOF) was found.");
+
+                case JpegMarker.App1:
+                {
+                    var payload = ReadSegment(markerReader);
+                    if (!sawOrientation && payload.AsSpan().StartsWith(ExifSignature))
+                    {
+                        sawOrientation = true;
+                        orientation = ExifOrientationReader.Read(payload);
+                    }
+
+                    break;
+                }
 
                 case JpegMarker.App14:
                 {
@@ -81,7 +98,17 @@ internal static class FrameDecoder
     /// production <see cref="JpegDecodingLimits.MaxScanCount"/> cap and is exposed as a parameter only so
     /// tests can exercise the cap without needing to construct a file with hundreds of scans.
     /// </summary>
-    public static DecodedFrame Decode(Stream stream, int maxScanCount = JpegDecodingLimits.MaxScanCount)
+    /// <param name="stream">The JPEG bitstream.</param>
+    /// <param name="maxScanCount">The maximum number of scans to accept.</param>
+    /// <param name="progressFrameAvailable">
+    /// When set and the frame is progressive, called with a snapshot of the frame as accumulated so far after every scan
+    /// except the last, starting once DC has been decoded for every component (earlier scans carry no usable picture).
+    /// The snapshot shares the live coefficient buffers, so the callback may read them (for example to reconstruct pixels)
+    /// but must neither modify nor return them, and must not retain the frame past the call. Because the last scan is only
+    /// known once EOI is reached, a snapshot is delivered when the next marker after its scan is seen, so quantization
+    /// tables redefined between scans have not yet been applied to it. Baseline frames never invoke it.
+    /// </param>
+    public static DecodedFrame Decode(Stream stream, int maxScanCount = JpegDecodingLimits.MaxScanCount, Action<DecodedFrame>? progressFrameAvailable = null)
     {
         var source = new JpegByteSource(stream);
         var markerReader = new JpegMarkerReader(source);
@@ -113,6 +140,8 @@ internal static class FrameDecoder
         int mcusDown = 0;
         int restartInterval = 0;
         int scanCount = 0;
+        int componentsWithDc = 0;
+        bool previewPending = false;
 
         while (true)
         {
@@ -122,6 +151,22 @@ internal static class FrameDecoder
             if (marker == JpegMarker.Eoi)
             {
                 break;
+            }
+
+            if (previewPending)
+            {
+                // A marker other than EOI follows the previous scan, so that scan was not the last one.
+                previewPending = false;
+                BindQuantizationTables(components!, quantTables);
+                var (previewColorSpace, previewInverted) = ColorSpaceResolver.Resolve(frameHeader!.Components.Length, adobe);
+                progressFrameAvailable!(new DecodedFrame
+                {
+                    FrameHeader = frameHeader,
+                    Components = components!,
+                    ColorSpace = previewColorSpace,
+                    IsAdobeInverted = previewInverted,
+                    Metadata = BuildMetadata(metadata, iccChunks, iccChunkCount),
+                });
             }
 
             switch (marker)
@@ -225,7 +270,17 @@ internal static class FrameDecoder
                         throw new JpegDecodingException($"JPEG frame contains more than {maxScanCount} scans, exceeding the maximum supported scan count.");
                     }
 
-                    DecodeScan(markerReader, source, frameHeader, components, dcHuffmanSpecs, acHuffmanSpecs, dcTableCache, acTableCache, restartInterval, mcusAcross, mcusDown);
+                    var scanHeader = DecodeScan(markerReader, source, frameHeader, components, dcHuffmanSpecs, acHuffmanSpecs, dcTableCache, acTableCache, restartInterval, mcusAcross, mcusDown);
+                    if (progressFrameAvailable is not null && frameHeader.IsProgressive)
+                    {
+                        if (scanHeader.SpectralStart == 0 && scanHeader.SuccessiveApproximationHigh == 0)
+                        {
+                            componentsWithDc += scanHeader.Components.Length;
+                        }
+
+                        previewPending = componentsWithDc >= components.Length;
+                    }
+
                     break;
                 }
 
@@ -243,6 +298,22 @@ internal static class FrameDecoder
             throw new JpegDecodingException("JPEG stream ended without a frame header.");
         }
 
+        BindQuantizationTables(components, quantTables);
+
+        var (colorSpace, isAdobeInverted) = ColorSpaceResolver.Resolve(frameHeader.Components.Length, adobe);
+
+        return new DecodedFrame
+        {
+            FrameHeader = frameHeader,
+            Components = components,
+            ColorSpace = colorSpace,
+            IsAdobeInverted = isAdobeInverted,
+            Metadata = BuildMetadata(metadata, iccChunks, iccChunkCount),
+        };
+    }
+
+    private static void BindQuantizationTables(ComponentDecodeState[] components, Dictionary<byte, JpegQuantizationTable> quantTables)
+    {
         foreach (var component in components)
         {
             if (!quantTables.TryGetValue(component.Frame.QuantizationTableId, out var table))
@@ -252,7 +323,12 @@ internal static class FrameDecoder
 
             component.QuantizationTable = table;
         }
+    }
 
+    /// <summary>The profiles captured so far plus, when ICC chunks were seen, the ICC profile assembled from them. Does not modify its inputs.</summary>
+    private static List<RawMetadataProfile> BuildMetadata(List<RawMetadataProfile> metadata, SortedDictionary<byte, byte[]> iccChunks, int iccChunkCount)
+    {
+        var result = new List<RawMetadataProfile>(metadata);
         if (iccChunkCount > 0)
         {
             var assembled = new List<byte>();
@@ -264,22 +340,13 @@ internal static class FrameDecoder
                 }
             }
 
-            metadata.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Icc, Data = [.. assembled] });
+            result.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Icc, Data = [.. assembled] });
         }
 
-        var (colorSpace, isAdobeInverted) = ColorSpaceResolver.Resolve(frameHeader.Components.Length, adobe);
-
-        return new DecodedFrame
-        {
-            FrameHeader = frameHeader,
-            Components = components,
-            ColorSpace = colorSpace,
-            IsAdobeInverted = isAdobeInverted,
-            Metadata = metadata,
-        };
+        return result;
     }
 
-    private static void DecodeScan(
+    private static JpegScanHeader DecodeScan(
         JpegMarkerReader markerReader,
         JpegByteSource source,
         JpegFrameHeader frameHeader,
@@ -351,6 +418,8 @@ internal static class FrameDecoder
         {
             ProgressiveScanDecoder.DecodeScan(entropy, scanHeader, scanComponents, dcTables, acTables, restart, mcusAcross, mcusDown);
         }
+
+        return scanHeader;
     }
 
     private static void ThrowIfDimensionsExceedLimits(JpegFrameHeader frameHeader)

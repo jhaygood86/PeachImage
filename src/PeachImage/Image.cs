@@ -5,6 +5,8 @@ using PeachImage.Formats.Jpeg;
 using PeachImage.Formats.Jxl;
 using PeachImage.Formats.Png;
 using PeachImage.Formats.Shared.Compositing;
+using PeachImage.Formats.Shared.Metadata;
+using PeachImage.Formats.Shared.Orientation;
 using PeachImage.Formats.Shared.Resampling;
 using PeachImage.Formats.Tiff;
 using PeachImage.Formats.Webp;
@@ -191,6 +193,135 @@ public sealed class Image : IDisposable
         }
 
         return copy;
+    }
+
+    /// <summary>
+    /// Returns this image with <paramref name="orientation"/> applied to its pixels, so that an image whose metadata asks to be
+    /// displayed rotated or mirrored (see <see cref="ImageInfo.Orientation"/>) comes out upright. As a new <see cref="Image"/>
+    /// (or this same instance, unchanged, for <see cref="ImageOrientation.Normal"/> -- the "may return <c>this</c>" contract
+    /// <see cref="Resize"/> documents, including its disposal implications). Does not modify this instance otherwise.
+    /// </summary>
+    /// <remarks>
+    /// Each <see cref="ImageOrientation"/> names the transform applied to the stored pixels to display them upright, so
+    /// <see cref="ImageOrientation.Rotate90"/> rotates clockwise. The four orientations that swap width and height produce an image of
+    /// <see cref="Height"/> x <see cref="Width"/>, with the horizontal and vertical resolution swapped to match. Resolution and
+    /// embedded profiles carry over to the result; an EXIF profile is copied with its orientation tag reset to 1, so a viewer that
+    /// honours the tag doesn't transform the already-upright pixels again (this image's own profile is left as it is). Orientation
+    /// recorded elsewhere, such as in XMP, is not rewritten. Every <see cref="PixelFormat"/> is supported.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="orientation"/> is not a defined orientation.</exception>
+    public Image ApplyOrientation(ImageOrientation orientation)
+    {
+        ThrowIfUndefined(orientation);
+        ThrowIfUnusable();
+        if (orientation == ImageOrientation.Normal)
+        {
+            return this;
+        }
+
+        bool swaps = ImageOrientationApplier.SwapsDimensions(orientation);
+        var result = Create(swaps ? Height : Width, swaps ? Width : Height, PixelFormat);
+        ImageOrientationApplier.Apply(orientation, GetPixelSpan(), result.GetPixelSpan(), Width, Height, PixelFormat.GetBytesPerPixel());
+
+        result.Metadata.HorizontalResolution = swaps ? Metadata.VerticalResolution : Metadata.HorizontalResolution;
+        result.Metadata.VerticalResolution = swaps ? Metadata.HorizontalResolution : Metadata.VerticalResolution;
+        foreach (var profile in Metadata.Profiles)
+        {
+            result.Metadata.Profiles.Add(WithUprightOrientation(profile));
+        }
+
+        result.HasAlpha = HasAlpha;
+        result.IsAnimated = IsAnimated;
+        return result;
+    }
+
+    /// <summary>
+    /// Writes this image with <paramref name="orientation"/> applied to <paramref name="destination"/>, without allocating: the
+    /// pixel work of <see cref="ApplyOrientation(ImageOrientation)"/> into an image the caller already owns (for example one rented
+    /// once and reused across a batch). This image is not modified.
+    /// </summary>
+    /// <remarks>
+    /// Only pixels are written; <paramref name="destination"/>'s <see cref="Metadata"/>, <see cref="HasAlpha"/> and
+    /// <see cref="IsAnimated"/> are left as they are, because carrying this image's across would allocate. A caller that copies
+    /// an EXIF profile over should reset its orientation tag itself.
+    /// </remarks>
+    /// <param name="orientation">The orientation to apply.</param>
+    /// <param name="destination">
+    /// A different image with the same <see cref="PixelFormat"/> and dimensions of <see cref="Width"/> x <see cref="Height"/>, or
+    /// <see cref="Height"/> x <see cref="Width"/> for the orientations that swap them.
+    /// </param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="orientation"/> is not a defined orientation.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="destination"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="destination"/> is this image or shares its pixel buffer (the transform cannot be done while reading from the
+    /// pixels it overwrites -- use <see cref="ApplyOrientationInPlace"/>), or its pixel format or dimensions don't match.
+    /// </exception>
+    public void ApplyOrientation(ImageOrientation orientation, Image destination)
+    {
+        ThrowIfUndefined(orientation);
+        ArgumentNullException.ThrowIfNull(destination);
+        ThrowIfUnusable();
+        destination.ThrowIfUnusable();
+        if (ReferenceEquals(this, destination) || ReferenceEquals(_pixels, destination._pixels))
+        {
+            throw new ArgumentException("The destination must be a different image than the source. Use ApplyOrientationInPlace to transform an image in place.", nameof(destination));
+        }
+
+        if (destination.PixelFormat != PixelFormat)
+        {
+            throw new ArgumentException($"The destination's pixel format is {destination.PixelFormat} but the source's is {PixelFormat}.", nameof(destination));
+        }
+
+        bool swaps = ImageOrientationApplier.SwapsDimensions(orientation);
+        int expectedWidth = swaps ? Height : Width;
+        int expectedHeight = swaps ? Width : Height;
+        if (destination.Width != expectedWidth || destination.Height != expectedHeight)
+        {
+            throw new ArgumentException(
+                $"Applying {orientation} to a {Width}x{Height} image produces {expectedWidth}x{expectedHeight}, but the destination is {destination.Width}x{destination.Height}.",
+                nameof(destination));
+        }
+
+        ImageOrientationApplier.Apply(orientation, GetPixelSpan(), destination.GetPixelSpan(), Width, Height, PixelFormat.GetBytesPerPixel());
+    }
+
+    /// <summary>
+    /// Applies <paramref name="orientation"/> to this image's own pixels without allocating. Only possible when the result has the
+    /// same dimensions: always for <see cref="ImageOrientation.Normal"/>, <see cref="ImageOrientation.MirrorHorizontal"/>,
+    /// <see cref="ImageOrientation.Rotate180"/> and <see cref="ImageOrientation.MirrorVertical"/>, and for the other four only on a
+    /// square image.
+    /// </summary>
+    /// <remarks>Metadata is not changed (neither the resolution of a square image nor an EXIF orientation tag), so a caller that keeps the image's EXIF profile should reset its orientation tag itself; <see cref="ApplyOrientation(ImageOrientation)"/> does that for you.</remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="orientation"/> is not a defined orientation.</exception>
+    /// <exception cref="InvalidOperationException">The orientation swaps width and height and this image is not square: use <see cref="ApplyOrientation(ImageOrientation)"/> or <see cref="ApplyOrientation(ImageOrientation, Image)"/>.</exception>
+    public void ApplyOrientationInPlace(ImageOrientation orientation)
+    {
+        ThrowIfUndefined(orientation);
+        ThrowIfUnusable();
+        ImageOrientationApplier.ApplyInPlace(orientation, GetPixelSpan(), Width, Height, PixelFormat.GetBytesPerPixel());
+    }
+
+    private static void ThrowIfUndefined(ImageOrientation orientation)
+    {
+        if (!Enum.IsDefined(orientation))
+        {
+            throw new ArgumentOutOfRangeException(nameof(orientation), orientation, "Not a defined orientation.");
+        }
+    }
+
+    // The profile as it should accompany pixels that have been made upright: an EXIF blob is copied with its orientation tag reset to 1
+    // (the shared RawMetadataProfile and its bytes are never mutated); every other profile, and EXIF with nothing to reset, is shared as-is.
+    private static RawMetadataProfile WithUprightOrientation(RawMetadataProfile profile)
+    {
+        if (profile.Kind != MetadataProfileKind.Exif || ExifOrientationReader.Read(profile.Data) == ImageOrientation.Normal)
+        {
+            return profile;
+        }
+
+        var data = (byte[])profile.Data.Clone();
+        return ExifOrientationResetter.TryResetOrientation(data)
+            ? new RawMetadataProfile { Kind = MetadataProfileKind.Exif, Data = data }
+            : profile;
     }
 
     /// <summary>

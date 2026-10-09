@@ -4,6 +4,7 @@ using PeachImage.Formats.Jxl.Features;
 using PeachImage.Formats.Jxl.Frame;
 using PeachImage.Formats.Jxl.Headers;
 using PeachImage.Formats.Jxl.Internal;
+using PeachImage.Formats.Shared.Metadata;
 
 namespace PeachImage.Formats.Jxl;
 
@@ -21,17 +22,16 @@ internal static class JxlDecoder
         var headers = JxlCodestreamHeaders.Read(container.Codestream.Span, readIcc: false);
         var metadata = headers.Metadata;
 
-        // Orientations 5..8 transpose the image.
-        bool transposed = metadata.Orientation >= 5;
-        int width = checked((int)(transposed ? headers.Size.Height : headers.Size.Width));
-        int height = checked((int)(transposed ? headers.Size.Width : headers.Size.Height));
+        // The orientation is reported, not applied: the pixels stay in stored order.
         return new ImageInfo(
-            width,
-            height,
+            checked((int)headers.Size.Width),
+            checked((int)headers.Size.Height),
             JxlPixelFormatSelector.Select(metadata),
             FormatName,
             IsAnimated: metadata.Animation is not null,
             HasAlpha: metadata.AlphaChannelIndex >= 0,
+            HasPreview: metadata.PreviewSize is not null,
+            Orientation: ExifOrientationReader.FromValue(metadata.Orientation),
             IsLosslessEncoding: IsLossless(container, metadata));
     }
 
@@ -88,7 +88,10 @@ internal static class JxlDecoder
         ArgumentNullException.ThrowIfNull(stream);
 
         var (container, headers) = Open(stream);
-        foreach (var (frame, _) in VisibleFrames(container.Codestream.ToArray(), headers))
+        Action<JxlDecodedFrame>? onPreview = options?.PreviewAvailable is { } callback
+            ? preview => callback(Finish(JxlImageBuilder.Build(preview, headers, options.TargetPixelFormat), container, headers))
+            : null;
+        foreach (var (frame, _) in VisibleFrames(container.Codestream.ToArray(), headers, onPreview))
         {
             using (frame)
             {
@@ -111,9 +114,8 @@ internal static class JxlDecoder
 
         var (container, headers) = Open(stream);
         var metadata = headers.Metadata;
-        bool transposed = metadata.Orientation >= 5;
-        int width = checked((int)(transposed ? headers.Size.Height : headers.Size.Width));
-        int height = checked((int)(transposed ? headers.Size.Width : headers.Size.Height));
+        int width = checked((int)headers.Size.Width);
+        int height = checked((int)headers.Size.Height);
         int loops = metadata.Animation is { } animation ? checked((int)Math.Min(animation.NumLoops, int.MaxValue)) : 1;
         return new AnimatedImage(EnumerateAnimation(container, headers), width, height, loops);
     }
@@ -180,8 +182,13 @@ internal static class JxlDecoder
     /// <summary>
     /// Walks the codestream's frames in order, keeping the frames later ones refer to, and yields each visible frame (a last frame,
     /// or one with a non-zero duration) composited onto the canvas, with its duration in animation ticks. The caller disposes each.
+    /// <paramref name="onPreview"/>, when given, is called with the preview frame (if the codestream has one) before the first frame
+    /// is decoded; it does not take ownership of the frame.
     /// </summary>
-    private static IEnumerable<(JxlDecodedFrame Frame, uint Ticks)> VisibleFrames(byte[] codestream, JxlCodestreamHeaders headers)
+    private static IEnumerable<(JxlDecodedFrame Frame, uint Ticks)> VisibleFrames(
+        byte[] codestream,
+        JxlCodestreamHeaders headers,
+        Action<JxlDecodedFrame>? onPreview = null)
     {
         var state = new JxlDecoderState();
         int offset = headers.FrameOffset;
@@ -189,6 +196,7 @@ internal static class JxlDecoder
         {
             // The preview is a small stand-in for the image; it precedes the real frames and is not part of them.
             using var preview = JxlFrameDecoder.Decode(codestream, offset, headers, state, isPreview: true);
+            onPreview?.Invoke(preview);
             offset += preview.ByteLength;
         }
 

@@ -3,7 +3,7 @@ using PeachImage.Formats.Webp.Internal;
 namespace PeachImage.Formats.Webp.Decoding;
 
 /// <summary>The VP8X chunk's flags/canvas info, or the all-<see langword="false"/>/<see langword="null"/> default for a "simple"-format file with no VP8X chunk.</summary>
-internal readonly record struct WebpContainerPrelude(bool HasAlpha, bool HasAnimation, int? CanvasWidth, int? CanvasHeight);
+internal readonly record struct WebpContainerPrelude(bool HasAlpha, bool HasAnimation, int? CanvasWidth, int? CanvasHeight, bool HasExif = false);
 
 /// <summary>
 /// Parses a WebP file's RIFF container (the "simple" format — a bare <c>VP8 </c>/<c>VP8L</c> chunk directly
@@ -43,7 +43,50 @@ internal static class WebpContainerReader
         pendingHeader = null;
         var vp8XData = WebpChunkReader.ReadPayload(stream, header.Size);
         ParseVp8X(vp8XData, out bool hasAlpha, out bool hasAnimation, out int? canvasWidth, out int? canvasHeight);
-        return new WebpContainerPrelude(hasAlpha, hasAnimation, canvasWidth, canvasHeight);
+        return new WebpContainerPrelude(hasAlpha, hasAnimation, canvasWidth, canvasHeight, (vp8XData[0] & Vp8XFlags.ExifBit) != 0);
+    }
+
+    /// <summary>
+    /// Scans the remaining chunks of an already-<see cref="ReadPrelude"/>d file for the <c>EXIF</c> chunk and returns its payload,
+    /// skipping every other chunk (frame data included) without materializing it. Used by <see cref="WebpDecoder.Identify"/> for
+    /// animated files, where the orientation is wanted without decoding any frame. Returns <see langword="null"/> when the VP8X
+    /// flag says there is no EXIF or no <c>EXIF</c> chunk is found. A truncated tail is treated as "not found" rather than an error.
+    /// </summary>
+    internal static byte[]? FindExifPayload(Stream stream, WebpContainerPrelude prelude, WebpChunkHeader? pendingHeader)
+    {
+        if (!prelude.HasExif)
+        {
+            return null;
+        }
+
+        try
+        {
+            WebpChunkHeader? nextHeader = pendingHeader;
+            while (true)
+            {
+                WebpChunkHeader chunkHeader;
+                if (nextHeader is { } pending)
+                {
+                    chunkHeader = pending;
+                    nextHeader = null;
+                }
+                else if (!WebpChunkReader.TryReadNext(stream, out chunkHeader))
+                {
+                    return null;
+                }
+
+                if (chunkHeader.FourCc == "EXIF")
+                {
+                    return WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
+                }
+
+                WebpChunkReader.SkipPayload(stream, chunkHeader.Size);
+            }
+        }
+        catch (WebpDecodingException)
+        {
+            return null;
+        }
     }
 
     /// <summary>Reads a non-animated WebP file's RIFF/WEBP container from <paramref name="stream"/>, collecting metadata chunks into <paramref name="metadata"/> as they're encountered.</summary>

@@ -12,7 +12,7 @@ internal static class JpegDecoder
     {
         ArgumentNullException.ThrowIfNull(stream);
 
-        var (frameHeader, colorSpace, isAdobeInverted) = FrameDecoder.IdentifyFrameHeader(stream);
+        var (frameHeader, colorSpace, isAdobeInverted, orientation) = FrameDecoder.IdentifyFrameHeader(stream);
         var pixelFormat = colorSpace switch
         {
             JpegColorSpace.Grayscale => PixelFormat.Gray8,
@@ -28,7 +28,9 @@ internal static class JpegDecoder
             FormatName,
             HasAlpha: pixelFormat.HasAlpha(),
             IsAdobeInvertedCmyk: isAdobeInverted,
-            IsYcck: colorSpace == JpegColorSpace.Ycck);
+            IsYcck: colorSpace == JpegColorSpace.Ycck,
+            HasPreview: frameHeader.IsProgressive,
+            Orientation: orientation);
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>
@@ -42,11 +44,18 @@ internal static class JpegDecoder
             throw new JpegDecodingException($"{nameof(JpegDecoderOptions.KeepAdobeCmykInverted)} cannot be combined with a target pixel format other than {nameof(PixelFormat.Cmyk32)} (requested {targetFormat}).");
         }
 
-        var frame = FrameDecoder.Decode(stream);
-        Image image;
+        // Progressive previews reconstruct from the coefficients accumulated so far. Reconstruction only reads the
+        // coefficient buffers (it never returns them), so the final decode continues to refine the same ones.
+        Action<DecodedFrame>? onProgress = null;
+        if (options?.PreviewAvailable is { } previewAvailable)
+        {
+            onProgress = partial => previewAvailable(BuildImage(partial, options, jpegOptions));
+        }
+
+        var frame = FrameDecoder.Decode(stream, progressFrameAvailable: onProgress);
         try
         {
-            image = FrameReconstructor.Reconstruct(frame, jpegOptions);
+            return BuildImage(frame, options, jpegOptions);
         }
         finally
         {
@@ -55,7 +64,12 @@ internal static class JpegDecoder
                 component.Coefficients.Return();
             }
         }
+    }
 
+    /// <summary>Reconstructs <paramref name="frame"/> into an image in the requested pixel format, with its metadata attached. Leaves the frame's coefficient buffers untouched.</summary>
+    private static Image BuildImage(DecodedFrame frame, DecoderOptions? options, JpegDecoderOptions? jpegOptions)
+    {
+        var image = FrameReconstructor.Reconstruct(frame, jpegOptions);
         image.Metadata.HorizontalResolution = null;
         image.Metadata.VerticalResolution = null;
         foreach (var profile in frame.Metadata)

@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Metadata;
 using PeachImage.Formats.Tiff.Decoding;
 
 namespace PeachImage.Formats.Tiff;
@@ -23,7 +24,22 @@ internal static class TiffDecoder
         // hardcoding true keeps this correct if lossy (JPEG-in-TIFF) compression is ever supported later.
         bool isLosslessEncoding = descriptor.Compression is 1 or 5 or 32773;
 
-        return new ImageInfo(descriptor.Width, descriptor.Height, descriptor.PixelFormat, FormatName, HasAlpha: descriptor.PixelFormat.HasAlpha(), IsLosslessEncoding: isLosslessEncoding);
+        return new ImageInfo(descriptor.Width, descriptor.Height, descriptor.PixelFormat, FormatName, HasAlpha: descriptor.PixelFormat.HasAlpha(), IsLosslessEncoding: isLosslessEncoding, Orientation: ReadOrientation(ifd));
+    }
+
+    // Orientation (tag 274) uses the same 1-8 values as EXIF. Informational only, so a malformed entry means Normal rather than a failure.
+    private static ImageOrientation ReadOrientation(TiffIfd ifd)
+    {
+        try
+        {
+            return ifd.HasTag(TiffTags.Orientation)
+                ? ExifOrientationReader.FromValue((int)ifd.GetUInt32(TiffTags.Orientation, 1))
+                : ImageOrientation.Normal;
+        }
+        catch (TiffDecodingException)
+        {
+            return ImageOrientation.Normal;
+        }
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>

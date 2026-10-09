@@ -53,6 +53,9 @@ internal sealed class AvifAssembledImage
 
     public AvifColr? ColorInfo { get; init; }
 
+    /// <summary>The EXIF-equivalent orientation derived from the primary item's <c>irot</c>/<c>imir</c> properties; <see cref="ImageOrientation.Normal"/> when it has none.</summary>
+    public ImageOrientation Orientation { get; init; } = ImageOrientation.Normal;
+
     public byte[]? ExifData { get; init; }
 
     public byte[]? XmpData { get; init; }
@@ -119,6 +122,7 @@ internal static class AvifItemAssembler
             GridRows = color.GridRows,
             GridColumns = color.GridColumns,
             ColorInfo = color.ColorInfo,
+            Orientation = GetOrientation(data, meta, primaryItemId),
             ExifData = exif,
             XmpData = xmp,
         };
@@ -267,6 +271,39 @@ internal static class AvifItemAssembler
     {
         var box = FindProperty(meta, itemId, "colr");
         return box is { } b ? AvifColrBox.Parse(data, b) : null;
+    }
+
+    private static ImageOrientation GetOrientation(byte[] data, AvifMetaBoxInfo meta, uint itemId)
+    {
+        if (!meta.Properties.ItemPropertyIndices.TryGetValue(itemId, out var indices))
+        {
+            return ImageOrientation.Normal;
+        }
+
+        // Transformative properties apply in association (ipma) order.
+        var transforms = new List<AvifTransform>();
+        foreach (int index in indices)
+        {
+            if (index < 1 || index > meta.Properties.Properties.Count)
+            {
+                continue;
+            }
+
+            var box = meta.Properties.Properties[index - 1];
+            var transform = box.FourCc switch
+            {
+                "irot" => AvifTransformProperties.ParseIrot(data, box),
+                "imir" => AvifTransformProperties.ParseImir(data, box),
+                _ => null,
+            };
+
+            if (transform is { } t)
+            {
+                transforms.Add(t);
+            }
+        }
+
+        return AvifTransformProperties.ToOrientation(transforms);
     }
 
     private static AvifBox? FindProperty(AvifMetaBoxInfo meta, uint itemId, string fourCc)
