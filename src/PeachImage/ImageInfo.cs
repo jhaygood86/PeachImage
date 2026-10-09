@@ -48,6 +48,16 @@ namespace PeachImage;
 /// elsewhere rather than this flag).</item>
 /// </list>
 /// </param>
+/// <param name="HasPreview">
+/// Whether decoding can surface a lower-fidelity preview before the full image is ready, through
+/// <see cref="DecoderOptions.PreviewAvailable"/>: a JPEG XL preview frame, the passes of an interlaced PNG, or the
+/// scans of a progressive JPEG. <see langword="false"/> for every other source.
+/// </param>
+/// <param name="Orientation">
+/// The orientation recorded in the file's metadata (EXIF, or the format's own equivalent), or
+/// <see cref="ImageOrientation.Normal"/> when there is none. It is informational: decoders never apply it, so
+/// <paramref name="Width"/>, <paramref name="Height"/> and the decoded pixels are always as stored.
+/// </param>
 public readonly record struct ImageInfo(
     int Width,
     int Height,
@@ -57,4 +67,6 @@ public readonly record struct ImageInfo(
     bool HasAlpha = false,
     bool IsAdobeInvertedCmyk = false,
     bool IsYcck = false,
-    bool IsLosslessEncoding = false);
+    bool IsLosslessEncoding = false,
+    bool HasPreview = false,
+    ImageOrientation Orientation = ImageOrientation.Normal);
