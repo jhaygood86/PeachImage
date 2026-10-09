@@ -96,7 +96,7 @@ public class JxlConformanceCorpusTests
         {
             if (File.Exists(referencePath) && new FileInfo(path).Length > 200)
             {
-                using var upright = JxlTestOrientation.Apply(image!, orientation);
+                using var upright = image!.ApplyOrientation(orientation);
                 CompareWithReference(name, upright, referencePath, Path.Combine(directory, "test.json"));
             }
         }

@@ -4,48 +4,6 @@ namespace PeachImage.Tests.Formats.Jxl.Unit;
 
 public class JxlImageBuilderTests
 {
-    // A 3x2 image whose pixel (x, y) has value 10*y + x in its single (Gray8) channel.
-    private static Image Source()
-    {
-        var image = Image.Create(3, 2, PixelFormat.Gray8);
-        for (int y = 0; y < 2; y++)
-        {
-            for (int x = 0; x < 3; x++)
-            {
-                image.GetRowSpan(y)[x] = (byte)((10 * y) + x);
-            }
-        }
-
-        return image;
-    }
-
-    private static string Dump(Image image)
-    {
-        var rows = new List<string>();
-        for (int y = 0; y < image.Height; y++)
-        {
-            rows.Add(string.Join(',', image.GetRowSpan(y).ToArray().Select(b => b.ToString("00", System.Globalization.CultureInfo.InvariantCulture))));
-        }
-
-        return string.Join('|', rows);
-    }
-
-    [Theory]
-    [InlineData(1, "00,01,02|10,11,12")]
-    [InlineData(2, "02,01,00|12,11,10")]
-    [InlineData(3, "12,11,10|02,01,00")]
-    [InlineData(4, "10,11,12|00,01,02")]
-    [InlineData(5, "00,10|01,11|02,12")]
-    [InlineData(6, "10,00|11,01|12,02")]
-    [InlineData(7, "12,02|11,01|10,00")]
-    [InlineData(8, "02,12|01,11|00,10")]
-    public void TestOrientationHelper_MatchesTheExifDefinition(int orientation, string expected)
-    {
-        using var result = JxlTestOrientation.Apply(Source(), (ImageOrientation)orientation);
-
-        Assert.Equal(expected, Dump(result));
-    }
-
     [Fact]
     public void TargetPixelFormat_ExpandsAndNarrows()
     {
