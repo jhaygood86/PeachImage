@@ -48,9 +48,10 @@ internal static class ImageResizer
     /// </summary>
     public static Image ResizeWithWeights(Image source, int width, int height, ResamplingWeightMap horizontalWeights, ResamplingWeightMap verticalWeights)
     {
-        bool hasAlpha = source.PixelFormat is PixelFormat.Rgba32 or PixelFormat.Rgba64;
+        bool hasAlpha = source.PixelFormat.HasAlpha();
         int channelCount = source.PixelFormat.GetChannelCount();
         bool is16Bit = source.PixelFormat.GetBytesPerSample() == 2;
+        bool isFloat = source.PixelFormat.IsFloat();
 
         int sourceFloatCount = source.Width * source.Height * FloatsPerPixel;
         int resizedFloatCount = width * height * FloatsPerPixel;
@@ -74,7 +75,7 @@ internal static class ImageResizer
             // raw rented array (rather than an exact-length slice) is safe — see IResamplingConvolver's
             // remarks for why these are plain arrays (not Span<float>) in the first place: it's what lets
             // each convolver parallelize its per-row loop, since a Span can't be captured by that closure.
-            ToFloatBuffer(source, is16Bit, hasAlpha, sourceBuffer);
+            ToFloatBuffer(source, is16Bit, isFloat, hasAlpha, sourceBuffer);
 
             var convolver = ResamplingConvolverSelector.Instance;
             if (horizontalFirst)
@@ -88,7 +89,7 @@ internal static class ImageResizer
                 convolver.ConvolveHorizontal(intermediate, source.Width, height, resized, horizontalWeights);
             }
 
-            return FromFloatBuffer(resized, width, height, source.PixelFormat, channelCount, is16Bit, hasAlpha);
+            return FromFloatBuffer(resized, width, height, source.PixelFormat, channelCount, is16Bit, isFloat, hasAlpha);
         }
         finally
         {
@@ -146,7 +147,7 @@ internal static class ImageResizer
     /// (not <see cref="Image.GetPixelSpan"/>) specifically so both can be captured by that closure — see
     /// <see cref="IResamplingConvolver"/>'s remarks for why <see cref="Span{T}"/> can't be.
     /// </remarks>
-    private static void ToFloatBuffer(Image source, bool is16Bit, bool hasAlpha, float[] buffer)
+    private static void ToFloatBuffer(Image source, bool is16Bit, bool isFloat, bool hasAlpha, float[] buffer)
     {
         var pixelMemory = source.PixelMemory;
         int bytesPerPixel = source.PixelFormat.GetBytesPerPixel();
@@ -154,7 +155,7 @@ internal static class ImageResizer
         int width = source.Width;
         int rowBytes = width * bytesPerPixel;
         int rowFloats = width * FloatsPerPixel;
-        bool useVector8 = CanVectorize8(is16Bit, channelCount);
+        bool useVector8 = CanVectorize8(is16Bit || isFloat, channelCount);
 
         RowParallel.For(source.Height, y =>
         {
@@ -172,7 +173,11 @@ internal static class ImageResizer
                 int bufferOffset = x * FloatsPerPixel;
                 var pixelBytes = rowPixels.Slice(x * bytesPerPixel, bytesPerPixel);
 
-                if (is16Bit)
+                if (isFloat)
+                {
+                    WritePixel(rowBuffer, bufferOffset, MemoryMarshal.Cast<byte, float>(pixelBytes), channelCount, hasAlpha, fullScale: 1f);
+                }
+                else if (is16Bit)
                 {
                     WritePixel(rowBuffer, bufferOffset, MemoryMarshal.Cast<byte, ushort>(pixelBytes), channelCount, hasAlpha, fullScale: 65535f);
                 }
@@ -196,6 +201,17 @@ internal static class ImageResizer
         {
             buffer[offset + c] = samples[c];
         }
+    }
+
+    private static void WritePixel(Span<float> buffer, int offset, ReadOnlySpan<float> samples, int channelCount, bool hasAlpha, float fullScale)
+    {
+        if (hasAlpha)
+        {
+            WritePremultiplied(buffer, offset, samples[0], samples[1], samples[2], samples[3], fullScale);
+            return;
+        }
+
+        samples[..channelCount].CopyTo(buffer.Slice(offset, channelCount));
     }
 
     private static void WritePixel(Span<float> buffer, int offset, ReadOnlySpan<ushort> samples, int channelCount, bool hasAlpha, float fullScale)
@@ -228,15 +244,15 @@ internal static class ImageResizer
     /// passes, and for the same reason takes <paramref name="buffer"/> as a plain array and writes through
     /// <see cref="Image.PixelMemory"/> rather than <see cref="Image.GetPixelSpan"/>.
     /// </summary>
-    private static Image FromFloatBuffer(float[] buffer, int width, int height, PixelFormat format, int channelCount, bool is16Bit, bool hasAlpha)
+    private static Image FromFloatBuffer(float[] buffer, int width, int height, PixelFormat format, int channelCount, bool is16Bit, bool isFloat, bool hasAlpha)
     {
         var destination = Image.Create(width, height, format);
         var pixelMemory = destination.PixelMemory;
         int bytesPerPixel = format.GetBytesPerPixel();
-        float fullScale = is16Bit ? 65535f : 255f;
+        float fullScale = isFloat ? 1f : is16Bit ? 65535f : 255f;
         int rowBytes = width * bytesPerPixel;
         int rowFloats = width * FloatsPerPixel;
-        bool useVector8 = CanVectorize8(is16Bit, channelCount);
+        bool useVector8 = CanVectorize8(is16Bit || isFloat, channelCount);
 
         RowParallel.For(height, y =>
         {
@@ -256,11 +272,21 @@ internal static class ImageResizer
 
                 if (hasAlpha)
                 {
-                    UnpremultiplyInPlace(channels, fullScale);
+                    UnpremultiplyInPlace(channels, fullScale, clampColorToFullScale: !isFloat);
                 }
 
                 var pixelBytes = rowPixels.Slice(x * bytesPerPixel, bytesPerPixel);
-                if (is16Bit)
+                if (isFloat)
+                {
+                    // HDR values above 1 are legitimate; only guard against NaN and negative overshoot from the filter's ringing lobes.
+                    var samples = MemoryMarshal.Cast<byte, float>(pixelBytes);
+                    for (int c = 0; c < channelCount; c++)
+                    {
+                        float v = channels[c];
+                        samples[c] = float.IsNaN(v) ? 0f : MathF.Max(v, 0f);
+                    }
+                }
+                else if (is16Bit)
                 {
                     var samples = MemoryMarshal.Cast<byte, ushort>(pixelBytes);
                     for (int c = 0; c < channelCount; c++)
@@ -405,13 +431,14 @@ internal static class ImageResizer
         return scaled.WithElement(3, alpha);
     }
 
-    private static void UnpremultiplyInPlace(Span<float> channels, float fullScale)
+    private static void UnpremultiplyInPlace(Span<float> channels, float fullScale, bool clampColorToFullScale)
     {
         float alpha = Math.Clamp(channels[3], 0f, fullScale);
         float unpremultiplyScale = alpha > 0f ? fullScale / alpha : 0f;
-        channels[0] = Math.Clamp(channels[0] * unpremultiplyScale, 0f, fullScale);
-        channels[1] = Math.Clamp(channels[1] * unpremultiplyScale, 0f, fullScale);
-        channels[2] = Math.Clamp(channels[2] * unpremultiplyScale, 0f, fullScale);
+        float colorMax = clampColorToFullScale ? fullScale : float.MaxValue;
+        channels[0] = Math.Clamp(channels[0] * unpremultiplyScale, 0f, colorMax);
+        channels[1] = Math.Clamp(channels[1] * unpremultiplyScale, 0f, colorMax);
+        channels[2] = Math.Clamp(channels[2] * unpremultiplyScale, 0f, colorMax);
         channels[3] = alpha;
     }
 }

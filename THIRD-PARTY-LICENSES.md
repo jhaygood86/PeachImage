@@ -185,3 +185,41 @@ Unicolour is distributed under the MIT License:
 
 This notice applies only to `src/PeachImage/Internal/Icc/` as described above. It does not apply to any other
 part of PeachImage.
+
+## libjxl — JPEG XL decoder
+
+`src/PeachImage/Formats/Jxl/` is a from-scratch managed decoder written from the ISO/IEC 18181 specification, using the
+[libjxl](https://github.com/libjxl/libjxl) reference implementation as the behavioural reference. Its structure follows the
+specification and libjxl's decoding pipeline, and the following *tables and constants* were taken from libjxl: the default
+2x/4x/8x upsampling filter weights (`Features/JxlUpsampling.cs`), the default dequantization-matrix parameters, the AFV basis
+and the quantization/coefficient-order constants (`VarDct/`), the default opsin inverse matrix and biases
+(`Headers/JxlCustomTransformData.cs`), and the numeric parameters of the noise, spline, EPF and Gaborish stages. The JPEG
+bitstream reconstruction (`Jpeg/`: the `jbrd` box parser and the JPEG writer) is a port of libjxl's `lib/jxl/jpeg/` decoder code, and the
+coefficient capture in `VarDct/VarDctFrame.Jpeg.cs` follows libjxl's `dec_group.cc` and `dec_frame.cc`. The Bradford and
+sRGB/Rec.2100/P3 chromaticity data and transfer-function formulas are the public ITU/SMPTE definitions.
+
+The libjxl test files used by the test suite (`tests/PeachImage.Tests/Formats/Jxl/Assets/conformance_*`, `testdata_*`, the
+`.samples` files derived from the suite's reference PNGs, and the files fetched at test time into `tests/corpus/jxl`) come from
+the libjxl `conformance` and `testdata` repositories. libjxl is distributed under the BSD 3-Clause License:
+
+> Copyright (c) the JPEG XL Project Authors.
+> All rights reserved.
+>
+> Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following
+> conditions are met:
+>
+> 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following
+>    disclaimer.
+>
+> 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following
+>    disclaimer in the documentation and/or other materials provided with the distribution.
+>
+> 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products
+>    derived from this software without specific prior written permission.
+>
+> THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING,
+> BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
+> SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+> DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+> INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+> NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

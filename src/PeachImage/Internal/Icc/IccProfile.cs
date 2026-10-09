@@ -78,6 +78,32 @@ internal sealed class IccProfile
         }
     }
 
+    /// <summary>The D50 XYZ to linear-RGB matrix and per-channel inverse tone tables of an RGB matrix/TRC profile (see <see cref="IccTransformTrcMatrix.TryGetFromXyz"/>).</summary>
+    internal bool TryGetFromXyzMatrixTrc(IccIntent intent, out IccMatrix3x3 matrix, out double[][] inverseTables)
+    {
+        if (transform is IccTransformTrcMatrix matrixTrc)
+        {
+            return matrixTrc.TryGetFromXyz(intent, out matrix, out inverseTables);
+        }
+
+        matrix = default;
+        inverseTables = [];
+        return false;
+    }
+
+    /// <summary>The luminance scale and inverse tone table of a gray TRC profile (see <see cref="IccTransformTrcGrey.TryGetFromXyz"/>).</summary>
+    internal bool TryGetFromXyzGreyTrc(IccIntent intent, out double whiteY, out double[] inverseTable)
+    {
+        if (transform is IccTransformTrcGrey grey)
+        {
+            return grey.TryGetFromXyz(intent, out whiteY, out inverseTable);
+        }
+
+        whiteY = 1;
+        inverseTable = [];
+        return false;
+    }
+
     /// <summary>Converts normalized (0-1) device values (e.g. 4 CMYK channels) to the profile's own D50 profile connection space.</summary>
     internal IccVector3 ToXyzD50(ReadOnlySpan<double> deviceValues, IccIntent intent) => transform.ToXyz(deviceValues, intent);
 

@@ -20,6 +20,23 @@ internal sealed class IccTransformTrcGrey : IccTransform
         bCurvesInverse = new Lazy<IccCurve[]>(() => [tags.GreyTrc.Value!.Inverse()]);
     }
 
+    /// <summary>
+    /// The PCS-to-device direction as data for bulk conversion: the device value is the inverse-curve table lookup of
+    /// <c>Y / <paramref name="whiteY"/></c>. Only valid for an XYZ PCS and an intent that leaves the PCS untouched.
+    /// </summary>
+    internal bool TryGetFromXyz(IccIntent intent, out double whiteY, out double[] inverseTable)
+    {
+        whiteY = RefWhite.Y;
+        inverseTable = [];
+        if (intent != IccIntent.RelativeColorimetric || IsLabPcs || bCurvesInverse.Value[0] is not IccTableCurve table || table.Table.Length < 2)
+        {
+            return false;
+        }
+
+        inverseTable = table.Table;
+        return true;
+    }
+
     internal override IccVector3 ToXyz(ReadOnlySpan<double> deviceValues, IccIntent intent)
     {
         Span<double> pcsValues = stackalloc double[1];

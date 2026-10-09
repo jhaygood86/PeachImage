@@ -52,4 +52,11 @@
     </EmbeddedResource>
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Tiny JPEG XL files produced with libjxl (via ffmpeg's libjxl encoder) for header/container tests. -->
+    <EmbeddedResource Include="Formats/Jxl/Assets/*">
+      <LogicalName>PeachImage.Tests.Formats.Jxl.Assets.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
 </Project>

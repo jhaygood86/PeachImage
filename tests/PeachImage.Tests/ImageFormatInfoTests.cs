@@ -10,6 +10,7 @@ public class ImageFormatInfoTests
     [InlineData("webp", new[] { "webp" }, new[] { "image/webp" }, true, true, true, true)]
     [InlineData("avif", new[] { "avif" }, new[] { "image/avif" }, true, true, true, false)]
     [InlineData("tiff", new[] { "tiff", "tif" }, new[] { "image/tiff" }, true, false, true, false)]
+    [InlineData("jxl", new[] { "jxl" }, new[] { "image/jxl" }, true, false, true, false)]
     public void GetFormatInfo_ReturnsExpectedMetadata(
         string formatName,
         string[] fileExtensions,
@@ -56,11 +57,11 @@ public class ImageFormatInfoTests
     }
 
     [Fact]
-    public void SupportedFormats_ContainsExactlyTheSevenBuiltInFormats()
+    public void SupportedFormats_ContainsExactlyTheEightBuiltInFormats()
     {
-        Assert.Equal(7, Image.SupportedFormats.Count);
+        Assert.Equal(8, Image.SupportedFormats.Count);
         Assert.Equal(
-            ["jpeg", "bmp", "png", "gif", "webp", "avif", "tiff"],
+            ["jpeg", "bmp", "png", "gif", "webp", "avif", "tiff", "jxl"],
             Image.SupportedFormats.Select(info => info.FormatName));
     }
 

@@ -386,35 +386,41 @@ internal static class ProgressiveScanEncoder
         byte[] correctionBuffer,
         ref int correctionCount)
     {
+        // Index of the last coefficient that becomes non-zero in this scan: zero runs after it are left to the end-of-band
+        // symbol instead of being spelled out with ZRLs (a ZRL is only emitted when a later symbol still follows it).
+        int lastNew = 0;
+        for (int k = ss; k <= se; k++)
+        {
+            if ((Math.Abs((int)block[ZigZag.ToNaturalOrder[k]]) >> al) == 1)
+            {
+                lastNew = k;
+            }
+        }
+
         int r = 0;
         for (int k = ss; k <= se; k++)
         {
-            int naturalIndex = ZigZag.ToNaturalOrder[k];
-            short trueCoeff = block[naturalIndex];
-
-            if (AcPointTransform(trueCoeff, ah) != 0)
+            short trueCoeff = block[ZigZag.ToNaturalOrder[k]];
+            int magnitude = Math.Abs((int)trueCoeff) >> al;
+            if (magnitude == 0)
             {
-                // Already significant from an earlier scan for this band: buffer this scan's one
-                // correction bit (the magnitude bit at position Al), flushed alongside the next symbol.
-                correctionBuffer[correctionCount++] = (byte)((Math.Abs((int)trueCoeff) >> al) & 1);
+                r++;
                 continue;
             }
 
-            int transformed = AcPointTransform(trueCoeff, al);
-            if (transformed == 0)
+            // Zero runs longer than 15 are split with ZRLs, but only while a newly-significant coefficient still follows. The
+            // correction bits buffered so far belong to the ZRL (they are for coefficients inside the 16 zeros it skips).
+            while (r > 15 && k <= lastNew)
             {
-                r++;
-                if (r == 16)
-                {
-                    // A ZRL only ever represents exactly the 16 true-zero coefficients seen since the
-                    // last symbol, so its correction-bit flush must happen right here — deferring it
-                    // until a later placement is found would attribute corrections from a *later* 16-span
-                    // (or the final remainder) to this ZRL, desyncing the decoder's bit cursor.
-                    emitSymbol(0xF0);
-                    FlushCorrectionBuffer(writer, correctionBuffer, ref correctionCount);
-                    r = 0;
-                }
+                emitSymbol(0xF0);
+                r -= 16;
+                FlushCorrectionBuffer(writer, correctionBuffer, ref correctionCount);
+            }
 
+            if (magnitude > 1)
+            {
+                // Already significant from an earlier scan: its one correction bit is buffered and written with the next symbol.
+                correctionBuffer[correctionCount++] = (byte)(magnitude & 1);
                 continue;
             }
 

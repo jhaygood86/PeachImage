@@ -2,12 +2,14 @@ using PeachImage.Formats.Avif;
 using PeachImage.Formats.Bmp;
 using PeachImage.Formats.Gif;
 using PeachImage.Formats.Jpeg;
+using PeachImage.Formats.Jxl;
 using PeachImage.Formats.Png;
 using PeachImage.Formats.Shared.Compositing;
 using PeachImage.Formats.Shared.Resampling;
 using PeachImage.Formats.Tiff;
 using PeachImage.Formats.Webp;
 using PeachImage.Internal;
+using PeachImage.Internal.PixelFormatConversion;
 
 namespace PeachImage;
 
@@ -41,6 +43,7 @@ public sealed class Image : IDisposable
         WebpCodec.Instance,
         AvifCodec.Instance,
         TiffCodec.Instance,
+        JxlCodec.Instance,
     ];
 
     private static readonly int MaxHeaderSize = Codecs.Max(codec => codec.HeaderSize);
@@ -188,6 +191,53 @@ public sealed class Image : IDisposable
         }
 
         return copy;
+    }
+
+    /// <summary>
+    /// Converts this image to <paramref name="targetFormat"/>, returning a new <see cref="Image"/> (or this same instance, unchanged,
+    /// when it already has that format -- the "may return <c>this</c>" contract <see cref="Resize"/> documents). Supports
+    /// every combination of the gray, RGB and RGBA formats at 8-bit, 16-bit and 32-bit float depth, so that, for example, an
+    /// HDR <see cref="PixelFormat.RgbaF32"/> JPEG XL decode can be brought to an encodable <see cref="PixelFormat.Rgb24"/>.
+    /// </summary>
+    /// <remarks>
+    /// Values are converted as stored: no transfer function, gamut or tone mapping is applied. Integer targets round to the
+    /// nearest value and clamp to the format range (float values below 0 or above 1 saturate). Colour to gray uses the
+    /// BT.601 luma weights; a target without alpha discards the alpha channel (colour is not composited onto a background);
+    /// a source without alpha gets opaque alpha. Resolution and embedded profiles carry over to the result.
+    /// <see cref="PixelFormat.Cmyk32"/> and <see cref="PixelFormat.Ycck32"/> are not supported in either direction --
+    /// use <see cref="ConvertToSrgb"/> for CMYK.
+    /// </remarks>
+    /// <exception cref="NotSupportedException">This image format or <paramref name="targetFormat"/> is CMYK or YCCK.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="targetFormat"/> is not a defined pixel format.</exception>
+    public Image ConvertTo(PixelFormat targetFormat)
+    {
+        if (!Enum.IsDefined(targetFormat))
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetFormat));
+        }
+
+        ThrowIfUnusable();
+        if (targetFormat == PixelFormat)
+        {
+            return this;
+        }
+
+        if (!ImagePixelConverter.IsConvertible(PixelFormat) || !ImagePixelConverter.IsConvertible(targetFormat))
+        {
+            throw new NotSupportedException($"Converting {PixelFormat} to {targetFormat} is not supported. Use ConvertToSrgb for CMYK images.");
+        }
+
+        var result = ImagePixelConverter.Convert(this, targetFormat);
+        result.Metadata.HorizontalResolution = Metadata.HorizontalResolution;
+        result.Metadata.VerticalResolution = Metadata.VerticalResolution;
+        foreach (var profile in Metadata.Profiles)
+        {
+            result.Metadata.Profiles.Add(profile);
+        }
+
+        result.HasAlpha = HasAlpha;
+        result.IsAnimated = IsAnimated;
+        return result;
     }
 
     /// <summary>
@@ -395,6 +445,7 @@ public sealed class Image : IDisposable
             ?? throw new UnknownImageFormatException($"No built-in codec can encode files with extension '.{extension}'.");
 
         using var fileStream = File.Create(path);
+        ThrowIfFloatPixels();
         codec.Encode(this, fileStream, options);
     }
 
@@ -407,6 +458,7 @@ public sealed class Image : IDisposable
         var codec = FindCodecByFormatName(formatName)
             ?? throw new UnknownImageFormatException($"No built-in codec can encode format '{formatName}'.", formatName);
 
+        ThrowIfFloatPixels();
         codec.Encode(this, stream, options);
     }
 
@@ -424,6 +476,7 @@ public sealed class Image : IDisposable
             ?? throw new UnknownImageFormatException($"No built-in codec can encode files with extension '.{extension}'.");
 
         using var fileStream = File.Create(path);
+        ThrowIfFloatPixels();
         using var buffered = new MemoryStream();
         codec.Encode(this, buffered, options);
         buffered.Position = 0;
@@ -443,6 +496,7 @@ public sealed class Image : IDisposable
         var codec = FindCodecByFormatName(formatName)
             ?? throw new UnknownImageFormatException($"No built-in codec can encode format '{formatName}'.", formatName);
 
+        ThrowIfFloatPixels();
         using var buffered = new MemoryStream();
         codec.Encode(this, buffered, options);
         buffered.Position = 0;
@@ -457,6 +511,15 @@ public sealed class Image : IDisposable
     /// while disposal is caller-driven and only ever returns a buffer for images that own one.
     /// </summary>
     internal void Invalidate() => _invalidated = true;
+
+    // No built-in encoder accepts 32-bit float samples; fail loudly rather than let one misread them as bytes.
+    private void ThrowIfFloatPixels()
+    {
+        if (PixelFormat.IsFloat())
+        {
+            throw new NotSupportedException($"No built-in encoder supports {PixelFormat} pixels. Convert the image to an integer format first (Image.ConvertTo) to encode it.");
+        }
+    }
 
     /// <summary>
     /// Returns this image's pixel buffer to its pool, if it owns one (see the type-level remarks on

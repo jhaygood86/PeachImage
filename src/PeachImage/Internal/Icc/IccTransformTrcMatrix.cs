@@ -40,6 +40,36 @@ internal sealed class IccTransformTrcMatrix : IccTransform
         Mb(pcsValues, IdentityMCurves, matricesInverse.Value, bCurvesInverse.Value, deviceValues);
     }
 
+    /// <summary>
+    /// The PCS-to-device direction as plain data -- a 3x3 matrix from D50 XYZ to linear device RGB followed by one 2048-entry
+    /// inverse-curve table per channel -- for callers that convert many pixels. Only valid for intents that leave the PCS
+    /// untouched (<see cref="IccIntent.RelativeColorimetric"/>).
+    /// </summary>
+    internal bool TryGetFromXyz(IccIntent intent, out IccMatrix3x3 matrix, out double[][] inverseTables)
+    {
+        matrix = default;
+        inverseTables = [];
+        if (intent != IccIntent.RelativeColorimetric)
+        {
+            return false;
+        }
+
+        matrix = matricesInverse.Value.Multiply;
+        var curves = bCurvesInverse.Value;
+        inverseTables = new double[curves.Length][];
+        for (int i = 0; i < curves.Length; i++)
+        {
+            if (curves[i] is not IccTableCurve table || table.Table.Length < 2)
+            {
+                return false;
+            }
+
+            inverseTables[i] = table.Table;
+        }
+
+        return true;
+    }
+
     private IccMatrix3x3 GetMatrix()
     {
         var red = Tags.RedMatrixColumn.Value!;

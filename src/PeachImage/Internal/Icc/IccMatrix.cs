@@ -29,6 +29,9 @@ internal readonly struct IccMatrix3x3(
     private readonly double m10 = m10, m11 = m11, m12 = m12;
     private readonly double m20 = m20, m21 = m21, m22 = m22;
 
+    /// <summary>The nine elements in row-major order.</summary>
+    internal double[] ToArray() => [m00, m01, m02, m10, m11, m12, m20, m21, m22];
+
     internal IccVector3 Multiply(IccVector3 v) => new(
         (m00 * v.X) + (m01 * v.Y) + (m02 * v.Z),
         (m10 * v.X) + (m11 * v.Y) + (m12 * v.Z),

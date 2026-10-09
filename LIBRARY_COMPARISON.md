@@ -375,6 +375,27 @@ read as "PeachImage is 9-12× faster than a real TIFF decoder." LZW is the slowe
 implementations, consistent with it being the only one doing real dictionary-based decompression work
 rather than a fixed per-byte reshape.
 
+## JPEG XL
+
+Decode-only. **No SkiaSharp baseline**: SkiaSharp has no JPEG XL codec (it is an open feature request), so the table reports
+PeachImage's own numbers across the decoder's main paths. The inputs are libjxl conformance files (a large lossy VarDCT image
+with a DC frame, patches, the edge-preserving filter and ICC output; a lossless Modular image with patches; a lossy image with
+synthesized noise; a lossless image whose splines dominate). Collected with the `--affinity 15` methodology above (four logical
+cores); decode is parallel across groups and rows, so more cores scale it further.
+
+### Decode
+
+| Scenario | PeachImage | Allocated |
+|---|---:|---:|
+| Lossy 4064x2704 (11 MP) | 291.1 ms | 64.4 MB |
+| Lossless 1600x1096 with patches | 74.5 ms | 17.0 MB |
+| Lossless 2048x2048 with splines | 218.2 ms | 21.8 MB |
+| Lossy 500x606 with noise | 10.5 ms | 2.7 MB |
+
+```bash
+dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*JxlDecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
+```
+
 ## Summary
 
 | Format | Decode | Encode |
@@ -386,6 +407,7 @@ rather than a fixed per-byte reshape.
 | WebP | 0.27×–2.17× (animated: **0.27×**, static: 1.12×–2.17×) | 1.01×–1.44× lossless (0.16× small-image outlier), 0.88× lossy |
 | AVIF | ~2.12× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented; lossy fixed 8x8 blocks, lossless has a real partition-tree RDO search up to 64x64 (see Encode (lossless size) above); throughput not yet measured here |
 | TIFF | ~0.08×–0.35× vs. `ffmpeg` (no SkiaSharp baseline available; ratios dominated by `ffmpeg`'s process-spawn overhead, not decoder throughput) | not implemented (decode-only) |
+| JPEG XL | decode: 291.1 ms for an 11 MP lossy image (no SkiaSharp baseline available) | not implemented (decode-only) |
 | Resize | — | Downscale: 1.28×–3.58× (NearestNeighbor closest, Bilinear/cubic slower); Upscale: 1.41× (NearestNeighbor) or **0.19×–0.59×** (Bilinear/cubic family, faster than SkiaSharp) |
 
 BMP is fully within target and often faster. PNG is within target on every scenario and beats

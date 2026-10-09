@@ -14,6 +14,9 @@ public static class PixelFormatExtensions
         PixelFormat.Rgb48 => 6,
         PixelFormat.Rgba64 => 8,
         PixelFormat.Ycck32 => 4,
+        PixelFormat.GrayF32 => 4,
+        PixelFormat.RgbF32 => 12,
+        PixelFormat.RgbaF32 => 16,
         _ => throw new ArgumentOutOfRangeException(nameof(format), format, message: null),
     };
 
@@ -28,16 +31,23 @@ public static class PixelFormatExtensions
         PixelFormat.Rgb48 => 3,
         PixelFormat.Rgba64 => 4,
         PixelFormat.Ycck32 => 4,
+        PixelFormat.GrayF32 => 1,
+        PixelFormat.RgbF32 => 3,
+        PixelFormat.RgbaF32 => 4,
         _ => throw new ArgumentOutOfRangeException(nameof(format), format, message: null),
     };
 
     /// <summary>Gets the number of bytes a single sample (channel value) occupies for the given <paramref name="format"/>.</summary>
     public static int GetBytesPerSample(this PixelFormat format) => format switch
     {
+        PixelFormat.GrayF32 or PixelFormat.RgbF32 or PixelFormat.RgbaF32 => 4,
         PixelFormat.Gray16 or PixelFormat.Rgb48 or PixelFormat.Rgba64 => 2,
         _ => 1,
     };
 
+    /// <summary>Gets whether the given <paramref name="format"/> stores 32-bit floating-point samples.</summary>
+    public static bool IsFloat(this PixelFormat format) => format is PixelFormat.GrayF32 or PixelFormat.RgbF32 or PixelFormat.RgbaF32;
+
     /// <summary>Gets whether the given <paramref name="format"/> has an alpha channel. Note <see cref="PixelFormat.Cmyk32"/> has 4 channels but is not alpha.</summary>
-    public static bool HasAlpha(this PixelFormat format) => format is PixelFormat.Rgba32 or PixelFormat.Rgba64;
+    public static bool HasAlpha(this PixelFormat format) => format is PixelFormat.Rgba32 or PixelFormat.Rgba64 or PixelFormat.RgbaF32;
 }

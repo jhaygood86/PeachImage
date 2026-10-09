@@ -14,7 +14,7 @@ internal static class PixelFormatFill
     public static void Fill(Image image, byte r, byte g, byte b, byte a)
     {
         int bytesPerPixel = image.PixelFormat.GetBytesPerPixel();
-        Span<byte> pixel = stackalloc byte[8]; // Rgba64 (8 bytes) is the widest pixel format.
+        Span<byte> pixel = stackalloc byte[16]; // RgbaF32 (16 bytes) is the widest pixel format.
         var encoded = pixel[..bytesPerPixel];
         EncodeColor(image.PixelFormat, r, g, b, a, encoded);
 
@@ -76,6 +76,32 @@ internal static class PixelFormatFill
                 samples[1] = Widen(g);
                 samples[2] = Widen(b);
                 samples[3] = Widen(a);
+                break;
+            }
+
+            case PixelFormat.GrayF32:
+            {
+                var samples = MemoryMarshal.Cast<byte, float>(destination);
+                samples[0] = Luma8(r, g, b) / 255f;
+                break;
+            }
+
+            case PixelFormat.RgbF32:
+            {
+                var samples = MemoryMarshal.Cast<byte, float>(destination);
+                samples[0] = r / 255f;
+                samples[1] = g / 255f;
+                samples[2] = b / 255f;
+                break;
+            }
+
+            case PixelFormat.RgbaF32:
+            {
+                var samples = MemoryMarshal.Cast<byte, float>(destination);
+                samples[0] = r / 255f;
+                samples[1] = g / 255f;
+                samples[2] = b / 255f;
+                samples[3] = a / 255f;
                 break;
             }
 
