@@ -30,4 +30,13 @@ public enum PixelFormat : byte
     /// <c>JpegDecoderOptions.DecodeRawYcck</c>.
     /// </summary>
     Ycck32,
+
+    /// <summary>Single-channel 32-bit IEEE-754 float grayscale (native byte order). Nominal range is 0..1; HDR values may exceed 1.</summary>
+    GrayF32,
+
+    /// <summary>Three-channel 32-bit float red/green/blue, tightly interleaved. Nominal range is 0..1; HDR values may exceed 1.</summary>
+    RgbF32,
+
+    /// <summary>Four-channel 32-bit float red/green/blue/alpha, tightly interleaved. Alpha is straight (not premultiplied).</summary>
+    RgbaF32,
 }

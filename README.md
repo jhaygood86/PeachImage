@@ -65,6 +65,24 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   `TiffUnsupportedFeatureException` rather than a silently wrong result — the goal is correctness on
   real-world scanner/export-tool output, not every TIFF extension ever specified. An embedded ICC profile
   (tag 34675) is extracted into `Image.Metadata`, same as JPEG/PNG.
+- **JPEG XL**: decode only (no encode; `CanEncode` is `false`). A from-scratch managed decoder for the ISO/IEC 18181
+  codestream and ISOBMFF container: lossless and lossy **Modular** (every predictor including the weighted predictor,
+  RCT, palette/delta-palette and squeeze transforms, progressive passes) and **VarDCT** (every DCT size from 8x8 to
+  256x256, the rectangular, IDENTITY, DCT2x2/4x4/4x8 and AFV transforms, chroma-from-luma, adaptive quantization, custom
+  dequantization tables, Gaborish and the edge-preserving filter), patches, splines, synthesized noise, 2x/4x/8x upsampling,
+  DC frames, extra channels (alpha, spot colours rendered like the reference decoder, black/CMYK), premultiplied alpha
+  (returned straight), and **JPEG recompressions** (YCbCr with any chroma subsampling, grayscale or RGB). Files made by losslessly recompressing a JPEG
+  can also be turned back into that JPEG, byte for byte, with `JxlJpegReconstruction` (see below). Multi-frame images use full frame
+  blending (cropped frames, every blend mode, reference frames) and decode through `AnimatedImage` as composited RGBA
+  frames. XYB images are rendered in the file's own colour space: sRGB, any enumerated or custom primaries and white point,
+  linear, gamma, BT.709, DCI, PQ and HLG, or an embedded RGB/gray ICC profile (CMYK images are returned as `Cmyk32` with the
+  profile attached; use `Image.ConvertToSrgb`). Samples above 8 bits decode to the 16-bit formats, floating-point or deeper
+  samples to the new `GrayF32`/`RgbF32`/`RgbaF32` formats. EXIF and XMP boxes (including Brotli-compressed ones) and the
+  embedded ICC profile are exposed through `Image.Metadata`, and orientation is applied. Not supported (throws a clear
+  `JxlUnsupportedFeatureException`): 32-bit integer samples, which the reference decoder rejects too. Grayscale XYB
+  images with a non-D65 white point are rendered as plain luminance. Group decoding, the
+  restoration filters, colour conversion and the splines/noise/upsampling stages run on all cores and use `Vector<T>`
+  kernels (AVX2 on x64, NEON on ARM64).
 - Other formats are not yet implemented. The public API (`Image`, `AnimatedImage` for multi-frame formats
   like GIF) is designed to support them without breaking changes when they're added. Codec selection is
   internal — there's no format-specific type or registration step in the public API.
@@ -208,6 +226,37 @@ using var output = File.Create("resized.gif");
 resized.Save(output, "gif");
 ```
 
+### Recovering the original JPEG from a JPEG XL file
+
+JPEG XL files made from a JPEG (as `cjxl` does for JPEG input) carry the information needed to rebuild that exact JPEG file,
+including its progressive scans, restart intervals, Huffman tables, ICC profile, Exif and XMP. `JxlJpegReconstruction` returns
+those original bytes without decoding any pixels, which is useful where a JPEG can be embedded as-is (for example in a PDF)
+instead of being decoded and encoded again:
+
+```csharp
+using var stream = File.OpenRead("photo.jxl");
+if (JxlJpegReconstruction.TryReconstructJpeg(stream, out byte[]? jpeg))
+{
+    File.WriteAllBytes("photo.jpg", jpeg);   // identical to the JPEG that was recompressed
+}
+```
+
+`HasJpegReconstructionData` tells whether a file qualifies without rebuilding it, and `ReconstructJpeg` throws
+`JxlUnsupportedFeatureException` for files that were not made from a JPEG (those decode through `Image.Load` as usual).
+
+### Converting pixel formats
+
+`Image.ConvertTo` converts between the gray, RGB and RGBA formats at 8-bit, 16-bit and 32-bit float depth (for example an
+HDR `RgbaF32` JPEG XL decode to `Rgb24` before encoding it). Integer targets round and clamp, colour to gray uses BT.601
+luma, and a target without alpha discards the alpha channel. Values are converted as stored, with no tone mapping.
+CMYK images go through `ConvertToSrgb` instead.
+
+```csharp
+using var hdr = Image.Load("photo.jxl");           // may be RgbaF32 for HDR files
+using var jpegReady = hdr.ConvertTo(PixelFormat.Rgb24);
+jpegReady.Save("photo.jpg");
+```
+
 ## Building & testing
 
 ```bash
@@ -215,12 +264,13 @@ dotnet build PeachImage.slnx
 dotnet test PeachImage.slnx
 ```
 
-The first `dotnet test` run automatically fetches JPEG, BMP, PNG, and TIFF test corpora (the Imazen
+The first `dotnet test` run automatically fetches JPEG, BMP, PNG, TIFF, and JPEG XL test corpora (the Imazen
 `codec-corpus` conformance sets, image-rs/jpeg-decoder's test assets, and — for BMP — the `bmp-conformance`
 subset of `codec-corpus`, itself generated from Jason Summers' [bmpsuite](https://github.com/jsummers/bmpsuite); for
 PNG — the `pngsuite` subset of `codec-corpus`, a mirror of Willem van Schaik's classic PngSuite conformance
 set; for TIFF — the `tiff-conformance` subset of `codec-corpus`, sourced from libtiff's, image-tiff's, and
-image-rs's own test suites) into the gitignored `tests/corpus/` directory — no separate script needed. Set
+image-rs's own test suites; for JPEG XL — the libjxl `conformance` test cases and `testdata`, each decoded and compared
+with its reference image under the suite's own thresholds) into the gitignored `tests/corpus/` directory — no separate script needed. Set
 `PEACHIMAGE_SKIP_CORPUS_FETCH=1` to skip network access; corpus-driven tests report as skipped rather than
 failing.
 
@@ -242,6 +292,15 @@ comparison can be exact rather than tolerance-based (see `AvifFfmpegReferenceBas
 scope for this specific check). Normal test runs only read the checked-in baseline and never invoke `ffmpeg`;
 regenerating it after a corpus or decoder change requires `ffmpeg`/`ffprobe` on PATH and
 `PEACHIMAGE_AVIF_FFMPEG_BASELINE=write`/`PEACHIMAGE_WEBP_FFMPEG_BASELINE=write` respectively.
+
+JPEG XL decode is additionally checked against `ffmpeg` built with `libjxl` (the reference implementation) as a live
+oracle: the tests encode synthetic images with libjxl (lossless and lossy, every effort level, 8/16-bit and float input,
+alpha, HDR transfer functions and wide-gamut primaries) and require the decoder to match libjxl's own decode. They skip when
+`ffmpeg` is not on `PATH`.
+
+With libjxl's reference decoder `djxl` available (put it on `PATH` or point `PEACHIMAGE_DJXL` at it), every file of the JPEG XL
+corpus, and every JPEG XL file in the test project, is also decoded by both and compared sample for sample at 16-bit (animations as
+float): almost everything agrees to within one 16-bit unit, and the few known, understood differences have their own tolerances.
 
 ## Benchmarking
 
