@@ -33,6 +33,10 @@ public class JxlPreviewTests
         // The preview size is reported by the header parser, so the splice really produced a preview.
         var headers = JxlCodestreamHeaders.Read(JxlContainer.Parse(withPreview).Codestream.ToArray());
         Assert.Equal(new JxlSize(16, 8), headers.Metadata.PreviewSize);
+
+        // Identify steps over the preview to inspect the main frame.
+        using var stream = new MemoryStream(withPreview);
+        Assert.True(Image.Identify(stream).IsLosslessEncoding);
     }
 
     [Fact]

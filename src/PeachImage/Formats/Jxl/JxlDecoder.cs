@@ -38,11 +38,11 @@ internal static class JxlDecoder
     /// <summary>
     /// Whether the pixels are stored losslessly: the colour channels are in the original space (not XYB) and the first frame is Modular.
     /// A JPEG-reconstruction file is also non-XYB but its frame is VarDCT, so it is not lossless with respect to its pixels.
-    /// An image with a preview is conservatively reported as not lossless, since its first frame is the preview rather than the image.
+    /// A preview frame, when present, is skipped so the real image's first frame is the one inspected.
     /// </summary>
     private static bool IsLossless(JxlContainer container, JxlImageMetadata metadata)
     {
-        if (metadata.XybEncoded || metadata.PreviewSize is not null)
+        if (metadata.XybEncoded)
         {
             return false;
         }
@@ -50,8 +50,36 @@ internal static class JxlDecoder
         // The frame offset is only known once the ICC profile (if any) has been read past.
         var codestream = container.Codestream.ToArray();
         var headers = JxlCodestreamHeaders.Read(codestream);
-        var reader = new JxlBitReader(codestream.AsSpan(headers.FrameOffset));
+        int offset = headers.FrameOffset;
+        if (headers.Metadata.PreviewSize is { } previewSize)
+        {
+            // Step over the preview (header, TOC and section data) to reach the real first frame.
+            offset += FrameByteLength(codestream, offset, headers.Metadata, previewSize, isPreview: true);
+        }
+
+        var reader = new JxlBitReader(codestream.AsSpan(offset));
         return JxlFrameHeader.Read(ref reader, headers.Metadata, headers.Size).IsModular;
+    }
+
+    /// <summary>The total byte length of the frame at <paramref name="offset"/>: its header, table of contents and section data.</summary>
+    private static int FrameByteLength(byte[] codestream, int offset, JxlImageMetadata metadata, JxlSize size, bool isPreview)
+    {
+        var reader = new JxlBitReader(codestream.AsSpan(offset));
+        var frame = JxlFrameHeader.Read(ref reader, metadata, size, isPreview);
+        var dims = frame.Dimensions;
+        var toc = JxlToc.Read(ref reader, JxlToc.EntryCount(dims.NumGroups, dims.NumDcGroups, frame.NumPasses));
+        long total = reader.BitPosition >> 3;
+        foreach (uint section in toc.Sizes)
+        {
+            total += section;
+        }
+
+        if (offset + total > codestream.Length)
+        {
+            throw new JxlDecodingException("The frame's sections extend past the end of the codestream.");
+        }
+
+        return (int)total;
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>. For an animation, decodes the first frame (as composited onto the canvas).</summary>

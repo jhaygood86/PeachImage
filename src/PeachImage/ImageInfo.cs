@@ -42,7 +42,7 @@ namespace PeachImage;
 /// <item>JPEG XL: <see langword="true"/> when the colour channels are stored in the original colour space
 /// (not XYB) and the first frame is Modular, i.e. a lossless encode. <see langword="false"/> for lossy
 /// (XYB) files, for JPEG reconstruction (VarDCT frames, lossless only with respect to the original JPEG
-/// bytes) and for images with a preview.</item>
+/// bytes). A preview frame, if present, is skipped.</item>
 /// <item>Always <see langword="false"/> for every other format, including JPEG (always lossy) and PNG/BMP/GIF
 /// (not format-specific here since they have no lossy mode at all — see the general opaque-source handling
 /// elsewhere rather than this flag).</item>
