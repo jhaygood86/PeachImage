@@ -23,7 +23,8 @@ internal static class AvifFixtureBuilder
         bool includeAlpha = false,
         string majorBrand = "avif",
         string[]? compatibleBrands = null,
-        byte[]? iccProfile = null)
+        byte[]? iccProfile = null,
+        (string FourCc, byte Value)[]? transforms = null)
     {
         var items = new List<(uint Id, byte[] Data)> { (1, DummyAv1Bytes(16)) };
 
@@ -32,6 +33,13 @@ internal static class AvifFixtureBuilder
         if (iccProfile is not null)
         {
             ipcoProps.Add(Colr(iccProfile));
+            itemOneProps.Add(ipcoProps.Count);
+        }
+
+        // irot/imir boxes (single payload byte) are associated with the primary item in the order given.
+        foreach (var (fourCc, value) in transforms ?? [])
+        {
+            ipcoProps.Add(Box(fourCc, [value]));
             itemOneProps.Add(ipcoProps.Count);
         }
 

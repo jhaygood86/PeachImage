@@ -59,10 +59,11 @@ public class JxlJpegRecompressionTests
     {
         _ = expectedSha256;
         Assert.SkipUnless(LibjxlOracle.IsAvailable, "ffmpeg with libjxl is not available.");
-        Assert.SkipWhen(asset.Contains("sideways", StringComparison.Ordinal), "The picture is rotated by its EXIF orientation, which the oracle output does not apply.");
 
         byte[] file = JxlTestAssets.Load(asset);
-        using var ours = Image.Load(new MemoryStream(file));
+        var orientation = Image.Identify(new MemoryStream(file)).Orientation;
+        using var decoded = Image.Load(new MemoryStream(file));
+        using var ours = decoded.ApplyOrientation(orientation);
         byte[] reference = LibjxlOracle.Decode(file, ours.PixelFormat == PixelFormat.Gray8 ? "gray" : "rgb24");
 
         var pixels = ours.GetPixelSpan();

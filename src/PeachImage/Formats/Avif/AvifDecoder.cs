@@ -79,7 +79,7 @@ internal static class AvifDecoder
             isLosslessEncoding = false;
         }
 
-        return new ImageInfo(container.Width, container.Height, pixelFormat, FormatName, HasAlpha: pixelFormat.HasAlpha(), IsLosslessEncoding: isLosslessEncoding);
+        return new ImageInfo(container.Width, container.Height, pixelFormat, FormatName, HasAlpha: pixelFormat.HasAlpha(), IsLosslessEncoding: isLosslessEncoding, Orientation: container.Orientation);
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>

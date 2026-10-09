@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PeachImage.Formats.Jxl;
+using PeachImage.Tests.Formats.Jxl.Unit;
 using PeachImage.Tests.Internal;
 
 namespace PeachImage.Tests.Formats.Jxl.Corpus;
@@ -84,11 +85,19 @@ public class JxlConformanceCorpusTests
             return;
         }
 
+        // The decoder reports the orientation without applying it; the reference image is upright.
+        ImageOrientation orientation;
+        using (var orientationStream = File.OpenRead(path))
+        {
+            orientation = Image.Identify(orientationStream).Orientation;
+        }
+
         using (image)
         {
             if (File.Exists(referencePath) && new FileInfo(path).Length > 200)
             {
-                CompareWithReference(name, image!, referencePath, Path.Combine(directory, "test.json"));
+                using var upright = image!.ApplyOrientation(orientation);
+                CompareWithReference(name, upright, referencePath, Path.Combine(directory, "test.json"));
             }
         }
     }

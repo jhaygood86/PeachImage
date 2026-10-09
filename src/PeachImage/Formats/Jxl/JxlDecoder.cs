@@ -1,8 +1,10 @@
+using PeachImage.Formats.Jxl.Bitstream;
 using PeachImage.Formats.Jxl.Container;
 using PeachImage.Formats.Jxl.Features;
 using PeachImage.Formats.Jxl.Frame;
 using PeachImage.Formats.Jxl.Headers;
 using PeachImage.Formats.Jxl.Internal;
+using PeachImage.Formats.Shared.Metadata;
 
 namespace PeachImage.Formats.Jxl;
 
@@ -20,17 +22,64 @@ internal static class JxlDecoder
         var headers = JxlCodestreamHeaders.Read(container.Codestream.Span, readIcc: false);
         var metadata = headers.Metadata;
 
-        // Orientations 5..8 transpose the image.
-        bool transposed = metadata.Orientation >= 5;
-        int width = checked((int)(transposed ? headers.Size.Height : headers.Size.Width));
-        int height = checked((int)(transposed ? headers.Size.Width : headers.Size.Height));
+        // The orientation is reported, not applied: the pixels stay in stored order.
         return new ImageInfo(
-            width,
-            height,
+            checked((int)headers.Size.Width),
+            checked((int)headers.Size.Height),
             JxlPixelFormatSelector.Select(metadata),
             FormatName,
             IsAnimated: metadata.Animation is not null,
-            HasAlpha: metadata.AlphaChannelIndex >= 0);
+            HasAlpha: metadata.AlphaChannelIndex >= 0,
+            HasPreview: metadata.PreviewSize is not null,
+            Orientation: ExifOrientationReader.FromValue(metadata.Orientation),
+            IsLosslessEncoding: IsLossless(container, metadata));
+    }
+
+    /// <summary>
+    /// Whether the pixels are stored losslessly: the colour channels are in the original space (not XYB) and the first frame is Modular.
+    /// A JPEG-reconstruction file is also non-XYB but its frame is VarDCT, so it is not lossless with respect to its pixels.
+    /// A preview frame, when present, is skipped so the real image's first frame is the one inspected.
+    /// </summary>
+    private static bool IsLossless(JxlContainer container, JxlImageMetadata metadata)
+    {
+        if (metadata.XybEncoded)
+        {
+            return false;
+        }
+
+        // The frame offset is only known once the ICC profile (if any) has been read past.
+        var codestream = container.Codestream.ToArray();
+        var headers = JxlCodestreamHeaders.Read(codestream);
+        int offset = headers.FrameOffset;
+        if (headers.Metadata.PreviewSize is { } previewSize)
+        {
+            // Step over the preview (header, TOC and section data) to reach the real first frame.
+            offset += FrameByteLength(codestream, offset, headers.Metadata, previewSize, isPreview: true);
+        }
+
+        var reader = new JxlBitReader(codestream.AsSpan(offset));
+        return JxlFrameHeader.Read(ref reader, headers.Metadata, headers.Size).IsModular;
+    }
+
+    /// <summary>The total byte length of the frame at <paramref name="offset"/>: its header, table of contents and section data.</summary>
+    private static int FrameByteLength(byte[] codestream, int offset, JxlImageMetadata metadata, JxlSize size, bool isPreview)
+    {
+        var reader = new JxlBitReader(codestream.AsSpan(offset));
+        var frame = JxlFrameHeader.Read(ref reader, metadata, size, isPreview);
+        var dims = frame.Dimensions;
+        var toc = JxlToc.Read(ref reader, JxlToc.EntryCount(dims.NumGroups, dims.NumDcGroups, frame.NumPasses));
+        long total = reader.BitPosition >> 3;
+        foreach (uint section in toc.Sizes)
+        {
+            total += section;
+        }
+
+        if (offset + total > codestream.Length)
+        {
+            throw new JxlDecodingException("The frame's sections extend past the end of the codestream.");
+        }
+
+        return (int)total;
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>. For an animation, decodes the first frame (as composited onto the canvas).</summary>
@@ -39,7 +88,10 @@ internal static class JxlDecoder
         ArgumentNullException.ThrowIfNull(stream);
 
         var (container, headers) = Open(stream);
-        foreach (var (frame, _) in VisibleFrames(container.Codestream.ToArray(), headers))
+        Action<JxlDecodedFrame>? onPreview = options?.PreviewAvailable is { } callback
+            ? preview => callback(Finish(JxlImageBuilder.Build(preview, headers, options.TargetPixelFormat), container, headers))
+            : null;
+        foreach (var (frame, _) in VisibleFrames(container.Codestream.ToArray(), headers, onPreview))
         {
             using (frame)
             {
@@ -62,9 +114,8 @@ internal static class JxlDecoder
 
         var (container, headers) = Open(stream);
         var metadata = headers.Metadata;
-        bool transposed = metadata.Orientation >= 5;
-        int width = checked((int)(transposed ? headers.Size.Height : headers.Size.Width));
-        int height = checked((int)(transposed ? headers.Size.Width : headers.Size.Height));
+        int width = checked((int)headers.Size.Width);
+        int height = checked((int)headers.Size.Height);
         int loops = metadata.Animation is { } animation ? checked((int)Math.Min(animation.NumLoops, int.MaxValue)) : 1;
         return new AnimatedImage(EnumerateAnimation(container, headers), width, height, loops);
     }
@@ -131,8 +182,13 @@ internal static class JxlDecoder
     /// <summary>
     /// Walks the codestream's frames in order, keeping the frames later ones refer to, and yields each visible frame (a last frame,
     /// or one with a non-zero duration) composited onto the canvas, with its duration in animation ticks. The caller disposes each.
+    /// <paramref name="onPreview"/>, when given, is called with the preview frame (if the codestream has one) before the first frame
+    /// is decoded; it does not take ownership of the frame.
     /// </summary>
-    private static IEnumerable<(JxlDecodedFrame Frame, uint Ticks)> VisibleFrames(byte[] codestream, JxlCodestreamHeaders headers)
+    private static IEnumerable<(JxlDecodedFrame Frame, uint Ticks)> VisibleFrames(
+        byte[] codestream,
+        JxlCodestreamHeaders headers,
+        Action<JxlDecodedFrame>? onPreview = null)
     {
         var state = new JxlDecoderState();
         int offset = headers.FrameOffset;
@@ -140,6 +196,7 @@ internal static class JxlDecoder
         {
             // The preview is a small stand-in for the image; it precedes the real frames and is not part of them.
             using var preview = JxlFrameDecoder.Decode(codestream, offset, headers, state, isPreview: true);
+            onPreview?.Invoke(preview);
             offset += preview.ByteLength;
         }
 

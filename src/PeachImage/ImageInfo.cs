@@ -39,10 +39,24 @@ namespace PeachImage;
 /// <item>TIFF: <see langword="true"/> when the Compression tag is 1 (none), 5 (LZW), or 32773
 /// (PackBits) — this decoder's entire supported compression set, which is lossless by construction, so
 /// this is always <see langword="true"/> for any TIFF that decodes successfully today.</item>
+/// <item>JPEG XL: <see langword="true"/> when the colour channels are stored in the original colour space
+/// (not XYB) and the first frame is Modular, i.e. a lossless encode. <see langword="false"/> for lossy
+/// (XYB) files, for JPEG reconstruction (VarDCT frames, lossless only with respect to the original JPEG
+/// bytes). A preview frame, if present, is skipped.</item>
 /// <item>Always <see langword="false"/> for every other format, including JPEG (always lossy) and PNG/BMP/GIF
 /// (not format-specific here since they have no lossy mode at all — see the general opaque-source handling
 /// elsewhere rather than this flag).</item>
 /// </list>
+/// </param>
+/// <param name="HasPreview">
+/// Whether decoding can surface a lower-fidelity preview before the full image is ready, through
+/// <see cref="DecoderOptions.PreviewAvailable"/>: a JPEG XL preview frame, the passes of an interlaced PNG, or the
+/// scans of a progressive JPEG. <see langword="false"/> for every other source.
+/// </param>
+/// <param name="Orientation">
+/// The orientation recorded in the file's metadata (EXIF, or the format's own equivalent), or
+/// <see cref="ImageOrientation.Normal"/> when there is none. It is informational: decoders never apply it, so
+/// <paramref name="Width"/>, <paramref name="Height"/> and the decoded pixels are always as stored.
 /// </param>
 public readonly record struct ImageInfo(
     int Width,
@@ -53,4 +67,6 @@ public readonly record struct ImageInfo(
     bool HasAlpha = false,
     bool IsAdobeInvertedCmyk = false,
     bool IsYcck = false,
-    bool IsLosslessEncoding = false);
+    bool IsLosslessEncoding = false,
+    bool HasPreview = false,
+    ImageOrientation Orientation = ImageOrientation.Normal);

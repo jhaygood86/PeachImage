@@ -140,7 +140,7 @@ internal static class JxlImageBuilder
         });
 
         image.HasAlpha = alpha is not null;
-        return ApplyOrientation(image, metadata.Orientation);
+        return image;
     }
 
     // CMYK: cyan, magenta and yellow are the colour channels and key is the black extra channel; the ICC profile (attached by the
@@ -204,7 +204,7 @@ internal static class JxlImageBuilder
         });
 
         image.HasAlpha = false;
-        return ApplyOrientation(image, metadata.Orientation);
+        return image;
     }
 
     private static byte Ink(byte sample) => (byte)(255 - sample);
@@ -494,43 +494,5 @@ internal static class JxlImageBuilder
             double unit = _isFloat ? JxlCustomFloat.Decode(value, _bits, _exponentBits) : value / _maxValue;
             return double.IsNaN(unit) ? 0 : Math.Clamp(unit, 0.0, 1.0);
         }
-    }
-
-    /// <summary>Applies the EXIF-style orientation (1..8) so the returned image is upright.</summary>
-    internal static Image ApplyOrientation(Image image, int orientation)
-    {
-        if (orientation == 1)
-        {
-            return image;
-        }
-
-        int bytes = image.PixelFormat.GetBytesPerPixel();
-        int w = image.Width;
-        int h = image.Height;
-        bool swap = orientation >= 5;
-        var result = Image.Create(swap ? h : w, swap ? w : h, image.PixelFormat);
-        for (int y = 0; y < h; y++)
-        {
-            var src = image.GetRowSpan(y);
-            for (int x = 0; x < w; x++)
-            {
-                // Destination coordinates for each EXIF orientation.
-                (int dx, int dy) = orientation switch
-                {
-                    2 => (w - 1 - x, y),
-                    3 => (w - 1 - x, h - 1 - y),
-                    4 => (x, h - 1 - y),
-                    5 => (y, x),
-                    6 => (h - 1 - y, x),
-                    7 => (h - 1 - y, w - 1 - x),
-                    _ => (y, w - 1 - x),
-                };
-                src.Slice(x * bytes, bytes).CopyTo(result.GetRowSpan(dy).Slice(dx * bytes, bytes));
-            }
-        }
-
-        result.HasAlpha = image.HasAlpha;
-        image.Dispose();
-        return result;
     }
 }

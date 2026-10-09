@@ -33,6 +33,10 @@ public class JxlPreviewTests
         // The preview size is reported by the header parser, so the splice really produced a preview.
         var headers = JxlCodestreamHeaders.Read(JxlContainer.Parse(withPreview).Codestream.ToArray());
         Assert.Equal(new JxlSize(16, 8), headers.Metadata.PreviewSize);
+
+        // Identify steps over the preview to inspect the main frame.
+        using var stream = new MemoryStream(withPreview);
+        Assert.True(Image.Identify(stream).IsLosslessEncoding);
     }
 
     [Fact]
@@ -50,7 +54,122 @@ public class JxlPreviewTests
         Assert.Equal(40, animation.Width);
     }
 
-    private static byte[] AddPreview(byte[] mainFile, byte[] thumbnailFile, int previewWidth, int previewHeight)
+    [Fact]
+    public void Identify_ReportsThePreview_AndItsAbsence()
+    {
+        Assert.SkipUnless(LibjxlOracle.IsAvailable, "ffmpeg with libjxl is not available.");
+
+        byte[] main = LibjxlOracle.Encode("testsrc2=size=40x32", "rgb24", "-distance 0");
+        byte[] thumbnail = LibjxlOracle.Encode("testsrc2=size=16x8", "rgb24", "-distance 0");
+        byte[] withPreview = AddPreview(main, thumbnail, previewWidth: 16, previewHeight: 8);
+
+        Assert.True(Image.Identify(new MemoryStream(withPreview)).HasPreview);
+        Assert.False(Image.Identify(new MemoryStream(main)).HasPreview);
+    }
+
+    [Fact]
+    public void Identify_ReportsTheOrientation_WithoutApplyingIt()
+    {
+        Assert.SkipUnless(LibjxlOracle.IsAvailable, "ffmpeg with libjxl is not available.");
+
+        byte[] main = LibjxlOracle.Encode("testsrc2=size=40x32", "rgb24", "-distance 0");
+        byte[] thumbnail = LibjxlOracle.Encode("testsrc2=size=16x8", "rgb24", "-distance 0");
+        byte[] rotated = AddPreview(main, thumbnail, previewWidth: 16, previewHeight: 8, orientation: 6);
+
+        var info = Image.Identify(new MemoryStream(rotated));
+        Assert.Equal(ImageOrientation.Rotate90, info.Orientation);
+        Assert.Equal(ImageOrientation.Normal, Image.Identify(new MemoryStream(main)).Orientation);
+
+        // The size and the pixels stay as stored; the upright view is the caller's to compute.
+        using var expected = Image.Load(main);
+        using var actual = Image.Load(rotated);
+        Assert.Equal(40, info.Width);
+        Assert.Equal(32, info.Height);
+        Assert.Equal(expected.Width, actual.Width);
+        Assert.True(expected.GetPixelSpan().SequenceEqual(actual.GetPixelSpan()));
+    }
+
+    [Fact]
+    public void PreviewAvailable_ReceivesThePreview_BeforeTheMainImage()
+    {
+        Assert.SkipUnless(LibjxlOracle.IsAvailable, "ffmpeg with libjxl is not available.");
+
+        byte[] main = LibjxlOracle.Encode("testsrc2=size=40x32", "rgb24", "-distance 0");
+        byte[] thumbnail = LibjxlOracle.Encode("testsrc2=size=16x8", "rgb24", "-distance 0");
+        byte[] withPreview = AddPreview(main, thumbnail, previewWidth: 16, previewHeight: 8);
+
+        var previews = new List<Image>();
+        try
+        {
+            using var actual = Image.Load(new MemoryStream(withPreview), new DecoderOptions { PreviewAvailable = previews.Add });
+            using var expected = Image.Load(main);
+            using var expectedPreview = Image.Load(thumbnail);
+
+            var preview = Assert.Single(previews);
+            Assert.Equal(16, preview.Width);
+            Assert.Equal(8, preview.Height);
+            Assert.Equal(actual.PixelFormat, preview.PixelFormat);
+            Assert.True(expectedPreview.GetPixelSpan().SequenceEqual(preview.GetPixelSpan()), "The preview differs from the thumbnail it was built from.");
+            Assert.True(expected.GetPixelSpan().SequenceEqual(actual.GetPixelSpan()), "The main image changed when a preview callback was set.");
+        }
+        finally
+        {
+            previews.ForEach(p => p.Dispose());
+        }
+    }
+
+    [Fact]
+    public void PreviewAvailable_HonoursTheTargetPixelFormat()
+    {
+        Assert.SkipUnless(LibjxlOracle.IsAvailable, "ffmpeg with libjxl is not available.");
+
+        byte[] main = LibjxlOracle.Encode("testsrc2=size=40x32", "rgb24", "-distance 0");
+        byte[] thumbnail = LibjxlOracle.Encode("testsrc2=size=16x8", "rgb24", "-distance 0");
+        byte[] withPreview = AddPreview(main, thumbnail, previewWidth: 16, previewHeight: 8);
+
+        PixelFormat? seen = null;
+        var options = new DecoderOptions
+        {
+            TargetPixelFormat = PixelFormat.Rgba32,
+            PreviewAvailable = p =>
+            {
+                seen = p.PixelFormat;
+                p.Dispose();
+            },
+        };
+        using var actual = Image.Load(new MemoryStream(withPreview), options);
+
+        Assert.Equal(PixelFormat.Rgba32, seen);
+        Assert.Equal(PixelFormat.Rgba32, actual.PixelFormat);
+    }
+
+    [Fact]
+    public void PreviewAvailable_ThrowingAbortsTheDecode()
+    {
+        Assert.SkipUnless(LibjxlOracle.IsAvailable, "ffmpeg with libjxl is not available.");
+
+        byte[] main = LibjxlOracle.Encode("testsrc2=size=40x32", "rgb24", "-distance 0");
+        byte[] thumbnail = LibjxlOracle.Encode("testsrc2=size=16x8", "rgb24", "-distance 0");
+        byte[] withPreview = AddPreview(main, thumbnail, previewWidth: 16, previewHeight: 8);
+
+        var options = new DecoderOptions { PreviewAvailable = p => { p.Dispose(); throw new InvalidOperationException("stop"); } };
+        Assert.Throws<InvalidOperationException>(() => Image.Load(new MemoryStream(withPreview), options));
+    }
+
+    [Fact]
+    public void PreviewAvailable_IsNotCalled_WithoutAPreview()
+    {
+        Assert.SkipUnless(LibjxlOracle.IsAvailable, "ffmpeg with libjxl is not available.");
+
+        byte[] main = LibjxlOracle.Encode("testsrc2=size=40x32", "rgb24", "-distance 0");
+
+        int calls = 0;
+        using var image = Image.Load(new MemoryStream(main), new DecoderOptions { PreviewAvailable = p => { calls++; p.Dispose(); } });
+
+        Assert.Equal(0, calls);
+    }
+
+    private static byte[] AddPreview(byte[] mainFile, byte[] thumbnailFile, int previewWidth, int previewHeight, int orientation = 1)
     {
         byte[] main = JxlContainer.Parse(mainFile).Codestream.ToArray();
         byte[] thumbnail = JxlContainer.Parse(thumbnailFile).Codestream.ToArray();
@@ -93,7 +212,7 @@ public class JxlPreviewTests
 
         Write(0, 1); // all_default = false
         Write(1, 1); // extra_fields = true
-        Write(0, 3); // orientation - 1
+        Write((ulong)(orientation - 1), 3); // orientation - 1
         Write(0, 1); // have_intrinsic_size
         Write(1, 1); // have_preview
         WritePreviewHeader(Write, previewWidth, previewHeight);

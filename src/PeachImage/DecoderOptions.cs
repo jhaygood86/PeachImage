@@ -31,4 +31,18 @@ public class DecoderOptions
     /// up front.
     /// </remarks>
     public PixelFormat? TargetPixelFormat { get; init; }
+
+    /// <summary>
+    /// Called, while the full image is still being decoded, with a lower-fidelity version of it: a JPEG XL preview
+    /// frame, one per pass of an interlaced PNG, or one per scan of a progressive JPEG. Formats with no such
+    /// intermediate (see <see cref="ImageInfo.HasPreview"/>) never call it.
+    /// </summary>
+    /// <remarks>
+    /// The callback runs synchronously on the decoding thread, zero or more times, before <c>Load</c> returns; the
+    /// final image is the return value of <c>Load</c>, not a callback. Each <see cref="Image"/> passed in is a new
+    /// copy that the callback owns and must dispose. A preview has the same pixel format as the final image and
+    /// may be smaller than it (a JPEG XL preview) or full size with unrefined detail (PNG and JPEG). An exception
+    /// thrown from the callback aborts the decode.
+    /// </remarks>
+    public Action<Image>? PreviewAvailable { get; init; }
 }
