@@ -1,3 +1,4 @@
+using PeachImage.Formats.Jxl.Bitstream;
 using PeachImage.Formats.Jxl.Container;
 using PeachImage.Formats.Jxl.Features;
 using PeachImage.Formats.Jxl.Frame;
@@ -30,7 +31,27 @@ internal static class JxlDecoder
             JxlPixelFormatSelector.Select(metadata),
             FormatName,
             IsAnimated: metadata.Animation is not null,
-            HasAlpha: metadata.AlphaChannelIndex >= 0);
+            HasAlpha: metadata.AlphaChannelIndex >= 0,
+            IsLosslessEncoding: IsLossless(container, metadata));
+    }
+
+    /// <summary>
+    /// Whether the pixels are stored losslessly: the colour channels are in the original space (not XYB) and the first frame is Modular.
+    /// A JPEG-reconstruction file is also non-XYB but its frame is VarDCT, so it is not lossless with respect to its pixels.
+    /// An image with a preview is conservatively reported as not lossless, since its first frame is the preview rather than the image.
+    /// </summary>
+    private static bool IsLossless(JxlContainer container, JxlImageMetadata metadata)
+    {
+        if (metadata.XybEncoded || metadata.PreviewSize is not null)
+        {
+            return false;
+        }
+
+        // The frame offset is only known once the ICC profile (if any) has been read past.
+        var codestream = container.Codestream.ToArray();
+        var headers = JxlCodestreamHeaders.Read(codestream);
+        var reader = new JxlBitReader(codestream.AsSpan(headers.FrameOffset));
+        return JxlFrameHeader.Read(ref reader, headers.Metadata, headers.Size).IsModular;
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>. For an animation, decodes the first frame (as composited onto the canvas).</summary>
