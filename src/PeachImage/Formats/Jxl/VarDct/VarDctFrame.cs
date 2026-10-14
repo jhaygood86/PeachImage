@@ -25,7 +25,7 @@ internal sealed partial class VarDctFrame : IQuantTableReader
     private const int GroupDimInBlocks = 32;
     private const byte InvalidStrategy = 0xFF;
 
-    private static readonly int[] KCoeffFreqContext =
+    internal static readonly int[] KCoeffFreqContext =
     [
         0xBAD, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
         15, 15, 16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 21, 21, 22, 22,
@@ -33,7 +33,7 @@ internal sealed partial class VarDctFrame : IQuantTableReader
         27, 27, 27, 27, 28, 28, 28, 28, 29, 29, 29, 29, 30, 30, 30, 30,
     ];
 
-    private static readonly int[] KCoeffNumNonzeroContext =
+    internal static readonly int[] KCoeffNumNonzeroContext =
     [
         0xBAD, 0, 31, 62, 62, 93, 93, 93, 93, 123, 123, 123, 123,
         152, 152, 152, 152, 152, 152, 152, 152, 180, 180, 180, 180, 180,

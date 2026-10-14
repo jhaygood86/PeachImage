@@ -110,7 +110,7 @@ internal sealed class JxlEntropyCode
     private const int MaxClusters = 256;
 
     // Brotli-derived table for the 7-bit prefix of an ANS histogram's log-count symbols: {bits, symbol}.
-    private static readonly byte[] LogCountTable =
+    internal static readonly byte[] LogCountTable =
     [
         3, 10, 7, 12, 3, 7, 4, 3, 3, 6, 3, 8, 3, 9, 4, 5,
         3, 10, 4, 4, 3, 7, 4, 1, 3, 6, 3, 8, 3, 9, 4, 2,

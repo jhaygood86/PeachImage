@@ -32,6 +32,22 @@ public sealed class JxlDecodingException : JxlFormatException
     }
 }
 
+/// <summary>Thrown when an image cannot be encoded as JPEG XL, for example because of an unsupported pixel format.</summary>
+public sealed class JxlEncodingException : JxlFormatException
+{
+    /// <summary>Initializes a new instance of <see cref="JxlEncodingException"/>.</summary>
+    public JxlEncodingException(string message)
+        : base(message)
+    {
+    }
+
+    /// <summary>Initializes a new instance of <see cref="JxlEncodingException"/> with an inner exception.</summary>
+    public JxlEncodingException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}
+
 /// <summary>
 /// Thrown when a JPEG XL file is well-formed but uses a feature this decoder does not implement (yet), as
 /// opposed to <see cref="JxlDecodingException"/>, which means the file itself is malformed. A sibling rather

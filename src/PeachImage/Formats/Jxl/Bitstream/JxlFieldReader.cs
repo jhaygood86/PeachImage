@@ -26,6 +26,30 @@ internal readonly struct U32Dist
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal uint Read(ref JxlBitReader reader) => _bits == 0 ? _value : reader.ReadBits(_bits) + _value;
+
+    /// <summary>The number of extra bits this distribution reads.</summary>
+    internal int ExtraBits => _bits;
+
+    /// <summary>
+    /// Whether <paramref name="value"/> is representable by this distribution; when it is, <paramref name="raw"/>
+    /// holds the extra-bits payload to write (zero for a direct value). The inverse of <see cref="Read"/>.
+    /// </summary>
+    internal bool TryEncode(uint value, out uint raw)
+    {
+        raw = 0;
+        if (_bits == 0)
+        {
+            return value == _value;
+        }
+
+        if (value < _value)
+        {
+            return false;
+        }
+
+        raw = value - _value;
+        return _bits >= 32 || raw < (1u << _bits);
+    }
 }
 
 /// <summary>Readers for the codestream's primitive header field types: U32, U64, Enum, F16 and name strings.</summary>
