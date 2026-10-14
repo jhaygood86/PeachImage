@@ -165,7 +165,7 @@ internal static class DctTransforms
     }
 
     // 1 / (cos(i pi / (2N)) cos(i pi / N) cos(2 i pi / N)): scales the i-th coefficient of a small DCT to the matching N-point one.
-    private static float ResampleScale(int i, int n) =>
+    internal static float ResampleScale(int i, int n) =>
         (float)(1.0 / (Math.Cos(i * Math.PI / (2.0 * n)) * Math.Cos(i * Math.PI / n) * Math.Cos(i * Math.PI / (n / 2.0))));
 
     /// <summary>

@@ -38,6 +38,13 @@ internal interface IImageCodec
     /// <summary>Whether encoding this format can preserve alpha/transparency from an alpha-bearing source.</summary>
     bool CanEncodeTransparency { get; }
 
+    /// <summary>
+    /// Whether <see cref="Encode"/> accepts 32-bit float pixel formats (<see cref="PixelFormat.GrayF32"/> and friends).
+    /// Most formats store integer samples only, so this defaults to <see langword="false"/> and <see cref="Image"/> rejects
+    /// float images for those before the codec sees them.
+    /// </summary>
+    bool CanEncodeFloatPixels => false;
+
     /// <summary>Reads image dimensions and format information from <paramref name="stream"/> without fully decoding pixel data.</summary>
     ImageInfo Identify(Stream stream);
 

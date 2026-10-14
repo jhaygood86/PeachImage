@@ -65,7 +65,7 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   `TiffUnsupportedFeatureException` rather than a silently wrong result — the goal is correctness on
   real-world scanner/export-tool output, not every TIFF extension ever specified. An embedded ICC profile
   (tag 34675) is extracted into `Image.Metadata`, same as JPEG/PNG.
-- **JPEG XL**: decode only (no encode; `CanEncode` is `false`). A from-scratch managed decoder for the ISO/IEC 18181
+- **JPEG XL**: decode and still-image encode (animation is decode-only; see the encoder paragraph below). A from-scratch managed decoder for the ISO/IEC 18181
   codestream and ISOBMFF container: lossless and lossy **Modular** (every predictor including the weighted predictor,
   RCT, palette/delta-palette and squeeze transforms, progressive passes) and **VarDCT** (every DCT size from 8x8 to
   256x256, the rectangular, IDENTITY, DCT2x2/4x4/4x8 and AFV transforms, chroma-from-luma, adaptive quantization, custom
@@ -83,6 +83,18 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   images with a non-D65 white point are rendered as plain luminance. Group decoding, the
   restoration filters, colour conversion and the splines/noise/upsampling stages run on all cores and use `Vector<T>`
   kernels (AVX2 on x64, NEON on ARM64).
+  The encoder (`JxlEncoderOptions`) writes still images from `Gray8`, `Rgb24`, `Rgba32`, their 16-bit counterparts and the float formats `GrayF32`/`RgbF32`/`RgbaF32` (floats are sRGB-encoded, may exceed 1, and are kept bit for bit when lossless) (a fully
+  opaque RGBA image is stored without alpha; alpha is straight). **Lossless** (`Lossless = true`) uses the Modular coder with a
+  reversible YCoCg colour transform, per-channel gradient prediction and rANS entropy coding, in 256x256 groups coded in
+  parallel; an ICC profile on the image is embedded and restored. **Lossy** (the default, `Quality` 0-100) uses VarDCT:
+  XYB colour, a separately quantized DC image, and context-modelled rANS coefficients, with a per-block choice (`Effort`, 1-9) among
+  8x8, 16x16, 32x32 and the 16x8/8x16/32x16/16x32 transforms, per-tile chroma-from-luma, the decoder's edge-preserving filter,
+  Gaborish smoothing compensated by an encoder-side inverse filter at high qualities, and an optional adaptive quantization
+  field (`AdaptiveQuantization`, off by default because it made files larger at the same SSIMULACRA2 score); images carrying an ICC profile are colour-managed to sRGB first, since XYB
+  assumes sRGB primaries. EXIF and XMP
+  are written to container boxes and the EXIF orientation is recorded in the codestream header. Output is checked against
+  libjxl (see below). At equal SSIMULACRA2 score the lossy files are within a few percent of libjxl's effort 7 (see
+  `LIBRARY_COMPARISON.md`).
 - Other formats are not yet implemented. The public API (`Image`, `AnimatedImage` for multi-frame formats
   like GIF) is designed to support them without breaking changes when they're added. Codec selection is
   internal — there's no format-specific type or registration step in the public API.
@@ -294,7 +306,8 @@ regenerating it after a corpus or decoder change requires `ffmpeg`/`ffprobe` on 
 `PEACHIMAGE_AVIF_FFMPEG_BASELINE=write`/`PEACHIMAGE_WEBP_FFMPEG_BASELINE=write` respectively.
 
 JPEG XL decode is additionally checked against `ffmpeg` built with `libjxl` (the reference implementation) as a live
-oracle: the tests encode synthetic images with libjxl (lossless and lossy, every effort level, 8/16-bit and float input,
+oracle, and so is JPEG XL encode (libjxl must decode every file the encoder writes: lossless pixel for pixel, lossy to within
+rounding of this decoder). For decode, the tests encode synthetic images with libjxl (lossless and lossy, every effort level, 8/16-bit and float input,
 alpha, HDR transfer functions and wide-gamut primaries) and require the decoder to match libjxl's own decode. They skip when
 `ffmpeg` is not on `PATH`.
 

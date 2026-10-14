@@ -373,7 +373,7 @@ rather than a fixed per-byte reshape.
 
 ## JPEG XL
 
-Decode-only. **No SkiaSharp baseline**: SkiaSharp has no JPEG XL codec (it is an open feature request), so the table reports
+**No SkiaSharp baseline**: SkiaSharp has no JPEG XL codec (it is an open feature request), so the table reports
 PeachImage's own numbers across the decoder's main paths. The inputs are libjxl conformance files (a large lossy VarDCT image
 with a DC frame, patches, the edge-preserving filter and ICC output; a lossless Modular image with patches; a lossy image with
 synthesized noise; a lossless image whose splines dominate). Collected with the `--affinity 15` methodology above (four logical
@@ -392,6 +392,47 @@ cores); decode is parallel across groups and rows, so more cores scale it furthe
 dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*JxlDecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
 ```
 
+### Encode
+
+Photographic 1920x1080 sources, lossless Modular and lossy VarDCT at `Quality` 75 and the default `Effort` 5, same `--affinity 15` methodology.
+
+| Scenario | PeachImage | Allocated |
+|---|---:|---:|
+| Lossless RGB | 66.9 ms | 111.0 MB |
+| Lossless RGBA | 81.3 ms | 121.0 MB |
+| Lossless gray | 26.4 ms | 41.2 MB |
+| Lossy RGB (q75, effort 5) | 235.6 ms | 151.0 MB |
+| Lossy gray (q75, effort 5) | 233.2 ms | 134.6 MB |
+
+```bash
+dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*JxlEncodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
+```
+
+### Encode (JPEG XL lossy size)
+
+File size in bytes needed to reach a given SSIMULACRA2 score (higher is better quality; about 70 is "good", 80 "high", 88 close to
+visually lossless), PeachImage at its default effort against libjxl 0.x through `ffmpeg -c:v libjxl -effort 7`. Each cell is
+PeachImage / libjxl, interpolated along a sweep of `Quality` values and libjxl distances; scores were computed with the `ssimulacra2`
+Python package on the decoded 8-bit RGB output. Images are libjxl conformance photographs.
+
+| Image | Score 70 | Score 80 | Score 88 |
+|---|---:|---:|---:|
+| bicycles (1024x631) | 70,540 / 72,514 | 107,995 / 101,526 | 170,658 / 148,057 |
+| sunset_logo | 24,476 / 20,526 | 36,250 / 31,348 | 62,877 / 56,105 |
+| noise | 106,188 / 122,303 | 138,299 / 154,573 | 191,161 / 201,247 |
+| opsin_inverse | 83,915 / 95,675 | 121,251 / 135,382 | 179,922 / 208,674 |
+| lz77_flower | 33,734 / 36,834 | 57,489 / 54,216 | not reached |
+| Geometric mean of the ratio | 0.96 | 1.01 | 1.01 |
+
+### Encode (JPEG XL lossless size)
+
+Output size of the 1920x1080 lossless encodes against libjxl (`ffmpeg -c:v libjxl -distance 0`) at efforts 1, 3 and 7.
+
+| Source | PeachImage | libjxl effort 1 | libjxl effort 3 | libjxl effort 7 |
+|---|---:|---:|---:|---:|
+| RGB photo (24bpp PNG source 3,494,915 B) | 2,658,373 B | 2,812,020 B | 2,600,027 B | 2,465,977 B |
+| Gray photo (8bpp PNG source 1,230,130 B) | 1,199,781 B | 1,240,850 B | 1,178,235 B | 1,175,269 B |
+
 ## Summary
 
 | Format | Decode | Encode |
@@ -403,7 +444,7 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 | WebP | 0.23×–2.14× (animated: **0.23×**, static: 1.15×–2.14×) | 0.99×–1.44× lossless (0.15× small-image outlier), 0.31× lossy |
 | AVIF | ~1.96× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented; lossy fixed 8x8 blocks, lossless has a real partition-tree RDO search up to 64x64 (see Encode (lossless size) above); throughput not yet measured here |
 | TIFF | ~0.15×–0.35× vs. `ffmpeg` (no SkiaSharp baseline available; ratios dominated by `ffmpeg`'s process-spawn overhead, not decoder throughput) | not implemented (decode-only) |
-| JPEG XL | decode: 291.1 ms for an 11 MP lossy image (no SkiaSharp baseline available) | not implemented (decode-only) |
+| JPEG XL | decode: 291.1 ms for an 11 MP lossy image (no SkiaSharp baseline available) | 66.9 ms lossless / 235.6 ms lossy (q75, effort 5) for 1920x1080 RGB (no SkiaSharp baseline available); lossless size within 2% of libjxl effort 3; lossy files within a few percent of libjxl effort 7 at equal SSIMULACRA2 |
 | Resize | — | Downscale: 1.20×–2.97× (NearestNeighbor closest, Bilinear/cubic slower); Upscale: 1.39× (NearestNeighbor) or **0.24×–0.75×** (Bilinear/cubic family, faster than SkiaSharp) |
 
 BMP is fully within target and often faster. PNG is within target on every scenario and beats

@@ -11,8 +11,8 @@ namespace PeachImage.Formats.Jxl.Headers;
 /// </summary>
 internal static class JxlIccDecoder
 {
-    private const int HeaderSize = 128;
-    private const int NumContexts = 41;
+    internal const int HeaderSize = 128;
+    internal const int NumContexts = 41;
     private const ulong MaxEncodedSize = 268_435_456;
     private const int OutputLimit = 1 << 28;
 
@@ -42,7 +42,7 @@ internal static class JxlIccDecoder
         Fourcc("para"), Fourcc("curv"), Fourcc("sf32"), Fourcc("gbd "),
     ];
 
-    private static readonly byte[] InitialHeaderPrediction =
+    internal static readonly byte[] InitialHeaderPrediction =
     [
         0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, (byte)'m', (byte)'n', (byte)'t', (byte)'r',
         (byte)'R', (byte)'G', (byte)'B', (byte)' ', (byte)'X', (byte)'Y', (byte)'Z', (byte)' ', 0, 0, 0, 0, 0, 0, 0, 0,
@@ -104,7 +104,7 @@ internal static class JxlIccDecoder
         return Unpredict(encoded.AsSpan(0, size));
     }
 
-    private static int Context(int i, byte b1, byte b2) => i <= 128 ? 0 : 1 + ByteKind1(b1) + (ByteKind2(b2) * 8);
+    internal static int Context(int i, byte b1, byte b2) => i <= 128 ? 0 : 1 + ByteKind1(b1) + (ByteKind2(b2) * 8);
 
     private static int ByteKind1(byte b)
     {
@@ -447,7 +447,7 @@ internal static class JxlIccDecoder
         return result.ToArray();
     }
 
-    private static void PredictHeader(ReadOnlySpan<byte> icc, byte[] header, int pos)
+    internal static void PredictHeader(ReadOnlySpan<byte> icc, byte[] header, int pos)
     {
         int size = icc.Length;
         if (pos == 8 && size >= 8)

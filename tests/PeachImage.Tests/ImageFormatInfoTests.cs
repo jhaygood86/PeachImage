@@ -10,7 +10,7 @@ public class ImageFormatInfoTests
     [InlineData("webp", new[] { "webp" }, new[] { "image/webp" }, true, true, true, true)]
     [InlineData("avif", new[] { "avif" }, new[] { "image/avif" }, true, true, true, false)]
     [InlineData("tiff", new[] { "tiff", "tif" }, new[] { "image/tiff" }, true, false, true, false)]
-    [InlineData("jxl", new[] { "jxl" }, new[] { "image/jxl" }, true, false, true, false)]
+    [InlineData("jxl", new[] { "jxl" }, new[] { "image/jxl" }, true, true, true, true)]
     public void GetFormatInfo_ReturnsExpectedMetadata(
         string formatName,
         string[] fileExtensions,

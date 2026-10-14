@@ -576,7 +576,7 @@ public sealed class Image : IDisposable
             ?? throw new UnknownImageFormatException($"No built-in codec can encode files with extension '.{extension}'.");
 
         using var fileStream = File.Create(path);
-        ThrowIfFloatPixels();
+        ThrowIfFloatPixels(codec);
         codec.Encode(this, fileStream, options);
     }
 
@@ -589,7 +589,7 @@ public sealed class Image : IDisposable
         var codec = FindCodecByFormatName(formatName)
             ?? throw new UnknownImageFormatException($"No built-in codec can encode format '{formatName}'.", formatName);
 
-        ThrowIfFloatPixels();
+        ThrowIfFloatPixels(codec);
         codec.Encode(this, stream, options);
     }
 
@@ -607,7 +607,7 @@ public sealed class Image : IDisposable
             ?? throw new UnknownImageFormatException($"No built-in codec can encode files with extension '.{extension}'.");
 
         using var fileStream = File.Create(path);
-        ThrowIfFloatPixels();
+        ThrowIfFloatPixels(codec);
         using var buffered = new MemoryStream();
         codec.Encode(this, buffered, options);
         buffered.Position = 0;
@@ -627,7 +627,7 @@ public sealed class Image : IDisposable
         var codec = FindCodecByFormatName(formatName)
             ?? throw new UnknownImageFormatException($"No built-in codec can encode format '{formatName}'.", formatName);
 
-        ThrowIfFloatPixels();
+        ThrowIfFloatPixels(codec);
         using var buffered = new MemoryStream();
         codec.Encode(this, buffered, options);
         buffered.Position = 0;
@@ -643,12 +643,12 @@ public sealed class Image : IDisposable
     /// </summary>
     internal void Invalidate() => _invalidated = true;
 
-    // No built-in encoder accepts 32-bit float samples; fail loudly rather than let one misread them as bytes.
-    private void ThrowIfFloatPixels()
+    // Most encoders take integer samples only; fail loudly rather than let one misread float samples as bytes.
+    private void ThrowIfFloatPixels(IImageCodec codec)
     {
-        if (PixelFormat.IsFloat())
+        if (PixelFormat.IsFloat() && !codec.CanEncodeFloatPixels)
         {
-            throw new NotSupportedException($"No built-in encoder supports {PixelFormat} pixels. Convert the image to an integer format first (Image.ConvertTo) to encode it.");
+            throw new NotSupportedException($"The {codec.FormatName} encoder does not support {PixelFormat} pixels. Convert the image to an integer format first (Image.ConvertTo) to encode it.");
         }
     }
 

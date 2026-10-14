@@ -4,8 +4,9 @@ namespace PeachImage.Formats.Jxl;
 
 /// <summary>
 /// The JPEG XL codec. Format identity and header-sniffing live here, the single <see cref="IImageCodec"/>
-/// surface <see cref="Image"/> dispatches through; decode is a separate internal implementation detail
-/// (<see cref="JxlDecoder"/>). Decode-only — see <see cref="Encode"/>.
+/// surface <see cref="Image"/> dispatches through; decode (<see cref="JxlDecoder"/>) and encode
+/// (<see cref="JxlEncoder"/>) are separate internal implementation details.
+/// Still images only: animation is decode-only.
 /// </summary>
 internal sealed class JxlCodec : IAnimatedImageCodec
 {
@@ -35,13 +36,16 @@ internal sealed class JxlCodec : IAnimatedImageCodec
     public bool CanDecode => true;
 
     /// <inheritdoc/>
-    public bool CanEncode => false;
+    public bool CanEncode => true;
+
+    /// <inheritdoc/>
+    public bool CanEncodeFloatPixels => true;
 
     /// <inheritdoc/>
     public bool CanDecodeTransparency => true;
 
     /// <inheritdoc/>
-    public bool CanEncodeTransparency => false;
+    public bool CanEncodeTransparency => true;
 
     /// <inheritdoc/>
     public ImageInfo Identify(Stream stream) => JxlDecoder.Identify(stream);
@@ -50,8 +54,7 @@ internal sealed class JxlCodec : IAnimatedImageCodec
     public Image Decode(Stream stream, DecoderOptions? options = null) => JxlDecoder.Decode(stream, options);
 
     /// <inheritdoc/>
-    public void Encode(Image image, Stream stream, EncoderOptions? options = null) =>
-        throw new NotSupportedException("JPEG XL encoding is not supported; only decoding.");
+    public void Encode(Image image, Stream stream, EncoderOptions? options = null) => JxlEncoder.Encode(image, stream, options);
 
     /// <inheritdoc/>
     public bool CanEncodeAnimation => false;
@@ -61,5 +64,5 @@ internal sealed class JxlCodec : IAnimatedImageCodec
 
     /// <inheritdoc/>
     public void EncodeAnimation(AnimatedImage image, Stream stream, EncoderOptions? options = null) =>
-        throw new NotSupportedException("JPEG XL encoding is not supported; only decoding.");
+        throw new NotSupportedException("JPEG XL animation encoding is not supported.");
 }
