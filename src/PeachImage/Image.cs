@@ -177,7 +177,7 @@ public sealed class Image : IDisposable
         new(width, height, pixelFormat, buffer, owned);
 
     /// <summary>
-    /// Creates an independent copy of this image's pixel data and metadata. Use this to retain a frame
+    /// Creates an independent copy of this image's pixel data, metadata and <see cref="HasAlpha"/>/<see cref="IsAnimated"/> flags. Use this to retain a frame
     /// pulled from <see cref="AnimatedImage.Frames"/> beyond the point where it would otherwise be
     /// invalidated by advancing to the next frame.
     /// </summary>
@@ -192,6 +192,8 @@ public sealed class Image : IDisposable
             copy.Metadata.Profiles.Add(profile);
         }
 
+        copy.HasAlpha = HasAlpha;
+        copy.IsAnimated = IsAnimated;
         return copy;
     }
 
