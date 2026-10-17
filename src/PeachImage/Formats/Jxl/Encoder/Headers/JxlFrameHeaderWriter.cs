@@ -11,6 +11,8 @@ namespace PeachImage.Formats.Jxl.Encoder.Headers;
 /// <param name="BQmScale">VarDCT with XYB only: the B-channel quantization-matrix scale, 0 to 7.</param>
 /// <param name="Gaborish">Whether the decoder applies the Gabor-like smoothing filter.</param>
 /// <param name="EpfIterations">The number of edge-preserving-filter passes (0 to 3).</param>
+/// <param name="ChromaSubsampling">VarDCT without XYB only: the per-channel (Cb, Y, Cr) JPEG sampling modes of a frame that holds a YCbCr image, or <see langword="null"/> for a frame without the colour transform.</param>
+/// <param name="Flags">The frame flags.</param>
 internal readonly record struct JxlFrameHeaderSpec(
     bool Modular,
     bool XybEncoded,
@@ -18,7 +20,9 @@ internal readonly record struct JxlFrameHeaderSpec(
     int XQmScale = 2,
     int BQmScale = 2,
     bool Gaborish = false,
-    int EpfIterations = 0);
+    int EpfIterations = 0,
+    int[]? ChromaSubsampling = null,
+    ulong Flags = 0);
 
 /// <summary>Writes the header of the one (last, regular, full-size, replacing) frame an encoded still image consists of.</summary>
 internal static class JxlFrameHeaderWriter
@@ -36,10 +40,17 @@ internal static class JxlFrameHeaderWriter
         writer.WriteBool(false); // not all_default
         writer.WriteU32(0, U32Dist.Val(0), U32Dist.Val(1), U32Dist.Val(2), U32Dist.Val(3)); // regular frame
         writer.WriteBool(spec.Modular);
-        writer.WriteU64(0); // flags: no noise, patches, splines or DC frame
+        writer.WriteU64(spec.Flags);
         if (!spec.XybEncoded)
         {
-            writer.WriteBool(false); // do_YCbCr
+            writer.WriteBool(spec.ChromaSubsampling is not null); // do_YCbCr
+            if (spec.ChromaSubsampling is { } modes)
+            {
+                foreach (int mode in modes)
+                {
+                    writer.WriteBits((uint)mode, 2);
+                }
+            }
         }
 
         writer.WriteBits(0, 2); // upsampling 1

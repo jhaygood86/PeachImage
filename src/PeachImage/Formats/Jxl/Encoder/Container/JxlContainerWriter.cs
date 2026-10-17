@@ -18,12 +18,15 @@ internal static class JxlContainerWriter
         (byte)'j', (byte)'x', (byte)'l', (byte)' ',
     ];
 
-    /// <summary>Writes <paramref name="codestream"/>, boxed together with <paramref name="exif"/> (TIFF header first) and <paramref name="xmp"/> when either is present.</summary>
-    public static void Write(Stream stream, ReadOnlySpan<byte> codestream, byte[]? exif, byte[]? xmp)
+    /// <summary>
+    /// Writes <paramref name="codestream"/>, boxed together with <paramref name="exif"/> (TIFF header first), <paramref name="xmp"/> and
+    /// the JPEG bitstream reconstruction data <paramref name="jbrd"/> when any of them is present.
+    /// </summary>
+    public static void Write(Stream stream, ReadOnlySpan<byte> codestream, byte[]? exif, byte[]? xmp, byte[]? jbrd = null)
     {
         bool hasExif = exif is { Length: > 0 };
         bool hasXmp = xmp is { Length: > 0 };
-        if (!hasExif && !hasXmp)
+        if (!hasExif && !hasXmp && jbrd is null)
         {
             stream.Write(codestream);
             return;
@@ -31,6 +34,12 @@ internal static class JxlContainerWriter
 
         stream.Write(SignatureBox);
         stream.Write(FileTypeBox);
+        if (jbrd is not null)
+        {
+            WriteBoxHeader(stream, "jbrd", jbrd.Length);
+            stream.Write(jbrd);
+        }
+
         if (hasExif)
         {
             // The Exif box payload is a 4-byte offset to the TIFF header (0: it follows immediately).

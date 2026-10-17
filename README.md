@@ -72,7 +72,7 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   dequantization tables, Gaborish and the edge-preserving filter), patches, splines, synthesized noise, 2x/4x/8x upsampling,
   DC frames, extra channels (alpha, spot colours rendered like the reference decoder, black/CMYK), premultiplied alpha
   (returned straight), and **JPEG recompressions** (YCbCr with any chroma subsampling, grayscale or RGB). Files made by losslessly recompressing a JPEG
-  can also be turned back into that JPEG, byte for byte, with `JxlJpegReconstruction` (see below). Multi-frame images use full frame
+  can also be turned back into that JPEG, byte for byte, with `JxlJpegReconstruction`, and baseline JPEGs can be recompressed into such files with `JxlJpegRecompression` (see below). Multi-frame images use full frame
   blending (cropped frames, every blend mode, reference frames) and decode through `AnimatedImage` as composited RGBA
   frames. XYB images are rendered in the file's own colour space: sRGB, any enumerated or custom primaries and white point,
   linear, gamma, BT.709, DCI, PQ and HLG, or an embedded RGB/gray ICC profile (CMYK images are returned as `Cmyk32` with the
@@ -255,6 +255,28 @@ if (JxlJpegReconstruction.TryReconstructJpeg(stream, out byte[]? jpeg))
 
 `HasJpegReconstructionData` tells whether a file qualifies without rebuilding it, and `ReconstructJpeg` throws
 `JxlUnsupportedFeatureException` for files that were not made from a JPEG (those decode through `Image.Load` as usual).
+
+### Recompressing a JPEG into JPEG XL
+
+`JxlJpegRecompression` goes the other way, as `cjxl` does for JPEG input: it re-codes a JPEG's quantized DCT coefficients with
+JPEG XL's entropy coder, without decoding any pixels and without any loss, so the JPEG file can later be recovered unchanged. The
+JPEG XL file is typically a fifth to a third smaller than the JPEG, and it also decodes like any JPEG XL image, to the pixels the
+JPEG decodes to:
+
+```csharp
+using var input = File.OpenRead("photo.jpg");
+if (JxlJpegRecompression.TryRecompressJpeg(input, out byte[]? jxl))
+{
+    File.WriteAllBytes("photo.jxl", jxl);
+}
+```
+
+Baseline (sequential Huffman, 8-bit) JPEGs with one component or with Y, Cb and Cr components are supported, with 4:4:4, 4:2:2,
+4:4:0 or 4:2:0 sampling, restart intervals, and any metadata (ICC profile, Exif, XMP, comments, other markers, even stray bytes
+between markers or after the image). Every result is reconstructed once before it is returned and compared with the input, so a
+JPEG that cannot come back byte for byte is declined (`TryRecompressJpeg` returns `false`, `RecompressJpeg` throws
+`JxlUnsupportedFeatureException`) rather than silently changed. Progressive, arithmetic-coded, 12-bit, RGB and CMYK JPEGs are not
+supported yet; decode and encode those with `Image.Load` and `Image.Save` instead.
 
 ### Converting pixel formats
 

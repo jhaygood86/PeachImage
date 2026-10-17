@@ -84,6 +84,18 @@ internal sealed class BlockContextMap
         NumDcContexts = numDcContexts;
     }
 
+    /// <summary>Builds a map with the given thresholds (X, Y and B DC thresholds, then quantization-field thresholds) and context assignment, laid out as <see cref="Context"/> indexes it.</summary>
+    public static BlockContextMap Create(int[][] dcThresholds, uint[] qfThresholds, byte[] contextMap)
+    {
+        int numDcContexts = 1;
+        foreach (int[] thresholds in dcThresholds)
+        {
+            numDcContexts *= thresholds.Length + 1;
+        }
+
+        return new BlockContextMap(dcThresholds, qfThresholds, contextMap, contextMap.Max() + 1, numDcContexts);
+    }
+
     public int[][] DcThresholds { get; }
 
     public uint[] QfThresholds { get; }

@@ -341,7 +341,7 @@ internal static class JxlVarDctFrameEncoder
         return new JxlMaTreeEncoder(JxlMaTreeNode.Inner(1, 0, groupSide, extraGlobal));
     }
 
-    private static (int X0, int Y0, int Width, int Height) DcGroupRect(JxlFrameDimensions dims, int group)
+    internal static (int X0, int Y0, int Width, int Height) DcGroupRect(JxlFrameDimensions dims, int group)
     {
         int gx = group % dims.XSizeDcGroups;
         int gy = group / dims.XSizeDcGroups;
@@ -350,7 +350,7 @@ internal static class JxlVarDctFrameEncoder
         return (x0, y0, Math.Min(dims.GroupDimension, dims.XSizeBlocks - x0), Math.Min(dims.GroupDimension, dims.YSizeBlocks - y0));
     }
 
-    private static int[] ExtractRect(int[] plane, int stride, int x0, int y0, int w, int h)
+    internal static int[] ExtractRect(int[] plane, int stride, int x0, int y0, int w, int h)
     {
         int[] rect = new int[w * h];
         for (int y = 0; y < h; y++)

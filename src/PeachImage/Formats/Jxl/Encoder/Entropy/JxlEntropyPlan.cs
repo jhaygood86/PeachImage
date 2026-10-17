@@ -505,7 +505,7 @@ internal sealed class JxlEntropyPlan
         }
     }
 
-    private static void WriteContextMap(JxlBitWriter writer, byte[] map, int numClusters)
+    internal static void WriteContextMap(JxlBitWriter writer, byte[] map, int numClusters)
     {
         if (numClusters == 1)
         {
