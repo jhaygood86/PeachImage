@@ -29,6 +29,26 @@ internal static class BilevelExpander
         }
     }
 
+    /// <summary>Expands one packed row into 0/1 bytes (a set bit becomes 1).</summary>
+    public static void ExpandRowToBits(ReadOnlySpan<byte> packed, Span<byte> destination, int width)
+    {
+        int fullBytes = width >> 3;
+        for (int i = 0; i < fullBytes; i++)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(destination.Slice(i << 3, 8), Table[packed[i]] & 0x0101010101010101UL);
+        }
+
+        int remainder = width & 7;
+        if (remainder != 0)
+        {
+            ulong last = Table[packed[fullBytes]];
+            for (int p = 0; p < remainder; p++)
+            {
+                destination[(fullBytes << 3) + p] = (byte)((last >> (p << 3)) & 1);
+            }
+        }
+    }
+
     private static ulong[] BuildTable()
     {
         var table = new ulong[256];

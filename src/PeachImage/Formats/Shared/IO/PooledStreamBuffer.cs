@@ -22,6 +22,9 @@ internal struct PooledStreamBuffer : IDisposable
     /// <summary>The bytes read.</summary>
     public readonly ReadOnlySpan<byte> Span => _array.AsSpan(0, Length);
 
+    /// <summary>The bytes read, as memory (valid until <see cref="Dispose"/>).</summary>
+    public readonly ReadOnlyMemory<byte> ToMemory() => _array.AsMemory(0, Length);
+
     /// <summary>Reads <paramref name="stream"/> to its end. <paramref name="tooLarge"/> is set, and an empty buffer returned, when it exceeds <paramref name="maxLength"/>.</summary>
     public static PooledStreamBuffer Read(Stream stream, long maxLength, out bool tooLarge)
     {

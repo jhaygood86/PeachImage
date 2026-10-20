@@ -2,6 +2,7 @@ using PeachImage.Formats.Avif;
 using PeachImage.Formats.Ccitt;
 using PeachImage.Formats.Bmp;
 using PeachImage.Formats.Gif;
+using PeachImage.Formats.Jbig2;
 using PeachImage.Formats.Jpeg;
 using PeachImage.Formats.Jxl;
 using PeachImage.Formats.Png;
@@ -48,6 +49,7 @@ public sealed class Image : IDisposable
         TiffCodec.Instance,
         JxlCodec.Instance,
         CcittFaxCodec.Instance,
+        Jbig2Codec.Instance,
     ];
 
     private static readonly int MaxHeaderSize = Codecs.Max(codec => codec.HeaderSize);
