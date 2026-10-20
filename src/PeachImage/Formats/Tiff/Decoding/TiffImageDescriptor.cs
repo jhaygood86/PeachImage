@@ -17,8 +17,14 @@ internal sealed record TiffImageDescriptor
 
     public required int SamplesPerPixel { get; init; }
 
-    /// <summary>Raw TIFF Compression tag value: 1 (none), 5 (LZW), or 32773 (PackBits) — the only values that pass validation.</summary>
+    /// <summary>Raw TIFF Compression tag value: 1 (none), 2 (CCITT RLE), 3 (T.4), 4 (T.6), 5 (LZW), or 32773 (PackBits) — the only values that pass validation.</summary>
     public required int Compression { get; init; }
+
+    /// <summary>Raw TIFF FillOrder: 1 (MSB first) or 2 (LSB first, accepted for CCITT compressions only).</summary>
+    public required int FillOrder { get; init; }
+
+    /// <summary>Raw T4Options (Compression 3) or T6Options (Compression 4); zero otherwise.</summary>
+    public required int FaxOptions { get; init; }
 
     /// <summary>Raw TIFF PhotometricInterpretation tag value: 0/1 (grayscale), 2 (RGB), 3 (palette), or 5 (CMYK/Separated) — the only values that pass validation.</summary>
     public required int Photometric { get; init; }

@@ -34,7 +34,7 @@ public sealed class TiffDecodingException : TiffFormatException
 
 /// <summary>
 /// Thrown when a TIFF file uses a feature deliberately out of scope for this decoder (tiled organization,
-/// planar/separate PlanarConfiguration, compression other than none/LZW/PackBits, BigTIFF, floating-point or
+/// planar/separate PlanarConfiguration, compression other than none/CCITT/LZW/PackBits, BigTIFF, floating-point or
 /// signed SampleFormat, unsupported bit depths, or photometric interpretations outside
 /// WhiteIsZero/BlackIsZero/RGB/Palette/Separated) rather than one that is malformed. Kept as a sibling of
 /// <see cref="TiffDecodingException"/> (not a subclass) so corpus/differential tests can distinguish

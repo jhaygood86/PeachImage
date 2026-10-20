@@ -48,6 +48,9 @@ internal interface IImageCodec
     /// <summary>Reads image dimensions and format information from <paramref name="stream"/> without fully decoding pixel data.</summary>
     ImageInfo Identify(Stream stream);
 
+    /// <summary>Like <see cref="Identify(Stream)"/>, for formats whose stream needs decode options (dimensions, coding parameters) to be interpreted. Defaults to ignoring them.</summary>
+    ImageInfo Identify(Stream stream, DecoderOptions? options) => Identify(stream);
+
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>
     Image Decode(Stream stream, DecoderOptions? options = null);
 

@@ -11,6 +11,7 @@ public class ImageFormatInfoTests
     [InlineData("avif", new[] { "avif" }, new[] { "image/avif" }, true, true, true, false)]
     [InlineData("tiff", new[] { "tiff", "tif" }, new[] { "image/tiff" }, true, false, true, false)]
     [InlineData("jxl", new[] { "jxl" }, new[] { "image/jxl" }, true, true, true, true)]
+    [InlineData("ccitt", new string[0], new[] { "image/g3fax" }, true, false, false, false)]
     public void GetFormatInfo_ReturnsExpectedMetadata(
         string formatName,
         string[] fileExtensions,
@@ -57,11 +58,11 @@ public class ImageFormatInfoTests
     }
 
     [Fact]
-    public void SupportedFormats_ContainsExactlyTheEightBuiltInFormats()
+    public void SupportedFormats_ContainsExactlyTheNineBuiltInFormats()
     {
-        Assert.Equal(8, Image.SupportedFormats.Count);
+        Assert.Equal(9, Image.SupportedFormats.Count);
         Assert.Equal(
-            ["jpeg", "bmp", "png", "gif", "webp", "avif", "tiff", "jxl"],
+            ["jpeg", "bmp", "png", "gif", "webp", "avif", "tiff", "jxl", "ccitt"],
             Image.SupportedFormats.Select(info => info.FormatName));
     }
 

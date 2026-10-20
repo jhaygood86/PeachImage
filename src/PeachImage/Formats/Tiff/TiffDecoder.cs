@@ -3,7 +3,7 @@ using PeachImage.Formats.Tiff.Decoding;
 
 namespace PeachImage.Formats.Tiff;
 
-/// <summary>Decodes baseline TIFF images: uncompressed, LZW-, and PackBits-compressed data; 1/2/4/8/16-bit depths; grayscale, RGB (with optional alpha), palette, and CMYK color. Used internally by <see cref="TiffCodec"/>.</summary>
+/// <summary>Decodes baseline TIFF images: uncompressed, CCITT (Group 3 and 4), LZW-, and PackBits-compressed data; 1/2/4/8/16-bit depths; grayscale, RGB (with optional alpha), palette, and CMYK color. Used internally by <see cref="TiffCodec"/>.</summary>
 internal static class TiffDecoder
 {
     private const string FormatName = "tiff";
@@ -19,10 +19,10 @@ internal static class TiffDecoder
         var ifd = TiffIfdReader.Read(reader, header.FirstIfdOffset);
         var descriptor = TiffValidation.Validate(ifd);
 
-        // This decoder's entire supported Compression set (1=none, 5=LZW, 32773=PackBits, enforced by
+        // This decoder's entire supported Compression set (1=none, 2/3/4=CCITT, 5=LZW, 32773=PackBits, enforced by
         // TiffValidation.Validate above) is lossless by construction — deriving from the tag rather than
         // hardcoding true keeps this correct if lossy (JPEG-in-TIFF) compression is ever supported later.
-        bool isLosslessEncoding = descriptor.Compression is 1 or 5 or 32773;
+        bool isLosslessEncoding = descriptor.Compression is 1 or 2 or 3 or 4 or 5 or 32773;
 
         return new ImageInfo(descriptor.Width, descriptor.Height, descriptor.PixelFormat, FormatName, HasAlpha: descriptor.PixelFormat.HasAlpha(), IsLosslessEncoding: isLosslessEncoding, Orientation: ReadOrientation(ifd));
     }

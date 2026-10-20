@@ -59,4 +59,11 @@
     </EmbeddedResource>
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- CCITT-compressed TIFFs written by libtiff (via Pillow), with PNG references of the source bitmaps. -->
+    <EmbeddedResource Include="Formats/Tiff/Assets/Ccitt/*">
+      <LogicalName>PeachImage.Tests.Formats.Tiff.Assets.Ccitt.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
 </Project>
