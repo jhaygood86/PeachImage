@@ -22,7 +22,7 @@ generation entirely) and `--affinity <mask>` to pin to a couple of P-core thread
 pinning note below. The numbers in this document were collected with:
 
 ```bash
-dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*JpegDecodeBenchmarks*" "*JpegEncodeBenchmarks*" "*BmpDecodeBenchmarks*" "*BmpEncodeBenchmarks*" "*PngDecodeBenchmarks*" "*PngEncodeBenchmarks*" "*WebpDecodeBenchmarks*" "*WebpEncodeBenchmarks*" "*AvifDecodeBenchmarks*" "*GifDecodeBenchmarks*" "*TiffDecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
+dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*JpegDecodeBenchmarks*" "*JpegEncodeBenchmarks*" "*BmpDecodeBenchmarks*" "*BmpEncodeBenchmarks*" "*PngDecodeBenchmarks*" "*PngEncodeBenchmarks*" "*WebpDecodeBenchmarks*" "*WebpEncodeBenchmarks*" "*AvifDecodeBenchmarks*" "*GifDecodeBenchmarks*" "*TiffDecodeBenchmarks*" "*Jpeg2000DecodeBenchmarks*" "*Jbig2DecodeBenchmarks*" "*CcittDecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
 ```
 
 The GIF section and the WebP/GIF "Animated" rows were collected separately (same methodology, same
@@ -349,7 +349,7 @@ with the deterministic 128×128 multi-octave fractal-noise fixture in `LosslessS
 
 ## TIFF
 
-Decode-only (uncompressed/LZW/PackBits, 1/2/4/8/16-bit, grayscale/RGB/palette/CMYK). **No SkiaSharp
+Decode-only (uncompressed/LZW/PackBits/CCITT, 1/2/4/8/16-bit, grayscale/RGB/palette/CMYK). **No SkiaSharp
 baseline**: confirmed via `SKEncodedImageFormat`/`SkCodec` — SkiaSharp has no TIFF codec at all, not just an
 unsupported feature within one. As with AVIF above, the table reports `ffmpeg`'s (`libavcodec/tiff.c`)
 process-spawn-inclusive time as context only, not a directly comparable BenchmarkDotNet row.
@@ -433,6 +433,58 @@ Output size of the 1920x1080 lossless encodes against libjxl (`ffmpeg -c:v libjx
 | RGB photo (24bpp PNG source 3,494,915 B) | 2,658,373 B | 2,812,020 B | 2,600,027 B | 2,465,977 B |
 | Gray photo (8bpp PNG source 1,230,130 B) | 1,199,781 B | 1,240,850 B | 1,178,235 B | 1,175,269 B |
 
+## JPEG 2000
+
+**No SkiaSharp baseline**: SkiaSharp has no JPEG 2000 codec, so the table reports PeachImage's own numbers. Two 1280x960 RGB files
+written by OpenJPEG: lossless (reversible 5/3 wavelet with the reversible colour transform, 64x64 code-blocks, five decomposition
+levels) and lossy (irreversible 9/7, 12:1). Collected with the `--affinity 15` methodology above (four logical cores); code-blocks,
+the wavelet transform and the colour conversion run on all cores, so more cores scale it further.
+
+### Decode
+
+| Scenario | PeachImage | Allocated |
+|---|---:|---:|
+| Lossless 1280x960 | 90.6 ms | 4.8 MB |
+| Lossless 1280x960, half size (`ReduceResolutionLevels = 1`) | 27.5 ms | 1.6 MB |
+| Lossy 1280x960 | 43.0 ms | 4.6 MB |
+
+```bash
+dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*Jpeg2000DecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
+```
+
+## JBIG2
+
+**No SkiaSharp baseline**: SkiaSharp has no JBIG2 codec. An 850x1100 page-like bilevel bitmap stored as one generic region, either
+arithmetic-coded (template 0 with typical prediction) or MMR-coded.
+
+### Decode
+
+| Scenario | PeachImage | Allocated |
+|---|---:|---:|
+| Arithmetic generic region 850x1100 | 6.41 ms | 2.8 MB |
+| MMR generic region 850x1100 | 3.16 ms | 2.9 MB |
+
+```bash
+dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*Jbig2DecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
+```
+
+## CCITT fax
+
+**No SkiaSharp baseline**: SkiaSharp has no TIFF or fax codec. A 1700x2200 page-like bilevel image coded as Group 4 and Group 3 TIFF
+strips, and the bare Group 4 data decoded through `CcittFaxDecoderOptions` the way a PDF `CCITTFaxDecode` stream would be.
+
+### Decode
+
+| Scenario | PeachImage | Allocated |
+|---|---:|---:|
+| Group 4 TIFF 1700x2200 | 20.9 ms | 5.4 MB |
+| Group 3 TIFF 1700x2200 | 15.3 ms | 5.4 MB |
+| Raw Group 4 stream 1700x2200 | 11.5 ms | 4.5 MB |
+
+```bash
+dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*CcittDecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
+```
+
 ## Summary
 
 | Format | Decode | Encode |
@@ -444,6 +496,9 @@ Output size of the 1920x1080 lossless encodes against libjxl (`ffmpeg -c:v libjx
 | WebP | 0.23×–2.14× (animated: **0.23×**, static: 1.15×–2.14×) | 0.99×–1.44× lossless (0.15× small-image outlier), 0.31× lossy |
 | AVIF | ~1.96× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented; lossy fixed 8x8 blocks, lossless has a real partition-tree RDO search up to 64x64 (see Encode (lossless size) above); throughput not yet measured here |
 | TIFF | ~0.15×–0.35× vs. `ffmpeg` (no SkiaSharp baseline available; ratios dominated by `ffmpeg`'s process-spawn overhead, not decoder throughput) | not implemented (decode-only) |
+| JPEG 2000 | decode: 90.6 ms lossless / 43.0 ms lossy for 1280x960 RGB (no SkiaSharp baseline available) | not implemented (decode-only) |
+| JBIG2 | decode: 6.4 ms arithmetic / 3.2 ms MMR for an 850x1100 page (no SkiaSharp baseline available) | not implemented (decode-only) |
+| CCITT fax | decode: 20.9 ms Group 4 TIFF / 11.5 ms raw Group 4 stream for a 1700x2200 page (no SkiaSharp baseline available) | not implemented (decode-only) |
 | JPEG XL | decode: 291.1 ms for an 11 MP lossy image (no SkiaSharp baseline available) | 66.9 ms lossless / 235.6 ms lossy (q75, effort 5) for 1920x1080 RGB (no SkiaSharp baseline available); lossless size within 2% of libjxl effort 3; lossy files within a few percent of libjxl effort 7 at equal SSIMULACRA2 |
 | Resize | — | Downscale: 1.20×–2.97× (NearestNeighbor closest, Bilinear/cubic slower); Upscale: 1.39× (NearestNeighbor) or **0.24×–0.75×** (Bilinear/cubic family, faster than SkiaSharp) |
 

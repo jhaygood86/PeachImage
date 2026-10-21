@@ -829,9 +829,6 @@ internal sealed class J2kTileDecoder
         return value < 0 ? -magnitude : magnitude;
     }
 
-    /// <summary>Hands the tile's packet buffer to the decoder so block chunks can refer to it.</summary>
-    internal void SetTileMemory(ReadOnlyMemory<byte> memory) => _tileMemory = memory;
-
     /// <summary>Returns the pooled sample buffers of every component.</summary>
     public void Release()
     {

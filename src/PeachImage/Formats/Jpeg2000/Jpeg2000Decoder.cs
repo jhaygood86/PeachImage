@@ -1,3 +1,4 @@
+using System.Buffers;
 using PeachImage.Formats.Jpeg2000.Decoding;
 using PeachImage.Formats.Jpeg2000.Internal;
 using PeachImage.Formats.Shared.IO;
@@ -42,11 +43,9 @@ internal static class Jpeg2000Decoder
             var image = DecodeCore(input.ToMemory(), jpeg2000);
             if (options?.TargetPixelFormat is { } target && target != image.PixelFormat)
             {
-                bool hasAlpha = image.HasAlpha;
                 using (image)
                 {
-                    var converted = image.ConvertTo(target);
-                    return converted;
+                    return image.ConvertTo(target);
                 }
             }
 
@@ -100,6 +99,7 @@ internal static class Jpeg2000Decoder
         var planeHeights = new int[count];
         var planeOriginX = new int[count];
         var planeOriginY = new int[count];
+        long totalPixels = 0;
         for (int c = 0; c < count; c++)
         {
             var info = siz.Components[c];
@@ -112,17 +112,49 @@ internal static class Jpeg2000Decoder
             planeOriginX[c] = x0;
             planeOriginY[c] = y0;
             long pixels = (long)planeWidths[c] * planeHeights[c];
-            if (pixels > Jpeg2000DecodingLimits.MaxPixelCount)
+            totalPixels += pixels;
+            if (pixels > Jpeg2000DecodingLimits.MaxPixelCount || totalPixels > 4 * Jpeg2000DecodingLimits.MaxPixelCount)
             {
                 throw new Jpeg2000DecodingException("JPEG 2000 image is too large.");
             }
+        }
 
-            planes[c] = new ushort[pixels];
-            if (!siz.Components[c].Signed)
+        try
+        {
+            for (int c = 0; c < count; c++)
             {
-                // Missing tiles read as the DC-shifted zero value (mid-grey), like OpenJPEG.
+                int pixels = planeWidths[c] * planeHeights[c];
+                planes[c] = ArrayPool<ushort>.Shared.Rent(pixels);
+                Array.Clear(planes[c], 0, pixels);
+            }
+
+            return DecodePlanes(codestream, jp2, options, siz, reduce, plan, planes, planeWidths, planeHeights, planeOriginX, planeOriginY);
+        }
+        finally
+        {
+            foreach (var plane in planes)
+            {
+                if (plane is not null)
+                {
+                    ArrayPool<ushort>.Shared.Return(plane);
+                }
             }
         }
+    }
+
+    private static Image DecodePlanes(
+        J2kCodestream codestream,
+        Jp2Info? jp2,
+        Jpeg2000DecoderOptions? options,
+        J2kSiz siz,
+        int reduce,
+        J2kImagePlan plan,
+        ushort[][] planes,
+        int[] planeWidths,
+        int[] planeHeights,
+        int[] planeOriginX,
+        int[] planeOriginY)
+    {
 
         var tiles = codestream.TileParts.GroupBy(p => p.TileIndex).ToDictionary(g => g.Key, g => g.OrderBy(p => p.PartIndex).ToList());
         Parallel.ForEach(
