@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Ccitt;
 using PeachImage.Formats.Tiff.Internal;
 
 namespace PeachImage.Formats.Tiff.Decoding;
@@ -62,7 +63,7 @@ internal static class TiffImageDecoder
             }
 
             var compressed = reader.ReadSpan(CheckedInt(descriptor.StripOffsets[stripIndex], "strip offset"), CheckedInt(declaredByteCount, "strip byte count"));
-            byte[] decompressed = DecompressStrip(compressed, descriptor.Compression, stripByteLength);
+            byte[] decompressed = DecompressStrip(compressed, descriptor, stripByteLength, rowsInThisStrip);
             var decompressedSpan = decompressed.AsSpan(0, stripByteLength);
 
             if (descriptor.Predictor == 2)
@@ -83,8 +84,14 @@ internal static class TiffImageDecoder
         }
     }
 
-    private static byte[] DecompressStrip(ReadOnlySpan<byte> compressed, int compression, int expectedLength)
+    private static byte[] DecompressStrip(ReadOnlySpan<byte> compressed, TiffImageDescriptor descriptor, int expectedLength, int rows)
     {
+        int compression = descriptor.Compression;
+        if (compression is 2 or 3 or 4)
+        {
+            return DecodeCcitt(compressed, descriptor, expectedLength, rows);
+        }
+
         var output = new byte[expectedLength];
 
         switch (compression)
@@ -103,6 +110,37 @@ internal static class TiffImageDecoder
 
             default:
                 throw new TiffDecodingException($"Unreachable: compression {compression} should have been rejected during validation.");
+        }
+    }
+
+    private static byte[] DecodeCcitt(ReadOnlySpan<byte> compressed, TiffImageDescriptor descriptor, int expectedLength, int rows)
+    {
+        var parameters = new CcittParameters
+        {
+            K = descriptor.Compression == 4 ? -1 : (descriptor.Compression == 3 && (descriptor.FaxOptions & 1) != 0 ? 1 : 0),
+            Columns = descriptor.Width,
+            EncodedByteAlign = descriptor.Compression == 2,
+            EndOfBlock = descriptor.Compression == 4,
+            LsbFirst = descriptor.FillOrder == 2,
+        };
+
+        try
+        {
+            var result = CcittDecoder.Decode(compressed, parameters, rows);
+            if (result.Bits.Length != expectedLength)
+            {
+                throw new TiffDecodingException("TIFF CCITT strip decoded to an unexpected size.");
+            }
+
+            return result.Bits;
+        }
+        catch (CcittDataException ex)
+        {
+            throw new TiffDecodingException($"TIFF CCITT strip is malformed: {ex.Message}", ex);
+        }
+        catch (CcittUnsupportedException ex)
+        {
+            throw new TiffUnsupportedFeatureException(ex.Message, ex);
         }
     }
 

@@ -14,6 +14,8 @@ internal static class TiffTags
     public const ushort SamplesPerPixel = 277;
     public const ushort RowsPerStrip = 278;
     public const ushort StripByteCounts = 279;
+    public const ushort T4Options = 292;
+    public const ushort T6Options = 293;
     public const ushort PlanarConfiguration = 284;
     public const ushort Predictor = 317;
     public const ushort ColorMap = 320;

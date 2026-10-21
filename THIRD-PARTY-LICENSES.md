@@ -223,3 +223,54 @@ the libjxl `conformance` and `testdata` repositories. libjxl is distributed unde
 > DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
 > INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 > NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## OpenJPEG — JPEG 2000 decoder
+
+`src/PeachImage/Formats/Jpeg2000/` and `src/PeachImage/Formats/Shared/Arithmetic/` are a from-scratch managed decoder written from
+ITU-T T.800 (JPEG 2000 Part 1) and T.88 (the MQ arithmetic coder), using [OpenJPEG](https://github.com/uclouvain/openjpeg) as the
+behavioural reference. The structure of the position-based packet progressions (`J2kTileDecoder.TryPrecinctAt`), the rule that
+splits a code-block's coding passes into codeword segments for the bypass and termination-on-each-pass styles, and the layout of the
+per-sample significance flags in the tier-1 decoder follow OpenJPEG's `pi.c`, `t2.c` and `t1.c`. The MQ probability-state table is
+the one printed in the standards. No source code was copied.
+
+The JPEG 2000 test files under `tests/PeachImage.Tests/Formats/Jpeg2000/Assets/` were written by OpenJPEG 2.5.4's `opj_compress`
+(directly or through Pillow) from synthetic images, and the reference decodes next to them are `opj_decompress` output. OpenJPEG is
+distributed under the BSD 2-Clause License:
+
+> Copyright (c) 2002-2014, Universite catholique de Louvain (UCL), Belgium
+> Copyright (c) 2002-2014, Professor Benoit Macq
+> Copyright (c) 2003-2014, Antonin Descampe
+> Copyright (c) 2003-2009, Francois-Olivier Devaux
+> Copyright (c) 2005, Herve Drolon, FreeImage Team
+> Copyright (c) 2002-2003, Yannick Verschueren
+> Copyright (c) 2001-2003, David Janssens
+> Copyright (c) 2011-2012, Centre National d'Etudes Spatiales (CNES), France
+> Copyright (c) 2012, CS Systemes d'Information, France
+> All rights reserved.
+>
+> Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following
+> conditions are met:
+>
+> 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following
+>    disclaimer.
+>
+> 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following
+>    disclaimer in the documentation and/or other materials provided with the distribution.
+>
+> THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING,
+> BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
+> SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+> DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+> INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+> NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+This notice applies to the JPEG 2000 decoder and test files described above. It does not apply to any other part of PeachImage.
+
+## JBIG2 and CCITT fax decoders
+
+`src/PeachImage/Formats/Jbig2/` and `src/PeachImage/Formats/Shared/Ccitt/` are written from ITU-T T.88 (JBIG2) and T.4/T.6 (Group 3
+and Group 4 fax); the run-length code tables and the standard Huffman tables B.1-B.15 are the ones printed in those
+recommendations. No third-party source code was used. jbig2dec (GPL/AGPL, through MuPDF) and PDFium were used only as black-box
+test oracles: the JBIG2 test streams under `tests/PeachImage.Tests/Formats/Jbig2/Assets/` were produced by an encoder
+written for this repository (`jbig2gen.py`) and each was decoded by jbig2dec (through MuPDF) and by PDFium, with the result required
+to match at least one of them pixel for pixel. Neither decoder is distributed with PeachImage.

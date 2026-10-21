@@ -59,4 +59,25 @@
     </EmbeddedResource>
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- CCITT-compressed TIFFs written by libtiff (via Pillow), with PNG references of the source bitmaps. -->
+    <EmbeddedResource Include="Formats/Tiff/Assets/Ccitt/*">
+      <LogicalName>PeachImage.Tests.Formats.Tiff.Assets.Ccitt.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- JBIG2 streams written by Assets/jbig2gen.py, with the pages they must decode to; checked against MuPDF's jbig2dec when generated. -->
+    <EmbeddedResource Include="Formats/Jbig2/Assets/*.png;Formats/Jbig2/Assets/*.jb2;Formats/Jbig2/Assets/*.seg;Formats/Jbig2/Assets/*.glb">
+      <LogicalName>PeachImage.Tests.Formats.Jbig2.Assets.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- JPEG 2000 files written by Assets/j2kgen.py (Pillow/OpenJPEG) with OpenJPEG's own decode of each as the reference PNG. -->
+    <EmbeddedResource Include="Formats/Jpeg2000/Assets/*.png;Formats/Jpeg2000/Assets/*.jp2;Formats/Jpeg2000/Assets/*.j2k;Formats/Jpeg2000/Assets/*.ref.raw">
+      <LogicalName>PeachImage.Tests.Formats.Jpeg2000.Assets.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
 </Project>

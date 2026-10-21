@@ -29,7 +29,7 @@ internal static class TiffValidation
         }
 
         int compression = (int)ifd.GetUInt32(TiffTags.Compression, 1);
-        if (compression is not (1 or 5 or 32773))
+        if (compression is not (1 or 2 or 3 or 4 or 5 or 32773))
         {
             throw new TiffUnsupportedFeatureException($"TIFF compression {compression} ({DescribeCompression(compression)}) is not supported.");
         }
@@ -41,7 +41,8 @@ internal static class TiffValidation
         }
 
         int fillOrder = (int)ifd.GetUInt32(TiffTags.FillOrder, 1);
-        if (fillOrder != 1)
+        bool isFax = compression is 2 or 3 or 4;
+        if (fillOrder != 1 && !(isFax && fillOrder == 2))
         {
             throw new TiffUnsupportedFeatureException($"TIFF FillOrder {fillOrder} (LSB-first bit packing) is not supported.");
         }
@@ -62,6 +63,26 @@ internal static class TiffValidation
         if (bitsPerSample is not (1 or 2 or 4 or 8 or 16))
         {
             throw new TiffUnsupportedFeatureException($"TIFF bit depth {bitsPerSample} is not supported.");
+        }
+
+        int faxOptions = 0;
+        if (compression == 3)
+        {
+            faxOptions = (int)ifd.GetUInt32(TiffTags.T4Options, 0);
+        }
+        else if (compression == 4)
+        {
+            faxOptions = (int)ifd.GetUInt32(TiffTags.T6Options, 0);
+        }
+
+        if ((faxOptions & 2) != 0)
+        {
+            throw new TiffUnsupportedFeatureException("TIFF CCITT uncompressed mode is not supported.");
+        }
+
+        if (isFax && (bitsPerSample != 1 || samplesPerPixel != 1))
+        {
+            throw new TiffDecodingException("TIFF CCITT compression requires one-bit, single-sample data.");
         }
 
         int predictor = (int)ifd.GetUInt32(TiffTags.Predictor, 1);
@@ -182,6 +203,8 @@ internal static class TiffValidation
             BitsPerSample = bitsPerSample,
             SamplesPerPixel = samplesPerPixel,
             Compression = compression,
+            FillOrder = fillOrder,
+            FaxOptions = faxOptions,
             Photometric = photometric,
             Predictor = predictor,
             RowsPerStrip = rowsPerStrip,

@@ -1,6 +1,9 @@
 using PeachImage.Formats.Avif;
+using PeachImage.Formats.Ccitt;
 using PeachImage.Formats.Bmp;
 using PeachImage.Formats.Gif;
+using PeachImage.Formats.Jbig2;
+using PeachImage.Formats.Jpeg2000;
 using PeachImage.Formats.Jpeg;
 using PeachImage.Formats.Jxl;
 using PeachImage.Formats.Png;
@@ -46,6 +49,9 @@ public sealed class Image : IDisposable
         AvifCodec.Instance,
         TiffCodec.Instance,
         JxlCodec.Instance,
+        CcittFaxCodec.Instance,
+        Jbig2Codec.Instance,
+        Jpeg2000Codec.Instance,
     ];
 
     private static readonly int MaxHeaderSize = Codecs.Max(codec => codec.HeaderSize);
@@ -425,7 +431,7 @@ public sealed class Image : IDisposable
     {
         ArgumentNullException.ThrowIfNull(stream);
 
-        var codec = ResolveCodec(stream, out var preparedStream);
+        var codec = ResolveCodec(stream, options, out var preparedStream);
         if (codec is null)
         {
             throw new UnknownImageFormatException("The image format could not be determined from the stream contents.");
@@ -475,17 +481,20 @@ public sealed class Image : IDisposable
     }
 
     /// <summary>Reads image dimensions and format information from <paramref name="stream"/> without fully decoding pixel data.</summary>
-    public static ImageInfo Identify(Stream stream)
+    public static ImageInfo Identify(Stream stream) => Identify(stream, null);
+
+    /// <summary>Reads image dimensions and format information from <paramref name="stream"/>, honoring format-selecting <paramref name="options"/> (raw CCITT or embedded JBIG2 streams carry no signature to sniff).</summary>
+    public static ImageInfo Identify(Stream stream, DecoderOptions? options)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
-        var codec = ResolveCodec(stream, out var preparedStream);
+        var codec = ResolveCodec(stream, options, out var preparedStream);
         if (codec is null)
         {
             throw new UnknownImageFormatException("The image format could not be determined from the stream contents.");
         }
 
-        return codec.Identify(preparedStream);
+        return codec.Identify(preparedStream, options);
     }
 
     /// <summary>Capability and identity metadata for every format PeachImage has a built-in codec for.</summary>
@@ -686,8 +695,14 @@ public sealed class Image : IDisposable
         }
     }
 
-    private static IImageCodec? ResolveCodec(Stream stream, out Stream preparedStream)
+    private static IImageCodec? ResolveCodec(Stream stream, DecoderOptions? options, out Stream preparedStream)
     {
+        if (options is IFormatSelectingOptions { Codec: { } selected })
+        {
+            preparedStream = stream;
+            return selected;
+        }
+
         var header = new byte[MaxHeaderSize];
         int read = ReadFully(stream, header);
         var headerSpan = header.AsSpan(0, read);

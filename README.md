@@ -56,11 +56,12 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   conversion, forward transform, and quantizer all use SIMD-tiered kernels (scalar/`Vector128`/`Vector256`,
   matching the JPEG/WebP encoders' own dispatch pattern) and pool their per-block working buffers rather
   than allocating per block.
-- **TIFF**: decode only (no encode). Covers both byte orders (`II`/`MM`), uncompressed/LZW/PackBits
-  compression, 1/2/4/8/16-bit depth, and grayscale (WhiteIsZero/BlackIsZero), RGB (with optional straight or
+- **TIFF**: decode only (no encode). Covers both byte orders (`II`/`MM`), uncompressed/LZW/PackBits and
+  CCITT (Modified Huffman, Group 3 one- and two-dimensional, Group 4; either `FillOrder`) compression,
+  1/2/4/8/16-bit depth, and grayscale (WhiteIsZero/BlackIsZero), RGB (with optional straight or
   premultiplied alpha), palette, and CMYK color, including the Predictor=2 horizontal-differencing variant
   LZW-compressed files commonly use. Tiled organization, planar (non-chunky) storage, any compression other
-  than none/LZW/PackBits, BigTIFF, floating-point/signed samples, and photometric interpretations outside
+  than none/CCITT/LZW/PackBits, BigTIFF, floating-point/signed samples, and photometric interpretations outside
   that set (YCbCr, LogLuv, Lab) are deliberately out of scope and throw a clear
   `TiffUnsupportedFeatureException` rather than a silently wrong result — the goal is correctness on
   real-world scanner/export-tool output, not every TIFF extension ever specified. An embedded ICC profile
@@ -95,6 +96,24 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   are written to container boxes and the EXIF orientation is recorded in the codestream header. Output is checked against
   libjxl (see below). At equal SSIMULACRA2 score the lossy files are within a few percent of libjxl's effort 7 (see
   `LIBRARY_COMPARISON.md`).
+- **JPEG 2000**: decode only (ITU-T T.800 Part 1). JP2 files and raw codestreams (`.j2k`/`.j2c`), reversible 5/3 and
+  irreversible 9/7 wavelets, tiles and tile-parts, precincts, quality layers, all five progression orders and progression
+  order changes, every code-block style (bypass, reset, termination on each pass, vertically causal contexts, predictable
+  termination, segmentation symbols), region-of-interest maxshift, `SOP`/`EPH` markers, packed packet headers (`PPM`/`PPT`),
+  image and tile offsets, sub-sampled components, 1 to 16-bit samples (signed or unsigned), the reversible and irreversible
+  component transforms, and the JP2 `colr` (enumerated sRGB/gray/sYCC/CMYK or an ICC profile), `pclr`/`cmap` palette and
+  `cdef` channel-definition boxes (opacity channels become alpha). `Jpeg2000DecoderOptions.ReduceResolutionLevels` decodes at
+  half, quarter, ... size by skipping the finest wavelet levels. Part 2 (JPX) extensions and sample depths above 16 bits throw a
+  clear `Jpeg2000UnsupportedFeatureException`. Output was checked sample for sample against OpenJPEG.
+- **JBIG2**: decode only (ITU-T T.88). Standalone `.jb2`/`.jbig2` files (sequential and random-access organisation) and the
+  embedded segment streams of PDF files. Generic regions (all four templates, typical prediction, moved adaptive pixels, MMR),
+  generic refinement regions, symbol dictionaries (arithmetic and Huffman, refinement/aggregate coding, retained contexts,
+  custom tables), text regions (arithmetic and Huffman, every reference corner, transposed, refined instances), pattern
+  dictionaries and halftone regions, striped pages with unknown height, and intermediate regions. Only the first page is decoded;
+  the extended 12-pixel generic template is not supported. Output was checked against two independent decoders (jbig2dec through
+  MuPDF, and PDFium).
+- **CCITT fax**: decode only. Inside TIFF (see above) and as bare Group 3 / Group 4 streams such as the data of a PDF
+  `CCITTFaxDecode` filter, selected with `CcittFaxDecoderOptions` (see below). The uncompressed extension mode is not supported.
 - Other formats are not yet implemented. The public API (`Image`, `AnimatedImage` for multi-frame formats
   like GIF) is designed to support them without breaking changes when they're added. Codec selection is
   internal — there's no format-specific type or registration step in the public API.
@@ -237,6 +256,34 @@ var resized = animation.Resize(160, 120, new ResizeOptions { Filter = Resampling
 using var output = File.Create("resized.gif");
 resized.Save(output, "gif");
 ```
+
+### Decoding images from PDF files
+
+The three formats PDF uses for bilevel and JPEG 2000 images decode through the same `Image.Load`. Standalone JBIG2 and
+JPEG 2000 files are recognized by their signatures; the *data of a PDF stream* has no signature (a `CCITTFaxDecode` stream
+is bare fax data, a `JBIG2Decode` stream is a run of segments with no file header), so pass the matching options object,
+filled from the stream's `DecodeParms`, to select the decoder:
+
+```csharp
+using PeachImage;
+using PeachImage.Formats.Ccitt;
+using PeachImage.Formats.Jbig2;
+using PeachImage.Formats.Jpeg2000;
+
+// /Filter /CCITTFaxDecode  /DecodeParms << /K -1 /Columns 2480 /Rows 3508 /BlackIs1 false >>
+using var fax = Image.Load(new MemoryStream(ccittData), new CcittFaxDecoderOptions { K = -1, Columns = 2480, Rows = 3508 });
+
+// /Filter /JBIG2Decode  /DecodeParms << /JBIG2Globals 12 0 R >>
+using var jbig2 = Image.Load(new MemoryStream(pageData), new Jbig2DecoderOptions { Embedded = true, Globals = globalsData });
+
+// /Filter /JPXDecode: the colour space comes from the PDF, so skip the JP2 boxes' interpretation.
+using var jpx = Image.Load(new MemoryStream(jpxData), new Jpeg2000DecoderOptions { IgnoreColorSpace = true });
+```
+
+CCITT and JBIG2 images come out as `Gray8` with black pixels as 0 (the PDF convention for a default `/Decode`);
+`CcittFaxDecoderOptions.BlackIs1` and `Jbig2DecoderOptions.InvertOutput` flip that. Fax options mirror the PDF filter
+parameters (`K`, `Columns`, `Rows`, `EndOfLine`, `EncodedByteAlign`, `EndOfBlock`, `BlackIs1`, `DamagedRowsBeforeError`);
+`Rows = 0` decodes until the data ends.
 
 ### Recovering the original JPEG from a JPEG XL file
 
