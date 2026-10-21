@@ -149,7 +149,7 @@ internal static class Jbig2GenericRegion
                             {
                                 int ax = x + adaptive[i * 2];
                                 int ay = y + adaptive[(i * 2) + 1];
-                                if (ay >= 0 && (uint)ax < (uint)width && (ay < y || ax < x))
+                                if (ay >= 0 && ay <= y && (uint)ax < (uint)width && (ay < y || ax < x))
                                 {
                                     context |= data[(ay * width) + ax] << AdaptiveBits[template][i];
                                 }

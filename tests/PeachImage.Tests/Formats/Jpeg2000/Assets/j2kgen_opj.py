@@ -101,6 +101,8 @@ def main():
     go("eph", rgb_src, "-EPH")
     go("sop_eph", rgb_src, "-SOP", "-EPH", "-r", "20,5,1")
     go("plt_tlm", rgb_src, "-PLT", "-TLM")
+    go("sop_eph_tiled", rgb_src, "-SOP", "-EPH", "-t", "48,40", "-r", "20,5,1", "-n", 3)
+    go("eph_layers_precincts", rgb_src, "-EPH", "-c", "[32,32]", "-r", "20,5,1", "-n", 3, "-p", "RPCL")
     go("roi_upshift", rgb_src, "-ROI", "c=0,U=10", "-mct", 0)
     go("roi_upshift_lossy", rgb_src, "-ROI", "c=1,U=12", "-mct", 0, "-I", "-r", "8")
     for part in ("R", "L", "C"):

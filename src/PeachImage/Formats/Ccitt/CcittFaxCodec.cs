@@ -83,6 +83,10 @@ internal sealed class CcittFaxCodec : IImageCodec
         {
             result = CcittDecoder.Decode(input.Span, parameters, fax.Rows);
         }
+        catch (Exception ex) when (ex is IndexOutOfRangeException or ArgumentException or OverflowException)
+        {
+            throw new CcittFaxDecodingException("CCITT data is malformed.", ex);
+        }
         catch (CcittDataException ex)
         {
             throw new CcittFaxDecodingException(ex.Message, ex);

@@ -406,6 +406,7 @@ internal sealed class J2kTileDecoder
         J2kResolution res,
         PacketId id)
     {
+        int packetStart = bodyPosition;
         if (_cod.Sop && bodyPosition + 6 <= data.Length && data[bodyPosition] == 0xFF && data[bodyPosition + 1] == 0x91)
         {
             bodyPosition += 6;
@@ -491,6 +492,7 @@ internal sealed class J2kTileDecoder
 
         reader.Align();
         int end = reader.Position;
+        int headerEndWithEph = end;
         if (packed)
         {
             headerPosition = end;
@@ -506,6 +508,7 @@ internal sealed class J2kTileDecoder
             {
                 bodyPosition += 2;
             }
+            headerEndWithEph = bodyPosition;
         }
 
         foreach (var (segment, length) in _pending)
@@ -523,10 +526,15 @@ internal sealed class J2kTileDecoder
 
                 bodyPosition += length;
         }
+
+        PacketTrace?.Add((packetStart, packed ? -1 : start, packed ? -1 : headerEndWithEph, bodyPosition));
     }
 
     // The packet data lives in a span; chunks need Memory, so remember where the tile buffer is.
     private ReadOnlyMemory<byte> _tileMemory;
+
+    /// <summary>When set, receives (packet start, header start, header end including EPH, packet end) for every packet read from unpacked tile data. Test support.</summary>
+    internal List<(int PacketStart, int HeaderStart, int HeaderEnd, int PacketEnd)>? PacketTrace { get; set; }
     private readonly List<(J2kSegment Segment, int Length)> _pending = [];
 
     private ReadOnlyMemory<byte> MemoryOfData(ReadOnlySpan<byte> data, int offset, int length) =>

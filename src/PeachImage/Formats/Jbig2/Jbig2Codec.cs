@@ -83,7 +83,16 @@ internal sealed class Jbig2Codec : IImageCodec
             throw new Jbig2DecodingException("JBIG2 data exceeds the supported maximum size.");
         }
 
-        var page = Jbig2Document.Decode(input.ToMemory(), jbig2?.Globals ?? default, embedded);
+        Jbig2Bitmap page;
+        try
+        {
+            page = Jbig2Document.Decode(input.ToMemory(), jbig2?.Globals ?? default, embedded);
+        }
+        catch (Exception ex) when (ex is IndexOutOfRangeException or ArgumentException or InvalidOperationException or OverflowException)
+        {
+            throw new Jbig2DecodingException("JBIG2 data is malformed.", ex);
+        }
+
         if (page.Width == 0 || page.Height == 0)
         {
             throw new Jbig2DecodingException("JBIG2 page is empty.");

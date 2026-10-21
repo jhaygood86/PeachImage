@@ -86,7 +86,7 @@ internal static class Jbig2Halftone
         int stepY = (data[19] << 8) | data[20];
         var payload = data[21..];
 
-        if ((long)gridWidth * gridHeight > Internal.Jbig2DecodingLimits.MaxPixelCount)
+        if ((long)gridWidth * gridHeight > Internal.Jbig2DecodingLimits.MaxHalftoneCells)
         {
             throw new Jbig2DecodingException("JBIG2 halftone grid is too large.");
         }

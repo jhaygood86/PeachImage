@@ -15,6 +15,9 @@ internal static class Jbig2DecodingLimits
     /// <summary>The most segments a stream may hold.</summary>
     public const int MaxSegments = 1 << 20;
 
+    /// <summary>The most grid cells a halftone region may declare.</summary>
+    public const long MaxHalftoneCells = 1 << 24;
+
     /// <summary>The most instances a text region may declare.</summary>
-    public const int MaxInstances = 1 << 26;
+    public const int MaxInstances = 1 << 24;
 }
