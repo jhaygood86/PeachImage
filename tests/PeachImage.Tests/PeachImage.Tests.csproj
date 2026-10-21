@@ -73,4 +73,11 @@
     </EmbeddedResource>
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- JPEG 2000 files written by Assets/j2kgen.py (Pillow/OpenJPEG) with OpenJPEG's own decode of each as the reference PNG. -->
+    <EmbeddedResource Include="Formats/Jpeg2000/Assets/*.png;Formats/Jpeg2000/Assets/*.jp2;Formats/Jpeg2000/Assets/*.j2k;Formats/Jpeg2000/Assets/*.ref.raw">
+      <LogicalName>PeachImage.Tests.Formats.Jpeg2000.Assets.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
 </Project>
