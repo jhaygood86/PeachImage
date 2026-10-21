@@ -1,11 +1,14 @@
+using System.Buffers;
 using System.Numerics;
 using PeachImage.Formats.Jbig2.Internal;
 
 namespace PeachImage.Formats.Jbig2.Decoding;
 
 /// <summary>A bilevel bitmap with one byte per pixel (0 white, 1 black), which keeps context formation and compositing simple and vectorizable.</summary>
-internal sealed class Jbig2Bitmap
+internal sealed class Jbig2Bitmap : IDisposable
 {
+    private bool _disposed;
+
     public Jbig2Bitmap(int width, int height, byte fill = 0)
     {
         if (width < 0 || height < 0 || (long)width * height > Jbig2DecodingLimits.MaxPixelCount)
@@ -15,10 +18,22 @@ internal sealed class Jbig2Bitmap
 
         Width = width;
         Height = height;
-        Data = new byte[width * height];
-        if (fill != 0)
+        Data = ArrayPool<byte>.Shared.Rent(Math.Max(1, width * height));
+        Data.AsSpan(0, width * height).Fill(fill);
+        Jbig2BitmapScope.Register(this);
+    }
+
+    /// <summary>The number of pixels (the rented array can be longer).</summary>
+    public int Length => Width * Height;
+
+    /// <summary>Returns the pixel storage to the pool. Safe to call more than once; the bitmap must not be used afterwards.</summary>
+    public void Dispose()
+    {
+        if (!_disposed)
         {
-            Data.AsSpan().Fill(fill);
+            _disposed = true;
+            ArrayPool<byte>.Shared.Return(Data);
+            Data = [];
         }
     }
 
@@ -46,14 +61,15 @@ internal sealed class Jbig2Bitmap
             throw new Jbig2DecodingException($"JBIG2 page height {height} is out of range.");
         }
 
-        var data = new byte[Width * height];
+        var data = ArrayPool<byte>.Shared.Rent(Math.Max(1, Width * height));
         int keep = Math.Min(Height, height) * Width;
         Data.AsSpan(0, keep).CopyTo(data);
-        if (fill != 0 && height > Height)
+        if (height > Height)
         {
-            data.AsSpan(keep).Fill(fill);
+            data.AsSpan(keep, (Width * height) - keep).Fill(fill);
         }
 
+        ArrayPool<byte>.Shared.Return(Data);
         Data = data;
         Height = height;
     }

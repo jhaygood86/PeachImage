@@ -56,6 +56,8 @@ internal static class Jbig2Halftone
             patterns[i] = collective.Extract(i * patternWidth, 0, patternWidth, patternHeight);
         }
 
+        collective.Dispose();
+
         return patterns;
     }
 
@@ -157,7 +159,7 @@ internal static class Jbig2Halftone
                 {
                     var current = bits.Data;
                     var above = previous.Data;
-                    for (int i = 0; i < current.Length; i++)
+                    for (int i = 0; i < bits.Length; i++)
                     {
                         current[i] ^= above[i];
                     }
@@ -169,6 +171,7 @@ internal static class Jbig2Halftone
                     values[i] |= bitData[i] << plane;
                 }
 
+                previous?.Dispose();
                 previous = bits;
             }
         }

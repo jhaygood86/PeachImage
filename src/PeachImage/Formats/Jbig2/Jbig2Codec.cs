@@ -64,6 +64,7 @@ internal sealed class Jbig2Codec : IImageCodec
         var (width, height) = Jbig2Document.ReadPageSize(input.ToMemory(), embedded);
         if (height == 0)
         {
+            using var scope = new Jbig2BitmapScope();
             height = Jbig2Document.Decode(input.ToMemory(), jbig2?.Globals ?? default, embedded).Height;
         }
 
@@ -83,6 +84,7 @@ internal sealed class Jbig2Codec : IImageCodec
             throw new Jbig2DecodingException("JBIG2 data exceeds the supported maximum size.");
         }
 
+        using var scope = new Jbig2BitmapScope();
         Jbig2Bitmap page;
         try
         {

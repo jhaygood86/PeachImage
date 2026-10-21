@@ -4,7 +4,7 @@ using PeachImage.Formats.Jpeg2000.Internal;
 namespace PeachImage.Formats.Jpeg2000.Decoding;
 
 /// <summary>Decodes one tile of a JPEG 2000 codestream into component sample arrays (T.800 Annexes B, D, E, F, G).</summary>
-internal sealed class J2kTileDecoder
+internal sealed class J2kTileDecoder : IDisposable
 {
     private readonly J2kCodestream _codestream;
     private readonly J2kSiz _siz;
@@ -424,7 +424,7 @@ internal sealed class J2kTileDecoder
                 var precinctBand = band.Precincts[id.Precinct];
                 for (int index = 0; index < precinctBand.Blocks.Length; index++)
                 {
-                    var block = precinctBand.Blocks[index];
+                    ref var block = ref precinctBand.Blocks[index];
                     int bx = index % precinctBand.BlocksWide;
                     int by = index / precinctBand.BlocksWide;
                     bool isIncluded;
@@ -469,20 +469,21 @@ internal sealed class J2kTileDecoder
                     }
 
                     int style = component.Coding.CodeBlockStyle;
-                    var segment = CurrentSegment(block, style);
+                    int segment = block.LastSegment >= 0 ? block.LastSegment : NewSegment(ref block, style);
                     int remaining = newPasses;
                     while (remaining > 0)
                     {
-                        if (segment.Passes >= segment.MaxPasses)
+                        if (_arena.Segment(segment).Passes >= _arena.Segment(segment).MaxPasses)
                         {
-                            segment = NewSegment(block, style);
+                            segment = NewSegment(ref block, style);
                         }
 
-                        int take = Math.Min(segment.MaxPasses - segment.Passes, remaining);
+                        ref var state = ref _arena.Segment(segment);
+                        int take = Math.Min(state.MaxPasses - state.Passes, remaining);
                         int bits = block.LengthBits + FloorLog2(take);
                         int length = reader.ReadBits(Math.Min(bits, 31));
                         _pending.Add((segment, length));
-                        segment.Passes += take;
+                        state.Passes += take;
                         remaining -= take;
                     }
 
@@ -520,8 +521,7 @@ internal sealed class J2kTileDecoder
 
                 if (length > 0)
                 {
-                    segment.Chunks.Add(MemoryOfData(data, bodyPosition, length));
-                    segment.Length += length;
+                    _arena.AddChunk(segment, bodyPosition, length);
                 }
 
                 bodyPosition += length;
@@ -535,22 +535,10 @@ internal sealed class J2kTileDecoder
 
     /// <summary>When set, receives (packet start, header start, header end including EPH, packet end) for every packet read from unpacked tile data. Test support.</summary>
     internal List<(int PacketStart, int HeaderStart, int HeaderEnd, int PacketEnd)>? PacketTrace { get; set; }
-    private readonly List<(J2kSegment Segment, int Length)> _pending = [];
+    private readonly List<(int Segment, int Length)> _pending = [];
+    private readonly J2kSegmentArena _arena = new();
 
-    private ReadOnlyMemory<byte> MemoryOfData(ReadOnlySpan<byte> data, int offset, int length) =>
-        _tileMemory.Slice(offset, length);
-
-    private static J2kSegment CurrentSegment(J2kCodeBlock block, int style)
-    {
-        if (block.Segments.Count == 0)
-        {
-            return NewSegment(block, style);
-        }
-
-        return block.Segments[^1];
-    }
-
-    private static J2kSegment NewSegment(J2kCodeBlock block, int style)
+    private int NewSegment(ref J2kCodeBlock block, int style)
     {
         int max;
         if ((style & J2kBlockDecoder.StyleTermAll) != 0)
@@ -559,13 +547,13 @@ internal sealed class J2kTileDecoder
         }
         else if ((style & J2kBlockDecoder.StyleBypass) != 0)
         {
-            if (block.Segments.Count == 0)
+            if (block.LastSegment < 0)
             {
                 max = 10;
             }
             else
             {
-                int previous = block.Segments[^1].MaxPasses;
+                int previous = _arena.Segment(block.LastSegment).MaxPasses;
                 max = previous is 1 or 10 ? 2 : 1;
             }
         }
@@ -574,9 +562,18 @@ internal sealed class J2kTileDecoder
             max = 109;
         }
 
-        var segment = new J2kSegment { MaxPasses = max };
-        block.Segments.Add(segment);
-        return segment;
+        int index = _arena.AddSegment(max);
+        if (block.LastSegment >= 0)
+        {
+            _arena.Segment(block.LastSegment).Next = index;
+        }
+        else
+        {
+            block.FirstSegment = index;
+        }
+
+        block.LastSegment = index;
+        return index;
     }
 
     private static int ReadPassCount(ref J2kPacketBitReader reader)
@@ -645,7 +642,7 @@ internal sealed class J2kTileDecoder
         }
 
         // Gather every code-block that has data, across components.
-        var work = new List<(J2kTileComponent Component, J2kBand Band, J2kCodeBlock Block, int Stride)>();
+        var work = new List<(J2kTileComponent Component, J2kBand Band, J2kPrecinctBand Precinct, int Index, int Stride)>();
         foreach (var component in _components)
         {
             int keepResolutions = component.ResolutionCount - reduce;
@@ -656,11 +653,11 @@ internal sealed class J2kTileDecoder
                 {
                     foreach (var precinct in band.Precincts)
                     {
-                        foreach (var block in precinct.Blocks)
+                        for (int i = 0; i < precinct.Blocks.Length; i++)
                         {
-                            if (block.Included && block.Width > 0 && block.Height > 0)
+                            if (precinct.Blocks[i].Included && precinct.Blocks[i].Width > 0 && precinct.Blocks[i].Height > 0)
                             {
-                                work.Add((component, band, block, stride));
+                                work.Add((component, band, precinct, i, stride));
                             }
                         }
                     }
@@ -676,8 +673,8 @@ internal sealed class J2kTileDecoder
             () => scratchPool.TryTake(out var s) ? s : new J2kBlockScratch(),
             (index, _, scratch) =>
             {
-                var (component, band, block, stride) = work[index];
-                DecodeBlock(component, band, block, stride, scratch);
+                var (component, band, precinct, blockIndex, stride) = work[index];
+                DecodeBlock(component, band, ref precinct.Blocks[blockIndex], stride, scratch);
                 return scratch;
             },
             scratch => scratchPool.Add(scratch));
@@ -704,9 +701,14 @@ internal sealed class J2kTileDecoder
         }
     }
 
-    private static void DecodeBlock(J2kTileComponent component, J2kBand band, J2kCodeBlock block, int stride, J2kBlockScratch scratch)
+    private void DecodeBlock(J2kTileComponent component, J2kBand band, ref J2kCodeBlock block, int stride, J2kBlockScratch scratch)
     {
-        int segmentCount = block.Segments.Count;
+        int segmentCount = 0;
+        for (int node = block.FirstSegment; node >= 0; node = _arena.Segment(node).Next)
+        {
+            segmentCount++;
+        }
+
         if (scratch.SegmentBuffer.Length < segmentCount)
         {
             scratch.SegmentBuffer = new J2kSegmentData[segmentCount];
@@ -718,26 +720,29 @@ internal sealed class J2kTileDecoder
         Array.Clear(rented, 0, segmentCount);
         try
         {
-            for (int i = 0; i < segmentCount; i++)
+            int i = 0;
+            for (int node = block.FirstSegment; node >= 0; node = _arena.Segment(node).Next, i++)
             {
-                var segment = block.Segments[i];
+                var segment = _arena.Segment(node);
                 ReadOnlyMemory<byte> memory;
-                if (segment.Chunks.Count == 1)
-                {
-                    memory = segment.Chunks[0];
-                }
-                else if (segment.Chunks.Count == 0)
+                if (segment.FirstChunk < 0)
                 {
                     memory = ReadOnlyMemory<byte>.Empty;
+                }
+                else if (segment.FirstChunk == segment.LastChunk)
+                {
+                    ref var only = ref _arena.Chunk(segment.FirstChunk);
+                    memory = _tileMemory.Slice(only.Offset, only.Length);
                 }
                 else
                 {
                     byte[] buffer = ArrayPool<byte>.Shared.Rent(segment.Length);
                     rented[i] = buffer;
                     int offset = 0;
-                    foreach (var chunk in segment.Chunks)
+                    for (int c = segment.FirstChunk; c >= 0; c = _arena.Chunk(c).Next)
                     {
-                        chunk.Span.CopyTo(buffer.AsSpan(offset));
+                        ref var chunk = ref _arena.Chunk(c);
+                        _tileMemory.Span.Slice(chunk.Offset, chunk.Length).CopyTo(buffer.AsSpan(offset));
                         offset += chunk.Length;
                     }
 
@@ -830,8 +835,12 @@ internal sealed class J2kTileDecoder
     }
 
     /// <summary>Returns the pooled sample buffers of every component.</summary>
+    /// <inheritdoc/>
+    public void Dispose() => Release();
+
     public void Release()
     {
+        _arena.Dispose();
         foreach (var component in _components)
         {
             if (component.IntegerData is not null)

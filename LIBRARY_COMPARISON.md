@@ -444,9 +444,9 @@ the wavelet transform and the colour conversion run on all cores, so more cores 
 
 | Scenario | PeachImage | Allocated |
 |---|---:|---:|
-| Lossless 1280x960 | 90.6 ms | 4.8 MB |
-| Lossless 1280x960, half size (`ReduceResolutionLevels = 1`) | 27.5 ms | 1.6 MB |
-| Lossy 1280x960 | 43.0 ms | 4.6 MB |
+| Lossless 1280x960 | 88.5 ms | 4.5 MB |
+| Lossless 1280x960, half size (`ReduceResolutionLevels = 1`) | 27.0 ms | 1.4 MB |
+| Lossy 1280x960 | 44.7 ms | 4.5 MB |
 
 ```bash
 dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*Jpeg2000DecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
@@ -461,8 +461,8 @@ arithmetic-coded (template 0 with typical prediction) or MMR-coded.
 
 | Scenario | PeachImage | Allocated |
 |---|---:|---:|
-| Arithmetic generic region 850x1100 | 6.41 ms | 2.8 MB |
-| MMR generic region 850x1100 | 3.16 ms | 2.9 MB |
+| Arithmetic generic region 850x1100 | 5.92 ms | 1.0 MB |
+| MMR generic region 850x1100 | 3.04 ms | 1.1 MB |
 
 ```bash
 dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*Jbig2DecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
@@ -496,8 +496,8 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 | WebP | 0.23×–2.14× (animated: **0.23×**, static: 1.15×–2.14×) | 0.99×–1.44× lossless (0.15× small-image outlier), 0.31× lossy |
 | AVIF | ~1.96× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented; lossy fixed 8x8 blocks, lossless has a real partition-tree RDO search up to 64x64 (see Encode (lossless size) above); throughput not yet measured here |
 | TIFF | ~0.15×–0.35× vs. `ffmpeg` (no SkiaSharp baseline available; ratios dominated by `ffmpeg`'s process-spawn overhead, not decoder throughput) | not implemented (decode-only) |
-| JPEG 2000 | decode: 90.6 ms lossless / 43.0 ms lossy for 1280x960 RGB (no SkiaSharp baseline available) | not implemented (decode-only) |
-| JBIG2 | decode: 6.4 ms arithmetic / 3.2 ms MMR for an 850x1100 page (no SkiaSharp baseline available) | not implemented (decode-only) |
+| JPEG 2000 | decode: 88.5 ms lossless / 44.7 ms lossy for 1280x960 RGB (no SkiaSharp baseline available) | not implemented (decode-only) |
+| JBIG2 | decode: 5.9 ms arithmetic / 3.0 ms MMR for an 850x1100 page (no SkiaSharp baseline available) | not implemented (decode-only) |
 | CCITT fax | decode: 20.9 ms Group 4 TIFF / 11.5 ms raw Group 4 stream for a 1700x2200 page (no SkiaSharp baseline available) | not implemented (decode-only) |
 | JPEG XL | decode: 291.1 ms for an 11 MP lossy image (no SkiaSharp baseline available) | 66.9 ms lossless / 235.6 ms lossy (q75, effort 5) for 1920x1080 RGB (no SkiaSharp baseline available); lossless size within 2% of libjxl effort 3; lossy files within a few percent of libjxl effort 7 at equal SSIMULACRA2 |
 | Resize | — | Downscale: 1.20×–2.97× (NearestNeighbor closest, Bilinear/cubic slower); Upscale: 1.39× (NearestNeighbor) or **0.24×–0.75×** (Bilinear/cubic family, faster than SkiaSharp) |

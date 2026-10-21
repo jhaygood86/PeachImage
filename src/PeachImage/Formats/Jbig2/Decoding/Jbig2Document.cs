@@ -4,6 +4,7 @@ using PeachImage.Formats.Shared.Arithmetic;
 namespace PeachImage.Formats.Jbig2.Decoding;
 
 /// <summary>Parses the segments of a JBIG2 stream (T.88 clause 7) and composes the first page's bitmap.</summary>
+#pragma warning disable CA1001 // The page bitmap is owned by the caller's Jbig2BitmapScope.
 internal sealed class Jbig2Document
 {
     private static readonly byte[] FileSignature = [0x97, 0x4A, 0x42, 0x32, 0x0D, 0x0A, 0x1A, 0x0A];
@@ -471,6 +472,7 @@ internal sealed class Jbig2Document
         }
 
         _page.Combine(bitmap, info.X, info.Y, info.Operator);
+        bitmap.Dispose();
     }
 
     private static bool IsImmediate(int type) => type is 6 or 7 or 22 or 23 or 38 or 39 or 42 or 43;

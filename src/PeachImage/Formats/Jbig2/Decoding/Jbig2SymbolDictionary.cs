@@ -241,6 +241,8 @@ internal static class Jbig2SymbolDictionaryDecoder
                     symbols[inputCount + i] = collective.Extract(x0, 0, widths![i], height);
                     x0 += widths[i];
                 }
+
+                collective.Dispose();
             }
         }
 

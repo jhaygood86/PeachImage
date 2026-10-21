@@ -1,43 +1,112 @@
+using System.Buffers;
 using PeachImage.Formats.Jpeg2000.Internal;
 
 namespace PeachImage.Formats.Jpeg2000.Decoding;
 
-/// <summary>A codeword segment of a code-block while packets are being read.</summary>
-internal sealed class J2kSegment
+/// <summary>A codeword segment of a code-block while packets are being read; segments of one block form a linked list in a <see cref="J2kSegmentArena"/>.</summary>
+internal struct J2kSegmentState
 {
-    public int MaxPasses { get; init; }
-
-    public int Passes { get; set; }
-
-    public List<ReadOnlyMemory<byte>> Chunks { get; } = [];
-
-    public int Length { get; set; }
+    public int MaxPasses;
+    public int Passes;
+    public int Length;
+    public int FirstChunk;
+    public int LastChunk;
+    public int Next;
 }
 
-/// <summary>One code-block of a precinct's subband.</summary>
-internal sealed class J2kCodeBlock
+/// <summary>A run of packet-body bytes belonging to a segment, as an offset into the tile data.</summary>
+internal struct J2kChunk
 {
-    public int X0 { get; init; }
+    public int Offset;
+    public int Length;
+    public int Next;
+}
 
-    public int Y0 { get; init; }
+/// <summary>Pooled storage for the segments and byte chunks of every code-block in a tile, so reading packets allocates nothing per block.</summary>
+internal sealed class J2kSegmentArena : IDisposable
+{
+    private J2kSegmentState[] _segments = ArrayPool<J2kSegmentState>.Shared.Rent(256);
+    private J2kChunk[] _chunks = ArrayPool<J2kChunk>.Shared.Rent(256);
+    private int _segmentCount;
+    private int _chunkCount;
 
-    public int X1 { get; init; }
+    public ref J2kSegmentState Segment(int index) => ref _segments[index];
 
-    public int Y1 { get; init; }
+    public ref J2kChunk Chunk(int index) => ref _chunks[index];
 
-    public bool Included { get; set; }
+    public int AddSegment(int maxPasses)
+    {
+        if (_segmentCount == _segments.Length)
+        {
+            Grow(ref _segments);
+        }
+
+        _segments[_segmentCount] = new J2kSegmentState { MaxPasses = maxPasses, FirstChunk = -1, LastChunk = -1, Next = -1 };
+        return _segmentCount++;
+    }
+
+    public void AddChunk(int segment, int offset, int length)
+    {
+        if (_chunkCount == _chunks.Length)
+        {
+            Grow(ref _chunks);
+        }
+
+        int index = _chunkCount++;
+        _chunks[index] = new J2kChunk { Offset = offset, Length = length, Next = -1 };
+        ref var state = ref _segments[segment];
+        if (state.LastChunk < 0)
+        {
+            state.FirstChunk = index;
+        }
+        else
+        {
+            _chunks[state.LastChunk].Next = index;
+        }
+
+        state.LastChunk = index;
+        state.Length += length;
+    }
+
+    public void Dispose()
+    {
+        ArrayPool<J2kSegmentState>.Shared.Return(_segments);
+        ArrayPool<J2kChunk>.Shared.Return(_chunks);
+        _segments = [];
+        _chunks = [];
+    }
+
+    private static void Grow<T>(ref T[] array)
+    {
+        var bigger = ArrayPool<T>.Shared.Rent(array.Length * 2);
+        Array.Copy(array, bigger, array.Length);
+        ArrayPool<T>.Shared.Return(array);
+        array = bigger;
+    }
+}
+
+/// <summary>One code-block of a precinct's subband. A struct inside the precinct-band array, so a tile's blocks cost one allocation per array.</summary>
+internal struct J2kCodeBlock
+{
+    public int X0;
+    public int Y0;
+    public int X1;
+    public int Y1;
+    public bool Included;
 
     /// <summary>Number of coded magnitude bit-planes (known once the block is first included).</summary>
-    public int BitPlanes { get; set; }
+    public int BitPlanes;
 
     /// <summary>The Lblock state of the packet header length coding.</summary>
-    public int LengthBits { get; set; } = 3;
+    public int LengthBits;
 
-    public List<J2kSegment> Segments { get; } = [];
+    /// <summary>First and last codeword segment in the tile's arena, or -1.</summary>
+    public int FirstSegment;
+    public int LastSegment;
 
-    public int Width => X1 - X0;
+    public readonly int Width => X1 - X0;
 
-    public int Height => Y1 - Y0;
+    public readonly int Height => Y1 - Y0;
 }
 
 /// <summary>The code-blocks of one subband inside one precinct, with the tag trees that code their inclusion and zero bit-planes.</summary>
@@ -284,7 +353,7 @@ internal sealed class J2kTileComponent
                             long y0 = Math.Max(pby0, (long)(cy0 + j) << cbh);
                             long x1 = Math.Min(pbx1, (long)(cx0 + i + 1) << cbw);
                             long y1 = Math.Min(pby1, (long)(cy0 + j + 1) << cbh);
-                            blocks[(j * blocksWide) + i] = new J2kCodeBlock { X0 = (int)x0, Y0 = (int)y0, X1 = (int)x1, Y1 = (int)y1 };
+                            blocks[(j * blocksWide) + i] = new J2kCodeBlock { X0 = (int)x0, Y0 = (int)y0, X1 = (int)x1, Y1 = (int)y1, LengthBits = 3, FirstSegment = -1, LastSegment = -1 };
                         }
                     }
 

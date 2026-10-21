@@ -180,6 +180,10 @@ internal static class Jbig2TextRegion
                 }
 
                 region.Combine(symbol, left, top, p.CombinationOperator);
+                if (refined)
+                {
+                    symbol.Dispose();
+                }
 
                 if (!p.Transposed && !rightCorner)
                 {
