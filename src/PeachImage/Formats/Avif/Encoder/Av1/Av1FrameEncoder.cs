@@ -20,7 +20,7 @@ internal static class Av1FrameEncoder
     /// quantization (<c>base_q_idx</c> forced to 0, AV1's coded-lossless trigger, rather than derived from
     /// <paramref name="quality"/>).
     /// </summary>
-    public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality, bool lossless = false, int effort = 2, Action<Av1BlockDecisionRecord>? onLeafCommitted = null)
+    public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality, bool lossless = false, int effort = 2, Action<Av1BlockDecisionRecord>? onLeafCommitted = null, int? tileRowsLog2 = null, int maxDegreeOfParallelism = -1)
     {
         // Lossless uses 128x128 superblocks (Av1SequenceHeaderWriter/Av1TileEncoder), so the coded canvas
         // must pad to a 128-pixel multiple instead of 64 -- same "every superblock fully in-bounds" reason
@@ -136,7 +136,27 @@ internal static class Av1FrameEncoder
 
         bool allowScreenContentTools = heuristicScreenContentTools;
         bool allowIntrabc = heuristicIntrabc;
-        byte[] tileBytes = EncodeTileTrial(allowScreenContentTools, allowIntrabc);
+
+        // Multi-tile (tile rows only, lossy only): each tile row is encoded as an independent image slice, which
+        // is exactly what AV1 requires at a tile boundary -- no above neighbors, fresh CDFs, fresh coefficient
+        // contexts -- so tiles can be encoded in parallel. The slices are written back into the shared
+        // reconstruction planes the loop-filter/CDEF searches below run over.
+        int chosenTileRowsLog2 = lossless || onLeafCommitted is not null
+            ? 0
+            : ResolveTileRowsLog2(tileRowsLog2, paddedHeight);
+        int tileSizeBytes = 1;
+        byte[] tileBytes;
+        if (chosenTileRowsLog2 > 0)
+        {
+            tileBytes = EncodeTileRows(
+                yPlane, uPlane, vPlane, reconY, reconU, reconV,
+                paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
+                monoChrome, baseQIdx, effort, chosenTileRowsLog2, maxDegreeOfParallelism, out tileSizeBytes);
+        }
+        else
+        {
+            tileBytes = EncodeTileTrial(allowScreenContentTools, allowIntrabc);
+        }
 
         // The real trial itself: the heuristic above only gates whether this ever runs at all (an image the
         // heuristic already ruled out as screen-content-like never pays this extra encode cost) -- once it
@@ -212,7 +232,7 @@ internal static class Av1FrameEncoder
         byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(headerWidth, headerHeight, monoChrome, chroma444, enableCdef: !lossless, use128x128Superblock: lossless, enableRestoration: lossless);
 
         var frameHeaderWriter = new Av1BitWriter();
-        Av1FrameHeaderWriter.Write(frameHeaderWriter, headerWidth, headerHeight, monoChrome, baseQIdx, lossless, loopFilterLevel, enableCdef: !lossless, cdefChoice, allowScreenContentTools, allowIntrabc, reducedTxSet: !lossless);
+        Av1FrameHeaderWriter.Write(frameHeaderWriter, headerWidth, headerHeight, monoChrome, baseQIdx, lossless, loopFilterLevel, enableCdef: !lossless, cdefChoice, allowScreenContentTools, allowIntrabc, reducedTxSet: !lossless, chosenTileRowsLog2, tileSizeBytes);
         byte[] frameHeaderPayload = frameHeaderWriter.ToArray();
 
         // A single combined OBU_FRAME (spec's frame_obu(): frame_header_obu() + byte_alignment() +
@@ -234,6 +254,118 @@ internal static class Av1FrameEncoder
 
         int seqLevelIdx = Av1SequenceHeaderWriter.ComputeSeqLevelIdx(headerWidth, headerHeight);
         return new Av1EncodedFrame(output.ToArray(), width, height, monoChrome, chroma444, seqLevelIdx);
+    }
+
+    private const int MinTileRowSuperblocks = 4;
+    private const int MaxAutoTileRowsLog2 = 3;
+
+    /// <summary>
+    /// The <c>tile_rows_log2</c> to encode with. An explicit request is clamped to what the frame can signal; automatic (null)
+    /// picks the most tile rows that still leave each tile at least <see cref="MinTileRowSuperblocks"/> superblocks tall
+    /// (so small images stay single-tile), capped at <see cref="MaxAutoTileRowsLog2"/>. Depends only on the image size,
+    /// never on the core count of the machine, so the same input always produces the same bytes.
+    /// </summary>
+    private static int ResolveTileRowsLog2(int? requested, int paddedHeight)
+    {
+        int miRows = paddedHeight / 4;
+        int maxLog2 = Av1TileInfoWriter.MaxTileRowsLog2(miRows, use128x128Superblock: false);
+        if (requested is int explicitLog2)
+        {
+            return Math.Clamp(explicitLog2, 0, maxLog2);
+        }
+
+        int sbRows = paddedHeight / 64;
+        int log2 = 0;
+        while (log2 < MaxAutoTileRowsLog2 && log2 < maxLog2 && (sbRows >> (log2 + 1)) >= MinTileRowSuperblocks)
+        {
+            log2++;
+        }
+
+        return log2;
+    }
+
+    /// <summary>
+    /// Encodes the frame as uniformly spaced tile rows in parallel and returns the tile group payload
+    /// (<c>tile_start_and_end_present_flag</c> byte, then each non-final tile prefixed by its little-endian size-minus-1).
+    /// </summary>
+    private static byte[] EncodeTileRows(
+        int[] yPlane, int[]? uPlane, int[]? vPlane,
+        int[] reconY, int[]? reconU, int[]? reconV,
+        int paddedWidth, int paddedHeight, int paddedChromaWidth, int paddedChromaHeight,
+        bool monoChrome, int baseQIdx, int effort, int tileRowsLog2, int maxDegreeOfParallelism, out int tileSizeBytes)
+    {
+        int[] rowStarts = Av1TileInfoWriter.ComputeRowStarts(paddedHeight / 4, use128x128Superblock: false, tileRowsLog2);
+        int tileCount = rowStarts.Length - 1;
+        var tiles = new byte[tileCount][];
+
+        Parallel.For(0, tileCount, new ParallelOptions { MaxDegreeOfParallelism = maxDegreeOfParallelism }, tile =>
+        {
+            int y0 = rowStarts[tile] * 4;
+            int height = (rowStarts[tile + 1] * 4) - y0;
+            int lumaLen = paddedWidth * height;
+
+            int[] ySlice = yPlane.AsSpan(y0 * paddedWidth, lumaLen).ToArray();
+            int[] reconYSlice = new int[lumaLen];
+            int[]? uSlice = null, vSlice = null, reconUSlice = null, reconVSlice = null;
+            int chromaHeight = 0;
+            int chromaOffset = (y0 / 2) * paddedChromaWidth;
+            if (!monoChrome)
+            {
+                chromaHeight = height / 2;
+                int chromaLen = paddedChromaWidth * chromaHeight;
+                uSlice = uPlane.AsSpan(chromaOffset, chromaLen).ToArray();
+                vSlice = vPlane.AsSpan(chromaOffset, chromaLen).ToArray();
+                reconUSlice = new int[chromaLen];
+                reconVSlice = new int[chromaLen];
+            }
+
+            tiles[tile] = Av1TileEncoder.EncodeTile(
+                ySlice, paddedWidth, height,
+                uSlice, vSlice, paddedChromaWidth, chromaHeight,
+                reconYSlice, reconUSlice, reconVSlice,
+                monoChrome, baseQIdx, lossless: false, chroma444: false, effort: effort, allowScreenContentTools: false, allowIntrabc: false,
+                trueWidth: paddedWidth, trueHeight: height);
+
+            reconYSlice.CopyTo(reconY.AsSpan(y0 * paddedWidth));
+            if (!monoChrome)
+            {
+                reconUSlice.CopyTo(reconU.AsSpan(chromaOffset));
+                reconVSlice.CopyTo(reconV.AsSpan(chromaOffset));
+            }
+        });
+
+        int maxSizeMinus1 = 0;
+        for (int i = 0; i < tileCount - 1; i++)
+        {
+            maxSizeMinus1 = Math.Max(maxSizeMinus1, tiles[i].Length - 1);
+        }
+
+        tileSizeBytes = maxSizeMinus1 <= 0xFF ? 1 : maxSizeMinus1 <= 0xFFFF ? 2 : maxSizeMinus1 <= 0xFFFFFF ? 3 : 4;
+
+        int total = 1 + tiles[tileCount - 1].Length;
+        for (int i = 0; i < tileCount - 1; i++)
+        {
+            total += tileSizeBytes + tiles[i].Length;
+        }
+
+        var group = new byte[total];
+        int cursor = 1; // group[0] == 0: tile_start_and_end_present_flag = 0, then byte_alignment().
+        for (int i = 0; i < tileCount; i++)
+        {
+            if (i < tileCount - 1)
+            {
+                int sizeMinus1 = tiles[i].Length - 1;
+                for (int b = 0; b < tileSizeBytes; b++)
+                {
+                    group[cursor++] = (byte)(sizeMinus1 >> (8 * b));
+                }
+            }
+
+            tiles[i].CopyTo(group, cursor);
+            cursor += tiles[i].Length;
+        }
+
+        return group;
     }
 
     /// <summary>Pads a <paramref name="srcWidth"/> x <paramref name="srcHeight"/> plane up to <paramref name="paddedWidth"/> x <paramref name="paddedHeight"/> by replicating the last real row/column into the padding region.</summary>

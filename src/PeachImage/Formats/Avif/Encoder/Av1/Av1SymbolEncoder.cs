@@ -344,7 +344,33 @@ internal sealed class Av1SymbolEncoder : IAv1SymbolSink
     /// than calling this method <c>n</c> times.</para>
     /// </summary>
     internal static int EstimateSymbolCost(ReadOnlySpan<ushort> cdf, int symbol)
-        => (int)Math.Round(EstimateSymbolCostPrecise512ths(cdf, symbol) / 512.0, MidpointRounding.AwayFromZero);
+    {
+        uint p15 = symbol == 0 ? cdf[0] : (uint)(cdf[symbol] - cdf[symbol - 1]);
+        return WholeBitCosts.Table[p15 < EcMinProb ? EcMinProb : p15];
+    }
+
+    // EstimateSymbolCostPrecise512ths rounded to whole bits, for every possible symbol probability mass
+    // (p15 < 32768 since a CDF tops out at 32768), so the RD-search hot path does one table load per symbol
+    // instead of a log2, a 64-bit divide and a double round. Built from the precise method itself, so the two
+    // can never disagree.
+    private static class WholeBitCosts
+    {
+        // Own type initializer (rather than a field of the enclosing class) so it can never run before
+        // Av1ProbCostTable, which is declared further down.
+        public static readonly byte[] Table = Build();
+
+        private static byte[] Build()
+        {
+            var table = new byte[1 << 15];
+            for (uint p15 = 0; p15 < table.Length; p15++)
+            {
+                uint clamped = p15 < EcMinProb ? EcMinProb : p15;
+                table[p15] = (byte)(int)Math.Round(Av1ProbCostSymbol(clamped) / 512.0, MidpointRounding.AwayFromZero);
+            }
+
+            return table;
+        }
+    }
 
     /// <summary>
     /// The same libaom-ported <c>av1_cost_symbol</c> estimate <see cref="EstimateSymbolCost"/> exposes, but

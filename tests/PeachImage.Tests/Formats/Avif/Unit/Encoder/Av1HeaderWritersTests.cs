@@ -101,6 +101,29 @@ public class Av1HeaderWritersTests
         Assert.Throws<ArgumentOutOfRangeException>(() => Av1FrameHeaderWriter.Write(writer, 64, 64, false, baseQIdx));
     }
 
+    [Theory]
+    [InlineData(68, 1)]   // 1088 px tall: 17 superblock rows -> 9 + 8
+    [InlineData(68, 2)]   // 5,5,5,2
+    [InlineData(68, 3)]   // 3,3,3,3,3,2
+    [InlineData(32, 3)]   // 8 superblock rows -> 8 tiles of 1
+    public void Write_TileInfo_MultipleTileRows_RoundTripsThroughParser(int sbRows, int tileRowsLog2)
+    {
+        int miRows = sbRows * 16;
+        int miCols = 64;
+        var writer = new Av1BitWriter();
+
+        var written = Av1TileInfoWriter.Write(writer, miCols, miRows, use128x128Superblock: false, tileRowsLog2, tileSizeBytes: 3);
+        byte[] bytes = writer.ToArray();
+        var parsed = Av1TileInfo.Parse(new Av1BitReader(bytes, 0, bytes.Length), use128x128Superblock: false, miCols, miRows);
+
+        Assert.Equal(written.TileRows, parsed.TileRows);
+        Assert.Equal(1, parsed.TileCols);
+        Assert.Equal(tileRowsLog2, parsed.TileRowsLog2);
+        Assert.Equal(written.MiRowStarts, parsed.MiRowStarts);
+        Assert.Equal(3, parsed.TileSizeBytes);
+        Assert.Equal(miRows, parsed.MiRowStarts[^1]);
+    }
+
     [Fact]
     public void Write_TileInfo_RejectsImageTooWideForSingleTile()
     {

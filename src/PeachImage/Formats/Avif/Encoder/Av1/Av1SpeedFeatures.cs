@@ -59,6 +59,17 @@ internal sealed record Av1SpeedFeatures(
     int PruneWinnerModeEvalLevel,
     int DcBlkPredLevel)
 {
+    /// <summary>
+    /// Non-lossless only (no libaom counterpart -- libaom's own lossy intra pruning is the HOG / model-RD /
+    /// winner-mode machinery above, which this encoder only wires up for lossless): how many of a luma block's
+    /// ~61 (mode, angle delta) candidates, ranked by prediction-residual SATD, get the full transform +
+    /// entropy-trial costing. 0 keeps every candidate (exhaustive).
+    /// </summary>
+    public int LossyLumaShortlistCount { get; init; }
+
+    /// <summary>Same as <see cref="LossyLumaShortlistCount"/>, for the partition-decision cost estimates (which only need a rough leaf-vs-split ranking, not the final committed mode). 0 keeps every candidate.</summary>
+    public int LossyLumaEstimateShortlistCount => LossyLumaShortlistCount <= 0 ? 0 : Math.Min(2, LossyLumaShortlistCount);
+
     /// <summary>libaom's <c>NO_PRUNING</c> sentinel for <see cref="SimpleMotionSearchPruneAgg"/> (aggressiveness levels otherwise run 0-5).</summary>
     public const int NoPruning = -1;
 
@@ -213,6 +224,9 @@ internal sealed record Av1SpeedFeatures(
             enableWinnerModeForUseTxDomainDist,
             enableWinnerModeForTxSizeSrch,
             pruneWinnerModeEvalLevel,
-            dcBlkPredLevel);
+            dcBlkPredLevel)
+        {
+            LossyLumaShortlistCount = effort switch { <= 1 => 0, 2 => 16, <= 4 => 10, <= 6 => 6, _ => 4 },
+        };
     }
 }

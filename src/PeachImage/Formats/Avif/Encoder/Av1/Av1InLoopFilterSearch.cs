@@ -58,13 +58,18 @@ internal static class Av1InLoopFilterSearch
         int[]? bestFilteredU = null;
         int[]? bestFilteredV = null;
 
-        foreach (int level in CandidateLevels)
+        // Candidate levels are independent trials on their own cloned planes, so they run in parallel; the
+        // winner is the lowest SSE (earliest candidate on a tie), exactly what the old sequential loop picked.
+        var gate = new object();
+        int bestIndex = int.MaxValue;
+        Parallel.For(0, CandidateLevels.Length, index =>
         {
+            int level = CandidateLevels[index];
             if (level == 0)
             {
                 // Already scored above (the unfiltered reconstruction, level 0's actual effect) -- skip
                 // re-filtering-and-measuring a no-op.
-                continue;
+                return;
             }
 
             int[] trialY = (int[])reconY.Clone();
@@ -76,15 +81,19 @@ internal static class Av1InLoopFilterSearch
             Av1DeblockingFilter.Apply(result);
 
             long sse = Av1SquaredError.Compute(trialY, sourceY) + Av1SquaredError.Compute(trialU, sourceU) + Av1SquaredError.Compute(trialV, sourceV);
-            if (sse < bestSse)
+            lock (gate)
             {
-                bestSse = sse;
-                bestLevel = level;
-                bestFilteredY = trialY;
-                bestFilteredU = trialU;
-                bestFilteredV = trialV;
+                if (sse < bestSse || (sse == bestSse && bestFilteredY is not null && index < bestIndex))
+                {
+                    bestSse = sse;
+                    bestLevel = level;
+                    bestIndex = index;
+                    bestFilteredY = trialY;
+                    bestFilteredU = trialU;
+                    bestFilteredV = trialV;
+                }
             }
-        }
+        });
 
         if (bestFilteredY is not null)
         {

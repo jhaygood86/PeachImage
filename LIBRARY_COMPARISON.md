@@ -494,7 +494,7 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 | GIF | **2.35×–6.77× (animated: 6.77×, static: 2.35×–5.01×)** | no SkiaSharp baseline (PeachImage-only) |
 | PNG | 0.93×–1.35× | 0.45×–1.41× |
 | WebP | 0.23×–2.14× (animated: **0.23×**, static: 1.15×–2.14×) | 0.99×–1.44× lossless (0.15× small-image outlier), 0.31× lossy |
-| AVIF | ~1.96× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented; lossy fixed 8x8 blocks, lossless has a real partition-tree RDO search up to 64x64 (see Encode (lossless size) above); throughput not yet measured here |
+| AVIF | ~1.96× vs. `ffmpeg` (no SkiaSharp baseline available) | implemented; lossy has a cost-based 8x8-32x32 partition search, lossless has a real partition-tree RDO search up to 64x64 (see Encode (lossless size) above); throughput not yet measured here |
 | TIFF | ~0.15×–0.35× vs. `ffmpeg` (no SkiaSharp baseline available; ratios dominated by `ffmpeg`'s process-spawn overhead, not decoder throughput) | not implemented (decode-only) |
 | JPEG 2000 | decode: 88.5 ms lossless / 44.7 ms lossy for 1280x960 RGB (no SkiaSharp baseline available) | not implemented (decode-only) |
 | JBIG2 | decode: 5.9 ms arithmetic / 3.0 ms MMR for an 850x1100 page (no SkiaSharp baseline available) | not implemented (decode-only) |

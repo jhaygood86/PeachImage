@@ -91,7 +91,9 @@ internal static class Av1FrameHeaderWriter
     /// there to match real encoders' own observed choice. Defaults to <see langword="true"/>, this method's
     /// pre-existing (and, for non-lossless, still unverified-safe-to-change) hardcoded value.
     /// </param>
-    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false, int loopFilterLevel = 0, bool enableCdef = false, Av1CdefChoice? cdef = null, bool allowScreenContentTools = false, bool allowIntrabc = false, bool reducedTxSet = true)
+    /// <param name="tileRowsLog2"><c>tile_rows_log2</c>: the frame is split into uniformly spaced tile rows (see <see cref="Av1TileInfoWriter"/>); 0 = a single tile.</param>
+    /// <param name="tileSizeBytes">Width in bytes (1-4) of each non-final tile's size field in the tile group; only signaled when <paramref name="tileRowsLog2"/> &gt; 0.</param>
+    public static Av1FrameHeader Write(Av1BitWriter writer, int width, int height, bool monoChrome, int baseQIdx, bool lossless = false, int loopFilterLevel = 0, bool enableCdef = false, Av1CdefChoice? cdef = null, bool allowScreenContentTools = false, bool allowIntrabc = false, bool reducedTxSet = true, int tileRowsLog2 = 0, int tileSizeBytes = 1)
     {
         var cdefChoice = cdef ?? Av1CdefChoice.Off;
         if (lossless)
@@ -142,7 +144,7 @@ internal static class Av1FrameHeaderWriter
             writer.WriteFlag(allowIntrabc);
         }
 
-        var tileInfo = Av1TileInfoWriter.Write(writer, miCols, miRows, use128x128Superblock: lossless);
+        var tileInfo = Av1TileInfoWriter.Write(writer, miCols, miRows, use128x128Superblock: lossless, tileRowsLog2, tileSizeBytes);
 
         writer.WriteBits((uint)baseQIdx, 8);
         writer.WriteFlag(false); // delta_q_y_dc coded flag -> DeltaQYDc = 0

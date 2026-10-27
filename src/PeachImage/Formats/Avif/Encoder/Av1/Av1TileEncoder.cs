@@ -5,9 +5,8 @@ namespace PeachImage.Formats.Avif.Encoder.Av1;
 
 /// <summary>
 /// Encodes one single-tile intra frame: walks the superblock grid (spec §5.11.4 <c>decode_partition()</c>'s
-/// write-side mirror). Non-lossless frames still force every 64x64 superblock to split all the way down to
-/// a uniform 8x8 leaf grid (this encoder does not implement non-lossless partition-tree RDO -- see
-/// <see cref="EncodePartitionForced"/>'s remarks for why). Lossless frames use 128x128 superblocks instead
+/// write-side mirror). Non-lossless frames use 64x64 superblocks that always split once, then pick leaf-vs-split
+/// per node down to 8x8 via <see cref="DecidePartition"/> (None/Split only). Lossless frames use 128x128 superblocks instead
 /// (<c>use_128x128_superblock</c>, matching libaom's own default choice for non-tiny images -- see
 /// <c>Av1SequenceHeaderWriter</c>) and run a real (if approximate) rate-distortion partition search
 /// (<see cref="DecidePartition"/>, Phase D) at each partition level down to spec's true 4x4 floor, comparing
@@ -1360,6 +1359,116 @@ internal static class Av1TileEncoder
         return (bestType, bestCost);
     }
 
+    /// <summary>SATD of the 4x4-tiled residual between the source and <paramref name="mode"/>/<paramref name="angleDelta"/>'s prediction, from edges already built into <paramref name="above"/>/<paramref name="left"/>.</summary>
+    private static long LossyPredictionSatd(TileState s, Av1EdgeArray above, Av1EdgeArray left, bool availL, bool availU, int x, int y, int sizePixels, int log2Size, bool filterTypeSmooth, int mode, int angleDelta)
+    {
+        var pred = s.Pred;
+        var source = s.SourceY;
+        int stride = s.YWidth;
+        Span<int> residual = stackalloc int[16];
+        Span<int> coeff = stackalloc int[16];
+
+        Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, x, y, bitDepth: 8);
+        long satd = 0;
+        for (int ty = 0; ty < sizePixels; ty += 4)
+        {
+            for (int tx = 0; tx < sizePixels; tx += 4)
+            {
+                for (int i = 0; i < 16; i++)
+                {
+                    int row = ty + (i >> 2);
+                    int col = tx + (i & 3);
+                    residual[i] = source[((y + row) * stride) + x + col] - pred[(row * sizePixels) + col];
+                }
+
+                Av1IntraModelRdPruner.Hadamard4x4(residual, 4, coeff);
+                satd += Av1IntraModelRdPruner.Satd(coeff);
+            }
+        }
+
+        return satd;
+    }
+
+    /// <summary>
+    /// Non-lossless luma mode shortlist (this encoder's analogue of libaom's intra model-RD / HOG pruning, which
+    /// are lossless-only here): predicts every <see cref="CandidateModes"/> x angle-delta candidate once, scores each
+    /// by prediction-residual SATD against the source, and returns the SATD of the <paramref name="keep"/>-th best
+    /// so the expensive transform + entropy-trial costing (<see cref="ComputeCandidateCost"/>) only runs on
+    /// candidates at or below it. <paramref name="metrics"/> receives one entry per candidate in the exact
+    /// (mode, angleDelta) iteration order both luma search loops use. Returns <see cref="long.MaxValue"/> (keep
+    /// everything) when <paramref name="keep"/> is not positive or covers every candidate.
+    /// </summary>
+    private static long ComputeLossyLumaShortlist(TileState s, int keep, Span<long> metrics, Av1EdgeArray above, Av1EdgeArray left, int[] edgeSource, bool availL, bool availU, bool haveAboveRight, bool haveBelowLeft, int x, int y, int sizePixels, int log2Size, bool filterTypeSmooth)
+    {
+        if (keep <= 0)
+        {
+            return long.MaxValue;
+        }
+
+        bool angleDeltaAllowed = sizePixels >= 8;
+        Av1IntraPrediction.BuildEdges(above, left, edgeSource, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
+
+        // Two-phase, like libaom's own angle-delta refinement: score every mode at angle delta 0 first, then
+        // only refine the other deltas for the best few directional modes. Candidates never scored keep
+        // long.MaxValue and so are never shortlisted.
+        int refinedDirectionalModes = keep <= 2 ? 0 : 3;
+        int total = 0;
+        foreach (int mode in CandidateModes)
+        {
+            total += Av1IntraMode.IsDirectional(mode) && angleDeltaAllowed ? (2 * MaxAngleDelta) + 1 : 1;
+        }
+
+        metrics[..total].Fill(long.MaxValue);
+        Span<int> modeBase = stackalloc int[CandidateModes.Length];
+        Span<long> deltaZeroSatd = stackalloc long[CandidateModes.Length];
+        int offset = 0;
+        for (int m = 0; m < CandidateModes.Length; m++)
+        {
+            int mode = CandidateModes[m];
+            bool directional = Av1IntraMode.IsDirectional(mode) && angleDeltaAllowed;
+            modeBase[m] = offset;
+            long zero = LossyPredictionSatd(s, above, left, availL, availU, x, y, sizePixels, log2Size, filterTypeSmooth, mode, 0);
+            deltaZeroSatd[m] = directional ? zero : long.MaxValue;
+            metrics[offset + (directional ? MaxAngleDelta : 0)] = zero;
+            offset += directional ? (2 * MaxAngleDelta) + 1 : 1;
+        }
+
+        if (angleDeltaAllowed)
+        {
+            for (int pick = 0; pick < refinedDirectionalModes; pick++)
+            {
+                int best = -1;
+                for (int m = 0; m < CandidateModes.Length; m++)
+                {
+                    if (deltaZeroSatd[m] != long.MaxValue && (best < 0 || deltaZeroSatd[m] < deltaZeroSatd[best]))
+                    {
+                        best = m;
+                    }
+                }
+
+                if (best < 0)
+                {
+                    break;
+                }
+
+                deltaZeroSatd[best] = long.MaxValue;
+                for (int angleDelta = -MaxAngleDelta; angleDelta <= MaxAngleDelta; angleDelta++)
+                {
+                    if (angleDelta != 0)
+                    {
+                        metrics[modeBase[best] + angleDelta + MaxAngleDelta] = LossyPredictionSatd(s, above, left, availL, availU, x, y, sizePixels, log2Size, filterTypeSmooth, CandidateModes[best], angleDelta);
+                    }
+                }
+            }
+        }
+
+        Span<long> sorted = stackalloc long[total];
+        metrics[..total].CopyTo(sorted);
+        sorted.Sort();
+        int scored = offset <= 0 ? 0 : sorted.IndexOf(long.MaxValue) is var firstUnscored and >= 0 ? firstUnscored : total;
+        return sorted[Math.Min(keep, scored) - 1];
+    }
+
     /// <summary>
     /// The best luma-only WHT-magnitude cost (<see cref="ComputeCandidateCost"/>) achievable for a
     /// <paramref name="sizeMi"/>-sized leaf at (<paramref name="r"/>, <paramref name="c"/>), searched over
@@ -1415,6 +1524,10 @@ internal static class Av1TileEncoder
         topIntraModelRd[..Math.Max(topModelCount, 0)].Fill(long.MaxValue);
         long bestModelRd = long.MaxValue;
 
+        Span<long> shortlistMetrics = stackalloc long[64];
+        long shortlistThreshold = s.Lossless ? long.MaxValue : ComputeLossyLumaShortlist(s, s.SpeedFeatures.LossyLumaEstimateShortlistCount, shortlistMetrics, above, left, s.SourceY, availL, availU, haveAboveRight: false, haveBelowLeft: false, x, y, sizePixels, log2Size, filterTypeSmooth: false);
+        int candidateIndex = 0;
+
         foreach (int mode in CandidateModes)
         {
             if (IsLumaModePruned(mode, directionalModeSkipMask, skipSmoothVh, skipSmoothPlain))
@@ -1428,6 +1541,11 @@ internal static class Av1TileEncoder
 
             for (int angleDelta = minDelta; angleDelta <= maxDelta; angleDelta++)
             {
+                if (shortlistThreshold != long.MaxValue && shortlistMetrics[candidateIndex++] > shortlistThreshold)
+                {
+                    continue;
+                }
+
                 if (topModelCount > 0)
                 {
                     long modelRd = ComputeIntraModelRd(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels / 4, sizePixels / 4, ptype: 0, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth: false, useRealBoundaryAvailability: false);
@@ -1874,7 +1992,9 @@ internal static class Av1TileEncoder
         long bestCost = long.MaxValue;
         foreach (int mode in CandidateModes)
         {
-            bool directional = Av1IntraMode.IsDirectional(mode);
+            // Non-lossless only needs a rough leaf-vs-split ranking here (SearchUvMode re-searches the chosen
+            // leaf's real angle deltas), so skip the nonzero angle deltas -- 13 candidates instead of 61.
+            bool directional = Av1IntraMode.IsDirectional(mode) && s.Lossless;
             int minDelta = directional ? -MaxAngleDelta : 0;
             int maxDelta = directional ? MaxAngleDelta : 0;
 
@@ -3556,6 +3676,10 @@ internal static class Av1TileEncoder
             : true;
         var uvModeCostCdf = cflAllowedForCost ? s.Cdf.UvModeCflAllowed[lumaMode] : s.Cdf.UvModeCflNotAllowed[lumaMode];
 
+        // Lossy encoding reuses the same libaom luma-winner chroma pruning once the lossy shortlist is on (it is
+        // otherwise only driven by the effort level's own table).
+        bool pruneChromaByLumaWinner = s.SpeedFeatures.PruneChromaModesUsingLumaWinner || (!s.Lossless && s.SpeedFeatures.LossyLumaShortlistCount > 0);
+
         foreach (int mode in CandidateModes)
         {
             if (Av1IntraMode.IsDirectional(mode) && chromaDirectionalSkipMask[mode])
@@ -3572,7 +3696,7 @@ internal static class Av1TileEncoder
             // speed_features.c override, since the HOG pruning becomes redundant once directional candidates
             // are already capped to one) -- so this is never redundant work with the check above, just a
             // second, independent gate for the effort levels where each is actually active.
-            if (s.SpeedFeatures.PruneChromaModesUsingLumaWinner && (ChromaModeUsedFlagByLumaWinner[lumaMode] & (1 << mode)) == 0)
+            if (pruneChromaByLumaWinner && (ChromaModeUsedFlagByLumaWinner[lumaMode] & (1 << mode)) == 0)
             {
                 continue;
             }
@@ -3943,6 +4067,10 @@ internal static class Av1TileEncoder
         topIntraModelRd[..Math.Max(topModelCount, 0)].Fill(long.MaxValue);
         long bestModelRd = long.MaxValue;
 
+        Span<long> shortlistMetrics = stackalloc long[64];
+        long shortlistThreshold = s.Lossless ? long.MaxValue : ComputeLossyLumaShortlist(s, s.SpeedFeatures.LossyLumaShortlistCount, shortlistMetrics, above, left, s.ReconY, availL, availU, haveAboveRight, haveBelowLeft, x, y, sizePixels, log2Size, filterTypeSmooth);
+        int candidateIndex = 0;
+
         foreach (int mode in CandidateModes)
         {
             if (IsLumaModePruned(mode, directionalModeSkipMask, skipSmoothVh, skipSmoothPlain))
@@ -3956,6 +4084,11 @@ internal static class Av1TileEncoder
 
             for (int angleDelta = minDelta; angleDelta <= maxDelta; angleDelta++)
             {
+                if (shortlistThreshold != long.MaxValue && shortlistMetrics[candidateIndex++] > shortlistThreshold)
+                {
+                    continue;
+                }
+
                 if (topModelCount > 0)
                 {
                     long modelRd = ComputeIntraModelRd(s, s.SourceY, s.YWidth, s.YHeight, r, c, x, y, sizePixels / 4, sizePixels / 4, ptype: 0, mode, angleDelta, useFilterIntra: false, filterIntraMode: 0, filterTypeSmooth, useRealBoundaryAvailability: true);

@@ -64,8 +64,12 @@ internal static class Av1CdefSearch
         var bestChoice = Av1CdefChoice.Off;
         long bestSse = Av1SquaredError.Compute(reconY, sourceY, lumaLen) + Av1SquaredError.Compute(reconU, sourceU, chromaLen) + Av1SquaredError.Compute(reconV, sourceV, chromaLen);
 
-        foreach ((int pri, int sec) in Candidates)
+        // Candidates are independent trials on their own pooled copies, so they run in parallel; the winner is
+        // then picked sequentially in candidate order (strict improvement only), exactly as before.
+        var candidateSse = new long[Candidates.Length];
+        Parallel.For(0, Candidates.Length, index =>
         {
+            (int pri, int sec) = Candidates[index];
             var choice = new Av1CdefChoice(Damping: 3, YPriStrength: pri, YSecStrength: sec, UvPriStrength: pri, UvSecStrength: sec);
 
             var (trialY, trialU, trialV) = RentAndCopy(reconY, reconU, reconV, lumaLen, chromaLen);
@@ -73,13 +77,17 @@ internal static class Av1CdefSearch
             var result = BuildDecodeResult(seq, frame, trialY, trialU, trialV, miCols, miRows, width, height, chromaWidth, chromaHeight);
             Av1Cdef.Apply(result);
 
-            long sse = Av1SquaredError.Compute(result.Planes[0], sourceY, lumaLen) + Av1SquaredError.Compute(monoChrome ? null : result.Planes[1], sourceU, chromaLen) + Av1SquaredError.Compute(monoChrome ? null : result.Planes[2], sourceV, chromaLen);
+            candidateSse[index] = Av1SquaredError.Compute(result.Planes[0], sourceY, lumaLen) + Av1SquaredError.Compute(monoChrome ? null : result.Planes[1], sourceU, chromaLen) + Av1SquaredError.Compute(monoChrome ? null : result.Planes[2], sourceV, chromaLen);
             ReturnPlanes(result, monoChrome);
+        });
 
-            if (sse < bestSse)
+        for (int index = 0; index < Candidates.Length; index++)
+        {
+            if (candidateSse[index] < bestSse)
             {
-                bestSse = sse;
-                bestChoice = choice;
+                bestSse = candidateSse[index];
+                (int pri, int sec) = Candidates[index];
+                bestChoice = new Av1CdefChoice(Damping: 3, YPriStrength: pri, YSecStrength: sec, UvPriStrength: pri, UvSecStrength: sec);
             }
         }
 
