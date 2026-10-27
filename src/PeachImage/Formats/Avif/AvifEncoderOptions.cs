@@ -31,21 +31,33 @@ public sealed class AvifEncoderOptions : EncoderOptions
     public bool Lossless { get; init; }
 
     /// <summary>
-    /// How exhaustively the lossless encoder searches for the smallest output, 0 (slowest, most thorough) to
-    /// 9 (fastest, most pruned). Defaults to 2 ("Good Quality"). Mirrors libaom's own <c>--cpu-used</c> under
-    /// AV1's ALL_INTRA usage mode -- the mode AVIF still-image encoding uses -- so a given value is meant to
-    /// be a direct port of libaom's own per-level search behavior at that <c>cpu-used</c> value, not an
-    /// independently-tuned scale (see the project plan, compare-avif-encoding-to-lucky-clover.md).
+    /// How exhaustively the encoder searches for the smallest output, 0 (slowest, most thorough) to 9
+    /// (fastest, most pruned). Defaults to 2. For lossless encoding this mirrors libaom's own
+    /// <c>--cpu-used</c> under AV1's ALL_INTRA usage mode (see below).
     ///
-    /// <para><b>Validated but not yet load-bearing</b>: this value is threaded through and computed into the
-    /// full libaom speed-feature table (every field unit-tested against libaom's own source), but no search
-    /// decision consults it yet -- an initial attempt at wiring it into the mode-search prescreen measurably
-    /// regressed lossless output size and was reverted rather than shipped as a regression (see
-    /// <c>Av1TileEncoder.TileState.SpeedFeatures</c>'s remarks). Every <see cref="Effort"/> value currently
-    /// produces identical lossless output; this will change as that work lands.</para>
+    /// <para><b>Lossy</b> (<see cref="Lossless"/> <see langword="false"/>): 0 and 1 try every luma intra mode
+    /// and angle delta with full transform and entropy costing (slowest). From 2 upward only the luma
+    /// candidates with the best prediction-residual SATD get that full costing (16 at effort 2, 10 at 3-4,
+    /// 6 at 5-6, 4 at 7-9), the partition search ranks leaf-vs-split with a much smaller shortlist, and the
+    /// chroma search is restricted by the luma winner. The default is roughly 5x faster than effort 0 for
+    /// well under 1% larger output on photographic content.</para>
     ///
-    /// <para>Ignored when <see cref="Lossless"/> is <see langword="false"/>: <see cref="Quality"/>-based
-    /// encoding does not yet have an equivalent effort knob.</para>
+    /// <para><b>Lossless</b>: validated but not yet load-bearing. This value is threaded through and computed
+    /// into the full libaom speed-feature table, but no lossless search decision consults it yet -- an initial
+    /// attempt at wiring it into the mode-search prescreen measurably regressed lossless output size and was
+    /// reverted. Every <see cref="Effort"/> value currently produces identical lossless output.</para>
     /// </summary>
     public int Effort { get; init; } = 2;
+
+    /// <summary>
+    /// Lossy encoding only: <c>log2</c> of the number of tile rows to split the image into (0 = one tile, 3 = up to 8 tile rows).
+    /// Tile rows are encoded in parallel, at a small compression cost (no prediction across a tile boundary), so large
+    /// images encode much faster. <see langword="null"/> (the default) chooses automatically from the image height alone
+    /// -- images under 512 pixels tall stay single-tile -- so the output never depends on the machine. Ignored when
+    /// <see cref="Lossless"/> is <see langword="true"/>.
+    /// </summary>
+    public int? TileRowsLog2 { get; init; }
+
+    /// <summary>The maximum number of threads used to encode tile rows in parallel. -1 (the default) uses all cores; 1 encodes sequentially. Does not change the output.</summary>
+    public int MaxDegreeOfParallelism { get; init; } = -1;
 }

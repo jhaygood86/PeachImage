@@ -43,15 +43,17 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   `AvifUnsupportedFeatureException` rather than a silently wrong result. Encode is implemented for 8-bit
   still images (a single `av01` item, or two — color plus an `iref auxl`-referenced monochrome alpha item
   — for a source with real transparency; no HEIF `grid`/`avis` animation on the output side even though
-  decode supports reading them). Both a lossy path (`Quality`, DCT_DCT, fixed 4:2:0 chroma, every luma
-  block a fixed 8x8 leaf) and a lossless path (`Lossless`, AV1's Walsh-Hadamard coded-lossless mode,
+  decode supports reading them). Both a lossy path (`Quality`, DCT/ADST/identity transforms, fixed 4:2:0
+  chroma, a cost-based 8x8-32x32 partition search) and a lossless path (`Lossless`, AV1's Walsh-Hadamard coded-lossless mode,
   forcing 4x4 transforms, full-resolution 4:4:4 chroma via an identity RGB→YUV matrix, a real cost-based
   partition-tree size search up to 64x64, and screen-content tools) are supported; lossless round-trips
   every pixel format exactly — see `AvifEncoderOptions.Lossless`'s remarks. Every leaf gets a real,
   cost-based intra-mode search (all 13 AV1 intra modes plus `angle_delta` for the 8 directional ones, plus
-  FILTER_INTRA) for luma; lossless chroma gets the same real mode search (non-lossless chroma stays
-  DC_PRED, since its transform type is mode-dependent and this encoder's non-lossless chroma path doesn't
-  yet implement the non-DCT transforms that searching a real mode there would need). Higher bit depths are
+  FILTER_INTRA) for luma, and chroma gets a real mode search too (including CfL); the lossy search shortlists
+  luma candidates by prediction-residual SATD and prunes chroma modes by the luma winner, controlled by
+  `AvifEncoderOptions.Effort`. Lossy images 512 pixels or taller are split into tile rows that encode in parallel
+  (`TileRowsLog2` / `MaxDegreeOfParallelism`; about 1% larger output on a 1080p photo, picked from the image size
+  alone so output never depends on the machine). Higher bit depths are
   rejected with a clear exception rather than silently dropped or downsampled. The forward RGB→YUV
   conversion, forward transform, and quantizer all use SIMD-tiered kernels (scalar/`Vector128`/`Vector256`,
   matching the JPEG/WebP encoders' own dispatch pattern) and pool their per-block working buffers rather

@@ -220,4 +220,22 @@ public class Av1SpeedFeaturesTests
         Assert.Equal(4, sf9.IntraPruningWithHog);
         Assert.Equal(1, sf9.IntrabcSearchLevel);
     }
+
+    [Theory]
+    [InlineData(0, 0, 0)]
+    [InlineData(1, 0, 0)]
+    [InlineData(2, 16, 2)]
+    [InlineData(3, 10, 2)]
+    [InlineData(4, 10, 2)]
+    [InlineData(5, 6, 2)]
+    [InlineData(6, 6, 2)]
+    [InlineData(7, 4, 2)]
+    [InlineData(9, 4, 2)]
+    public void LossyLumaShortlistCounts_FollowEffort(int effort, int expectedKeep, int expectedEstimateKeep)
+    {
+        var sf = Av1SpeedFeatures.Compute(effort, allowScreenContentTools: false);
+
+        Assert.Equal(expectedKeep, sf.LossyLumaShortlistCount);
+        Assert.Equal(expectedEstimateKeep, sf.LossyLumaEstimateShortlistCount);
+    }
 }

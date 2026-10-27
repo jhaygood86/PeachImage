@@ -32,6 +32,80 @@ public class EncodeDecodeRoundTripTests
     }
 
     [Theory]
+    [InlineData(96, 320, 1)]
+    [InlineData(96, 320, 2)]
+    [InlineData(96, 320, 3)]
+    [InlineData(70, 333, 2)] // non-superblock-multiple width and height: padded tile slices
+    public void MultiTileLossy_RoundTrips(int width, int height, int tileRowsLog2)
+    {
+        var source = CreateGradientImage(width, height);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 90, TileRowsLog2 = tileRowsLog2 });
+
+        Assert.Equal(width, decoded.Width);
+        Assert.Equal(height, decoded.Height);
+        AssertPsnrAtLeast(source, decoded, minPsnrDb: 20.0);
+    }
+
+    [Fact]
+    public void MultiTileLossy_RgbaWithAlpha_RoundTrips()
+    {
+        var source = CreateRgbaGradientWithAlpha(96, 320);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 90, TileRowsLog2 = 2 });
+
+        Assert.Equal(96, decoded.Width);
+        Assert.Equal(320, decoded.Height);
+        Assert.True(decoded.HasAlpha);
+    }
+
+    [Fact]
+    public void MultiTileLossy_OutputDoesNotDependOnDegreeOfParallelism()
+    {
+        var source = CreateGradientImage(96, 320);
+
+        byte[] Encode(int maxDegreeOfParallelism)
+        {
+            using var ms = new MemoryStream();
+            source.Save(ms, "avif", new AvifEncoderOptions { TileRowsLog2 = 2, MaxDegreeOfParallelism = maxDegreeOfParallelism });
+            return ms.ToArray();
+        }
+
+        Assert.Equal(Encode(1), Encode(-1));
+    }
+
+    [Fact]
+    public void AutomaticTiling_KeepsSmallImagesSingleTile()
+    {
+        var source = CreateGradientImage(96, 320);
+
+        byte[] Encode(AvifEncoderOptions options)
+        {
+            using var ms = new MemoryStream();
+            source.Save(ms, "avif", options);
+            return ms.ToArray();
+        }
+
+        Assert.Equal(Encode(new AvifEncoderOptions { TileRowsLog2 = 0 }), Encode(new AvifEncoderOptions()));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    [InlineData(5)]
+    [InlineData(9)]
+    public void LossyEffortLevels_AllRoundTrip(int effort)
+    {
+        var source = CreateGradientImage(160, 96);
+
+        var decoded = EncodeThenDecode(source, new AvifEncoderOptions { Quality = 90, Effort = effort });
+
+        Assert.Equal(160, decoded.Width);
+        Assert.Equal(96, decoded.Height);
+        AssertPsnrAtLeast(source, decoded, minPsnrDb: 20.0);
+    }
+
+    [Theory]
     [InlineData(64, 64)]
     [InlineData(50, 40)]
     public void Rgb24Gradient_RoundTrips_ViaPublicApi(int width, int height)

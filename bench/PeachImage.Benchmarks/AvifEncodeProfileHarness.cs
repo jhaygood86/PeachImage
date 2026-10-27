@@ -34,8 +34,14 @@ internal static class AvifEncodeProfileHarness
             || !Modes.TryGetValue(args[2], out AvifEncoderOptions? options))
         {
             Console.Error.WriteLine(
-                $"usage: avif-encode-profile <{string.Join('|', Scenarios.Keys)}> <{string.Join('|', Modes.Keys)}> [iterations]");
+                $"usage: avif-encode-profile <{string.Join('|', Scenarios.Keys)}> <{string.Join('|', Modes.Keys)}> [iterations] [tileRowsLog2]");
             return 1;
+        }
+
+        // Optional 5th argument: lossy tile_rows_log2 override (0 = single tile); default is the encoder's automatic choice.
+        if (args.Length >= 5 && int.TryParse(args[4], out int tileRowsLog2) && !options.Lossless)
+        {
+            options = new AvifEncoderOptions { TileRowsLog2 = tileRowsLog2 };
         }
 
         int iterations = args.Length >= 4 && int.TryParse(args[3], out int parsed) && parsed > 0
@@ -65,6 +71,28 @@ internal static class AvifEncodeProfileHarness
                           $"({stopwatch.Elapsed.TotalMilliseconds / iterations:F3} ms/iteration)");
         Console.WriteLine($"allocated: {allocatedBytes:N0} bytes total ({allocatedBytes / (double)iterations / 1024.0:F1} KB/iteration)");
         Console.WriteLine($"checksum: {sink:X}");
+
+        // Output size and round-trip PSNR of the final encode, so speed/size tradeoffs (e.g. AvifEncoderOptions.Effort) can be judged from one run.
+        using var encoded = new MemoryStream();
+        AvifEncoder.Encode(image, encoded, options);
+        if (args.Length >= 6)
+        {
+            File.WriteAllBytes(args[5], encoded.ToArray());
+        }
+
+        encoded.Position = 0;
+        var decoded = AvifDecoder.Decode(encoded);
+        ReadOnlySpan<byte> a = image.GetPixelSpan();
+        ReadOnlySpan<byte> b = decoded.GetPixelSpan();
+        double sse = 0;
+        for (int i = 0; i < Math.Min(a.Length, b.Length); i++)
+        {
+            double d = a[i] - b[i];
+            sse += d * d;
+        }
+
+        double psnr = 10 * Math.Log10(255.0 * 255.0 * Math.Min(a.Length, b.Length) / Math.Max(sse, 1e-9));
+        Console.WriteLine($"output: {encoded.Length:N0} bytes, PSNR {psnr:F2} dB");
         return 0;
     }
 

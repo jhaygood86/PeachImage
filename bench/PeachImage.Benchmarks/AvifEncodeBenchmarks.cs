@@ -44,6 +44,26 @@ public class AvifEncodeBenchmarks
     [BenchmarkCategory("Small-Image-Lossless")]
     public MemoryStream PeachImage_Encode_Small_Lossless() => Encode(_small, Lossless);
 
+    [Benchmark]
+    [BenchmarkCategory("Photographic-420-Tiles")]
+    public MemoryStream PeachImage_Encode_Photographic420_SingleTile() => Encode(_photographic420, new AvifEncoderOptions { TileRowsLog2 = 0 });
+
+    [Benchmark]
+    [BenchmarkCategory("Photographic-420-Tiles")]
+    public MemoryStream PeachImage_Encode_Photographic420_Tiles8() => Encode(_photographic420, new AvifEncoderOptions { TileRowsLog2 = 3 });
+
+    [Benchmark]
+    [BenchmarkCategory("Photographic-420-Effort")]
+    public MemoryStream PeachImage_Encode_Photographic420_Effort0() => Encode(_photographic420, new AvifEncoderOptions { Effort = 0 });
+
+    [Benchmark]
+    [BenchmarkCategory("Photographic-420-Effort")]
+    public MemoryStream PeachImage_Encode_Photographic420_Effort5() => Encode(_photographic420, new AvifEncoderOptions { Effort = 5 });
+
+    [Benchmark]
+    [BenchmarkCategory("Photographic-420-Effort")]
+    public MemoryStream PeachImage_Encode_Photographic420_Effort9() => Encode(_photographic420, new AvifEncoderOptions { Effort = 9 });
+
     private static readonly AvifEncoderOptions Lossy = new();
     private static readonly AvifEncoderOptions Lossless = new() { Lossless = true };
 

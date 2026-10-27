@@ -405,14 +405,32 @@ internal static class Av1CoefficientWriter
         int col = pos - (row << bwl);
         int mag = 0;
 
-        for (int idx = 0; idx < Av1CoeffTables.SigRefDiffOffsetNum; idx++)
+        // TX_CLASS_2D's fixed neighbor set, Av1CoeffTables.SigRefDiffOffset[Class2D] = (row, col) offsets
+        // (0,1) (1,0) (1,1) (0,2) (2,0), unrolled instead of walking that jagged table per coefficient.
+        bool hasCol1 = col + 1 < width;
+        bool hasRow1 = row + 1 < height;
+        if (hasCol1)
         {
-            int refRow = row + Av1CoeffTables.SigRefDiffOffset[Av1TxClass.Class2D][idx][0];
-            int refCol = col + Av1CoeffTables.SigRefDiffOffset[Av1TxClass.Class2D][idx][1];
-            if (refRow >= 0 && refCol >= 0 && refRow < height && refCol < width)
+            mag += Math.Min(Math.Abs(quantLevels[pos + 1]), 3);
+        }
+
+        if (hasRow1)
+        {
+            mag += Math.Min(Math.Abs(quantLevels[pos + width]), 3);
+            if (hasCol1)
             {
-                mag += Math.Min(Math.Abs(quantLevels[(refRow << bwl) + refCol]), 3);
+                mag += Math.Min(Math.Abs(quantLevels[pos + width + 1]), 3);
             }
+
+            if (row + 2 < height)
+            {
+                mag += Math.Min(Math.Abs(quantLevels[pos + (2 * width)]), 3);
+            }
+        }
+
+        if (col + 2 < width)
+        {
+            mag += Math.Min(Math.Abs(quantLevels[pos + 2]), 3);
         }
 
         int ctx = Math.Min((mag + 1) >> 1, 4);
@@ -435,16 +453,22 @@ internal static class Av1CoefficientWriter
         int col = pos - (row << bwl);
         int mag = 0;
 
-        for (int idx = 0; idx < 3; idx++)
+        // TX_CLASS_2D's Mag_Ref_Offset: (row, col) offsets (0,1) (1,0) (1,1), unrolled.
+        const int BrCap = Av1CoeffTables.CoeffBaseRange + Av1CoeffTables.NumBaseLevels + 1;
+        int width = 1 << bwl;
+        bool hasCol1 = col + 1 < width;
+        bool hasRow1 = row + 1 < txh;
+        if (hasCol1)
         {
-            int refRow = row + Av1CoeffTables.MagRefOffsetWithTxClass[Av1TxClass.Class2D][idx][0];
-            int refCol = col + Av1CoeffTables.MagRefOffsetWithTxClass[Av1TxClass.Class2D][idx][1];
-            if (refRow >= 0 && refCol >= 0 && refRow < txh && refCol < (1 << bwl))
+            mag += Math.Min(Math.Abs(quantLevels[pos + 1]), BrCap);
+        }
+
+        if (hasRow1)
+        {
+            mag += Math.Min(Math.Abs(quantLevels[pos + width]), BrCap);
+            if (hasCol1)
             {
-                // (refRow << bwl), not a runtime `refRow * Width[adjTxSz]` multiply -- Width is always
-                // 1 << WidthLog2 by construction (same invariant GetCoeffBaseCtx's own identical flattening
-                // already relies on), so this is the same value computed cheaper, not a different one.
-                mag += Math.Min(Math.Abs(quantLevels[(refRow << bwl) + refCol]), Av1CoeffTables.CoeffBaseRange + Av1CoeffTables.NumBaseLevels + 1);
+                mag += Math.Min(Math.Abs(quantLevels[pos + width + 1]), BrCap);
             }
         }
 
