@@ -72,6 +72,8 @@ internal static class Av1Cdef
 
         for (int r = 0; r < frame.MiRows; r += step4)
         {
+            CopyStrip(result, cdefPlanes, seq, r, frame.MiCols);
+
             for (int c = 0; c < frame.MiCols; c += step4)
             {
                 int baseR = r & cdefMask4;
@@ -99,24 +101,6 @@ internal static class Av1Cdef
         public int[][] CdefPlanes { get; } = cdefPlanes;
 
         public bool CdefAvailable { get; set; }
-
-        // Reusable CDEF-direction-search scratch (spec's cost[8]/partial[8][15]), cleared and reused for
-        // every 8x8 block in the frame instead of allocating fresh each call -- this is called once per
-        // non-skip block (tens of thousands per 1080p frame), so freshly allocating 10 small arrays per
-        // call was a real, measured allocation hot spot.
-        public readonly long[] Cost = new long[8];
-        public readonly long[][] Partial = CreatePartial();
-
-        private static long[][] CreatePartial()
-        {
-            var partial = new long[8][];
-            for (int i = 0; i < 8; i++)
-            {
-                partial[i] = new long[15];
-            }
-
-            return partial;
-        }
     }
 
     /// <summary><c>CDEF block process</c> (spec §7.15.1).</summary>
@@ -125,21 +109,6 @@ internal static class Av1Cdef
         var result = state.Result;
         var seq = result.Sequence;
         var frame = result.Frame;
-
-        int startY = r * 4;
-        int endY = startY + 8;
-        int startX = c * 4;
-        int endX = startX + 8;
-
-        CopyBlock(result.Planes[0], state.CdefPlanes[0], result.PlaneWidths[0], startX, startY, endX, endY);
-
-        if (seq.NumPlanes > 1)
-        {
-            int subX = seq.SubsamplingX ? 1 : 0;
-            int subY = seq.SubsamplingY ? 1 : 0;
-            CopyBlock(result.Planes[1], state.CdefPlanes[1], result.PlaneWidths[1], startX >> subX, startY >> subY, endX >> subX, endY >> subY);
-            CopyBlock(result.Planes[2], state.CdefPlanes[2], result.PlaneWidths[2], startX >> subX, startY >> subY, endX >> subX, endY >> subY);
-        }
 
         if (idx == -1)
         {
@@ -158,7 +127,15 @@ internal static class Av1Cdef
             return;
         }
 
-        var (yDir, var) = CdefDirection(state, r, c);
+        // The direction (and variance) only steer the primary taps, so a block whose luma and chroma
+        // primary strengths are both zero never needs the search: dir stays 0 and the adjusted priStr stays 0.
+        bool needDirection = frame.Cdef.YPriStrength[idx] != 0 || (seq.NumPlanes > 1 && frame.Cdef.UvPriStrength[idx] != 0);
+        int yDir = 0;
+        int var = 0;
+        if (needDirection)
+        {
+            (yDir, var) = CdefDirection(state, r, c);
+        }
 
         int priStr = frame.Cdef.YPriStrength[idx] << coeffShift;
         int secStr = frame.Cdef.YSecStrength[idx] << coeffShift;
@@ -167,7 +144,12 @@ internal static class Av1Cdef
         priStr = var != 0 ? (((priStr * (4 + varStr)) + 8) >> 4) : 0;
         int damping = frame.Cdef.Damping + coeffShift;
 
-        CdefFilter(state, 0, r, c, priStr, secStr, damping, dir);
+        // With both strengths zero every constrained tap is 0, so the output is the unchanged center
+        // sample, which the strip copy already wrote.
+        if (priStr != 0 || secStr != 0)
+        {
+            CdefFilter(state, 0, r, c, priStr, secStr, damping, dir);
+        }
 
         if (seq.NumPlanes == 1)
         {
@@ -179,64 +161,78 @@ internal static class Av1Cdef
         dir = priStr == 0 ? 0 : CdefUvDir[seq.SubsamplingX ? 1 : 0][seq.SubsamplingY ? 1 : 0][yDir];
         damping = frame.Cdef.Damping + coeffShift - 1;
 
-        CdefFilter(state, 1, r, c, priStr, secStr, damping, dir);
-        CdefFilter(state, 2, r, c, priStr, secStr, damping, dir);
+        if (priStr != 0 || secStr != 0)
+        {
+            CdefFilter(state, 1, r, c, priStr, secStr, damping, dir);
+            CdefFilter(state, 2, r, c, priStr, secStr, damping, dir);
+        }
     }
 
-    private static void CopyBlock(int[] src, int[] dst, int stride, int startX, int startY, int endX, int endY)
+    /// <summary>
+    /// Seeds the output planes with the deblocked samples for the 8-luma-row strip starting at mi row
+    /// <paramref name="r"/>: exactly the union of the per-8x8-block regions (columns up to MiCols rounded up to
+    /// an even count of 4-sample units) the spec's per-block copy covers, but as one contiguous copy per row.
+    /// </summary>
+    private static void CopyStrip(Av1FrameDecodeResult result, int[][] cdefPlanes, Av1SequenceHeader seq, int r, int miCols)
     {
-        for (int y = startY; y < endY; y++)
+        int widthLuma = ((miCols + 1) & ~1) * 4;
+        for (int plane = 0; plane < seq.NumPlanes; plane++)
         {
-            for (int x = startX; x < endX; x++)
+            int subX = plane > 0 && seq.SubsamplingX ? 1 : 0;
+            int subY = plane > 0 && seq.SubsamplingY ? 1 : 0;
+            int stride = result.PlaneWidths[plane];
+            int startY = (r * 4) >> subY;
+            int endY = ((r * 4) + 8) >> subY;
+            int width = widthLuma >> subX;
+            for (int y = startY; y < endY; y++)
             {
-                int idx = (y * stride) + x;
-                dst[idx] = src[idx];
+                result.Planes[plane].AsSpan(y * stride, width).CopyTo(cdefPlanes[plane].AsSpan(y * stride, width));
             }
         }
     }
 
     /// <summary><c>CDEF direction process</c> (spec §7.15.2).</summary>
+    [SkipLocalsInit]
     private static (int YDir, int Var) CdefDirection(State state, int r, int c)
     {
         var result = state.Result;
-        var cost = state.Cost;
-        var partial = state.Partial;
-        Array.Clear(cost);
-        for (int i = 0; i < 8; i++)
-        {
-            Array.Clear(partial[i]);
-        }
 
-        long bestCost = 0;
-        int yDir = 0;
+        // partial[d][k] of the spec flattened to d * 16 + k (15 used per direction). Sample sums are tiny
+        // (64 samples of magnitude <= 128), so int is exact; only the squared costs need 64 bits.
+        Span<int> partial = stackalloc int[8 * 16];
+        partial.Clear();
 
         var luma = result.Planes[0];
         int stride = result.PlaneWidths[0];
-        int bitDepth = result.Sequence.BitDepth;
+        int shift = result.Sequence.BitDepth - 8;
 
         int x0 = c * 4;
         int y0 = r * 4;
 
         for (int i = 0; i < 8; i++)
         {
+            int rowBase = ((y0 + i) * stride) + x0;
             for (int j = 0; j < 8; j++)
             {
-                int x = (luma[((y0 + i) * stride) + x0 + j] >> (bitDepth - 8)) - 128;
-                partial[0][i + j] += x;
-                partial[1][i + (j / 2)] += x;
-                partial[2][i] += x;
-                partial[3][3 + i - (j / 2)] += x;
-                partial[4][7 + i - j] += x;
-                partial[5][3 - (i / 2) + j] += x;
-                partial[6][j] += x;
-                partial[7][(i / 2) + j] += x;
+                int x = (luma[rowBase + j] >> shift) - 128;
+                partial[i + j] += x;
+                partial[16 + i + (j >> 1)] += x;
+                partial[32 + i] += x;
+                partial[48 + 3 + i - (j >> 1)] += x;
+                partial[64 + 7 + i - j] += x;
+                partial[80 + 3 - (i >> 1) + j] += x;
+                partial[96 + j] += x;
+                partial[112 + (i >> 1) + j] += x;
             }
         }
 
+        Span<long> cost = stackalloc long[8];
+        cost.Clear();
+
         for (int i = 0; i < 8; i++)
         {
-            cost[2] += partial[2][i] * partial[2][i];
-            cost[6] += partial[6][i] * partial[6][i];
+            cost[2] += (long)partial[32 + i] * partial[32 + i];
+            cost[6] += (long)partial[96 + i] * partial[96 + i];
         }
 
         cost[2] *= DivTable[8];
@@ -244,28 +240,31 @@ internal static class Av1Cdef
 
         for (int i = 0; i < 7; i++)
         {
-            cost[0] += ((partial[0][i] * partial[0][i]) + (partial[0][14 - i] * partial[0][14 - i])) * DivTable[i + 1];
-            cost[4] += ((partial[4][i] * partial[4][i]) + (partial[4][14 - i] * partial[4][14 - i])) * DivTable[i + 1];
+            cost[0] += (((long)partial[i] * partial[i]) + ((long)partial[14 - i] * partial[14 - i])) * DivTable[i + 1];
+            cost[4] += (((long)partial[64 + i] * partial[64 + i]) + ((long)partial[64 + 14 - i] * partial[64 + 14 - i])) * DivTable[i + 1];
         }
 
-        cost[0] += partial[0][7] * partial[0][7] * DivTable[8];
-        cost[4] += partial[4][7] * partial[4][7] * DivTable[8];
+        cost[0] += (long)partial[7] * partial[7] * DivTable[8];
+        cost[4] += (long)partial[64 + 7] * partial[64 + 7] * DivTable[8];
 
         for (int i = 1; i < 8; i += 2)
         {
+            int pb = i * 16;
             for (int j = 0; j < 5; j++)
             {
-                cost[i] += partial[i][3 + j] * partial[i][3 + j];
+                cost[i] += (long)partial[pb + 3 + j] * partial[pb + 3 + j];
             }
 
             cost[i] *= DivTable[8];
 
             for (int j = 0; j < 3; j++)
             {
-                cost[i] += ((partial[i][j] * partial[i][j]) + (partial[i][10 - j] * partial[i][10 - j])) * DivTable[(2 * j) + 2];
+                cost[i] += (((long)partial[pb + j] * partial[pb + j]) + ((long)partial[pb + 10 - j] * partial[pb + 10 - j])) * DivTable[(2 * j) + 2];
             }
         }
 
+        long bestCost = 0;
+        int yDir = 0;
         for (int i = 0; i < 8; i++)
         {
             if (cost[i] > bestCost)
