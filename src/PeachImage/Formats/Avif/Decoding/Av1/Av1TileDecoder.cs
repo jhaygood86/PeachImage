@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
@@ -213,6 +215,39 @@ internal sealed class Av1TileDecoder
     private readonly int[][] _leftLevelContext = [Array.Empty<int>(), Array.Empty<int>(), Array.Empty<int>()];
     private readonly int[][] _leftDcContext = [Array.Empty<int>(), Array.Empty<int>(), Array.Empty<int>()];
     private readonly int[] _quant = new int[1024];
+
+    /// <summary>Right/bottom zero padding (in samples) around <see cref="_levels"/>'s per-block grid; equals the largest neighbor offset the coefficient context derivation reads.</summary>
+    private const int LevelPad = 4;
+
+    /// <summary>Padded per-block coefficient level grid, (32 + <see cref="LevelPad"/>)^2 -- the largest coded transform area is 32x32.</summary>
+    private readonly byte[] _levels = new byte[(32 + LevelPad) * (32 + LevelPad)];
+
+    /// <summary><c>Sig_Ref_Diff_Offset</c> / <c>Mag_Ref_Offset_With_Tx_Class</c> converted to flat offsets into <see cref="_levels"/>, indexed <c>[adjustedTxSz * 3 + txClass]</c> (the padded row stride depends only on the adjusted transform width).</summary>
+    private static readonly int[][] SigLevelOffsets = BuildLevelOffsets(Av1CoeffTables.SigRefDiffOffset);
+
+    private static readonly int[][] BrLevelOffsets = BuildLevelOffsets(Av1CoeffTables.MagRefOffsetWithTxClass);
+
+    private static int[][] BuildLevelOffsets(int[][][] diffsByClass)
+    {
+        var result = new int[Av1CoeffTables.AdjustedTxSize.Length * 3][];
+        for (int txSz = 0; txSz < Av1CoeffTables.AdjustedTxSize.Length; txSz++)
+        {
+            int stride = Av1TxDimensions.Width[txSz] + LevelPad;
+            for (int txClass = 0; txClass < 3; txClass++)
+            {
+                var diffs = diffsByClass[txClass];
+                var offsets = new int[diffs.Length];
+                for (int k = 0; k < diffs.Length; k++)
+                {
+                    offsets[k] = (diffs[k][0] * stride) + diffs[k][1];
+                }
+
+                result[(txSz * 3) + txClass] = offsets;
+            }
+        }
+
+        return result;
+    }
 
     // Per-coeffs()-call transient state.
     private int _planeTxType;
@@ -2803,25 +2838,88 @@ internal sealed class Av1TileDecoder
                 }
             }
 
+            // Levels are mirrored into a zero-padded byte grid so the neighbor-magnitude contexts (spec
+            // §8.3.2 get_coeff_base_ctx / get_coeff_br_ctx) read right/below neighbors without bounds
+            // tests: every Sig_Ref_Diff_Offset / Mag_Ref_Offset_With_Tx_Class offset is non-negative and at
+            // most LevelPad, so out-of-block neighbors land in the zero padding (contributing 0, exactly as
+            // the spec's "outside the block" skip does).
+            int adjTxSz = Av1CoeffTables.AdjustedTxSize[txSz];
+            int bwl = Av1TxDimensions.WidthLog2[adjTxSz];
+            int lvWidth = 1 << bwl;
+            int lvStride = lvWidth + LevelPad;
+            Span<byte> levels = _levels.AsSpan(0, (Av1TxDimensions.Height[adjTxSz] + LevelPad) * lvStride);
+            levels.Clear();
+
+            int txClass = Av1TxClass.Get(txType);
+            int[] sigOff = SigLevelOffsets[(adjTxSz * 3) + txClass];
+            int[] brOff = BrLevelOffsets[(adjTxSz * 3) + txClass];
+            ref byte lv = ref MemoryMarshal.GetReference(levels);
+
+            var baseCdfs = _cdf.CoeffBase[txSzCtx][ptype];
+            var brCdfs = _cdf.CoeffBr[Math.Min(txSzCtx, Av1TxSize.Tx32x32)][ptype];
+            var baseCtxOffsets = Av1CoeffTables.CoeffBaseCtxOffset[txSz];
+            const int BrMagCap = Av1CoeffTables.CoeffBaseRange + Av1CoeffTables.NumBaseLevels + 1;
+
             for (int c = eob - 1; c >= 0; c--)
             {
                 int pos = scan[c];
+                int row = pos >> bwl;
+                int col = pos & (lvWidth - 1);
+                int p = (row * lvStride) + col;
                 int level;
                 if (c == eob - 1)
                 {
-                    int ctx = GetCoeffBaseCtx(txSz, plane, x4, y4, pos, c, txType, isEob: true);
-                    level = _s.ReadSymbol(_cdf.CoeffBaseEob[txSzCtx][ptype][ctx - Av1CoeffTables.SigCoefContexts + Av1CoeffTables.SigCoefContextsEob]) + 1;
+                    int height = Av1TxDimensions.Height[adjTxSz];
+                    int eobCtx = c == 0 ? 4 : c <= (height << bwl) / 8 ? 3 : c <= (height << bwl) / 4 ? 2 : 1;
+                    level = _s.ReadSymbol(_cdf.CoeffBaseEob[txSzCtx][ptype][Av1CoeffTables.SigCoefContextsEob - eobCtx]) + 1;
                 }
                 else
                 {
-                    int ctx = GetCoeffBaseCtx(txSz, plane, x4, y4, pos, c, txType, isEob: false);
-                    level = _s.ReadSymbol(_cdf.CoeffBase[txSzCtx][ptype][ctx]);
+                    int mag = Math.Min((int)Unsafe.Add(ref lv, p + sigOff[0]), 3)
+                        + Math.Min((int)Unsafe.Add(ref lv, p + sigOff[1]), 3)
+                        + Math.Min((int)Unsafe.Add(ref lv, p + sigOff[2]), 3)
+                        + Math.Min((int)Unsafe.Add(ref lv, p + sigOff[3]), 3)
+                        + Math.Min((int)Unsafe.Add(ref lv, p + sigOff[4]), 3);
+
+                    int ctx = Math.Min((mag + 1) >> 1, 4);
+                    if (txClass == Av1TxClass.Class2D)
+                    {
+                        ctx = row == 0 && col == 0 ? 0 : ctx + baseCtxOffsets[Math.Min(row, 4)][Math.Min(col, 4)];
+                    }
+                    else
+                    {
+                        ctx += Av1CoeffTables.CoeffBasePosCtxOffset[Math.Min(txClass == Av1TxClass.ClassVert ? row : col, 2)];
+                    }
+
+                    level = _s.ReadSymbol(baseCdfs[ctx]);
                 }
 
                 if (level > Av1CoeffTables.NumBaseLevels)
                 {
-                    int brCtx = GetCoeffBrCtx(txSz, plane, x4, y4, pos, txType);
-                    var brCdf = _cdf.CoeffBr[Math.Min(txSzCtx, Av1TxSize.Tx32x32)][ptype][brCtx];
+                    int brMag = Math.Min((int)Unsafe.Add(ref lv, p + brOff[0]), BrMagCap)
+                        + Math.Min((int)Unsafe.Add(ref lv, p + brOff[1]), BrMagCap)
+                        + Math.Min((int)Unsafe.Add(ref lv, p + brOff[2]), BrMagCap);
+
+                    brMag = Math.Min((brMag + 1) >> 1, 6);
+                    int brCtx;
+                    if (pos == 0)
+                    {
+                        brCtx = brMag;
+                    }
+                    else if (txClass == Av1TxClass.Class2D)
+                    {
+                        brCtx = row < 2 && col < 2 ? brMag + 7 : brMag + 14;
+                    }
+                    else if (txClass == Av1TxClass.ClassHoriz)
+                    {
+                        brCtx = col == 0 ? brMag + 7 : brMag + 14;
+                    }
+                    else
+                    {
+                        brCtx = row == 0 ? brMag + 7 : brMag + 14;
+                    }
+
+                    var brCdf = brCdfs[brCtx];
                     for (int idx = 0; idx < Av1CoeffTables.CoeffBaseRange / (Av1CoeffTables.BrCdfSize - 1); idx++)
                     {
                         int coeffBr = _s.ReadSymbol(brCdf);
@@ -2834,6 +2932,7 @@ internal sealed class Av1TileDecoder
                 }
 
                 _quant[pos] = level;
+                levels[p] = (byte)level;
             }
 
             for (int c = 0; c < eob; c++)
@@ -2898,17 +2997,10 @@ internal sealed class Av1TileDecoder
             culLevel = Math.Min(63, culLevel);
         }
 
-        for (int i = 0; i < w4; i++)
-        {
-            _aboveLevelContext[plane][x4 + i] = culLevel;
-            _aboveDcContext[plane][x4 + i] = dcCategory;
-        }
-
-        for (int i = 0; i < h4; i++)
-        {
-            _leftLevelContext[plane][y4 + i] = culLevel;
-            _leftDcContext[plane][y4 + i] = dcCategory;
-        }
+        _aboveLevelContext[plane].AsSpan(x4, w4).Fill(culLevel);
+        _aboveDcContext[plane].AsSpan(x4, w4).Fill(dcCategory);
+        _leftLevelContext[plane].AsSpan(y4, h4).Fill(culLevel);
+        _leftDcContext[plane].AsSpan(y4, h4).Fill(dcCategory);
 
         _eobValue = eob;
         return eob;
@@ -3084,113 +3176,6 @@ internal sealed class Av1TileDecoder
         }
 
         return 0;
-    }
-
-    /// <summary><c>coeff_base</c>/<c>coeff_base_eob</c>'s shared context derivation, <c>get_coeff_base_ctx()</c> (spec §8.3.2).</summary>
-    private int GetCoeffBaseCtx(int txSz, int plane, int blockX, int blockY, int pos, int c, int txType, bool isEob)
-    {
-        _ = blockX;
-        _ = blockY;
-        int adjTxSz = Av1CoeffTables.AdjustedTxSize[txSz];
-        int bwl = Av1TxDimensions.WidthLog2[adjTxSz];
-        int width = 1 << bwl;
-        int height = Av1TxDimensions.Height[adjTxSz];
-
-        if (isEob)
-        {
-            if (c == 0)
-            {
-                return Av1CoeffTables.SigCoefContexts - 4;
-            }
-
-            if (c <= (height << bwl) / 8)
-            {
-                return Av1CoeffTables.SigCoefContexts - 3;
-            }
-
-            if (c <= (height << bwl) / 4)
-            {
-                return Av1CoeffTables.SigCoefContexts - 2;
-            }
-
-            return Av1CoeffTables.SigCoefContexts - 1;
-        }
-
-        int txClass = Av1TxClass.Get(txType);
-        int row = pos >> bwl;
-        int col = pos - (row << bwl);
-        int mag = 0;
-
-        for (int idx = 0; idx < Av1CoeffTables.SigRefDiffOffsetNum; idx++)
-        {
-            int refRow = row + Av1CoeffTables.SigRefDiffOffset[txClass][idx][0];
-            int refCol = col + Av1CoeffTables.SigRefDiffOffset[txClass][idx][1];
-            if (refRow >= 0 && refCol >= 0 && refRow < height && refCol < width)
-            {
-                mag += Math.Min(Math.Abs(_quant[(refRow << bwl) + refCol]), 3);
-            }
-        }
-
-        int ctx = Math.Min((mag + 1) >> 1, 4);
-
-        if (txClass == Av1TxClass.Class2D)
-        {
-            if (row == 0 && col == 0)
-            {
-                return 0;
-            }
-
-            return ctx + Av1CoeffTables.CoeffBaseCtxOffset[txSz][Math.Min(row, 4)][Math.Min(col, 4)];
-        }
-
-        int posIdx = txClass == Av1TxClass.ClassVert ? row : col;
-        return ctx + Av1CoeffTables.CoeffBasePosCtxOffset[Math.Min(posIdx, 2)];
-    }
-
-    /// <summary><c>coeff_br</c>'s CDF context derivation (spec §8.3.2).</summary>
-    private int GetCoeffBrCtx(int txSz, int plane, int x4, int y4, int pos, int txType)
-    {
-        int adjTxSz = Av1CoeffTables.AdjustedTxSize[txSz];
-        int bwl = Av1TxDimensions.WidthLog2[adjTxSz];
-        int txw = Av1TxDimensions.Width[adjTxSz];
-        int txh = Av1TxDimensions.Height[adjTxSz];
-        int row = pos >> bwl;
-        int col = pos - (row << bwl);
-        int mag = 0;
-        int txClass = Av1TxClass.Get(txType);
-
-        _ = plane;
-        _ = x4;
-        _ = y4;
-
-        for (int idx = 0; idx < 3; idx++)
-        {
-            int refRow = row + Av1CoeffTables.MagRefOffsetWithTxClass[txClass][idx][0];
-            int refCol = col + Av1CoeffTables.MagRefOffsetWithTxClass[txClass][idx][1];
-            if (refRow >= 0 && refCol >= 0 && refRow < txh && refCol < (1 << bwl))
-            {
-                mag += Math.Min(_quant[(refRow * txw) + refCol], Av1CoeffTables.CoeffBaseRange + Av1CoeffTables.NumBaseLevels + 1);
-            }
-        }
-
-        mag = Math.Min((mag + 1) >> 1, 6);
-
-        if (pos == 0)
-        {
-            return mag;
-        }
-
-        if (txClass == Av1TxClass.Class2D)
-        {
-            return row < 2 && col < 2 ? mag + 7 : mag + 14;
-        }
-
-        if (txClass == Av1TxClass.ClassHoriz)
-        {
-            return col == 0 ? mag + 7 : mag + 14;
-        }
-
-        return row == 0 ? mag + 7 : mag + 14;
     }
 
     /// <summary><c>compute_tx_type(plane, txSz, blockX, blockY)</c> (spec §5.11.40), restricted to the intra path. <paramref name="blockX"/>/<paramref name="blockY"/> are part of the spec's signature (used by the inter-only path this decoder never reaches) and unused here.</summary>

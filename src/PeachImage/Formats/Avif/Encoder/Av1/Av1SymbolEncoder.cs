@@ -108,7 +108,7 @@ internal sealed class Av1AdaptingTrialSymbolSink : IAv1SymbolSink
 /// <c>[0, SymbolRange)</c> -- the two are the standard dual "low+range encoder"/"shrinking-interval decoder"
 /// formulations of the same range coder, always consistent with each other by construction as long as the
 /// range narrows identically on both sides). This class's own private <c>CurValue</c> helper (mirroring
-/// <see cref="Av1SymbolDecoder.ReadSymbolCore"/>'s own <c>cur()</c> exactly) already computes the same
+/// <see cref="Av1SymbolDecoder.ReadSymbol"/>'s own <c>cur()</c> exactly) already computes the same
 /// interval-narrowing terms libaom's own <c>od_ec_encode_q15</c> computes as <c>u</c>/<c>v</c> -- verified
 /// algebraically (the two formulations' differing constant-offset terms cancel out in the
 /// <c>u - v</c>/<c>prev - cur</c> subtraction) -- so this reuses <c>CurValue</c> unchanged and only replaces
@@ -460,7 +460,7 @@ internal sealed class Av1SymbolEncoder : IAv1SymbolSink
         return value < m ? w - 1 : w;
     }
 
-    /// <summary><c>cur(idx)</c> exactly as <see cref="Av1SymbolDecoder.ReadSymbolCore"/> computes it for a candidate symbol index.</summary>
+    /// <summary><c>cur(idx)</c> exactly as <see cref="Av1SymbolDecoder.ReadSymbol"/> computes it for a candidate symbol index.</summary>
     private static uint CurValue(uint range, ReadOnlySpan<ushort> cdf, int idx, int n)
     {
         uint f = (1u << 15) - cdf[idx];

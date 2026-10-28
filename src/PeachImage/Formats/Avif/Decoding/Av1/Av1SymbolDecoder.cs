@@ -1,33 +1,40 @@
+using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
 /// <summary>
 /// AV1's multi-symbol adaptive arithmetic decoder (spec §8.2). Structurally different from VP8's binary
 /// bool-decoder: instead of one bit against a single split probability, it decodes one of N symbols
 /// against a cumulative-distribution-function array, and that CDF adapts after every read (unless
-/// disable_cdf_update is set). Transcribed directly from the AV1 specification's own normative pseudocode
-/// (§8.2.2 init_symbol, §8.2.3 read_bool, §8.2.5 read_literal, §8.2.6 read_symbol/decode_symbol including
-/// renormalization and CDF adaptation) rather than a third-party reference implementation.
+/// disable_cdf_update is set). Follows the AV1 specification's own normative arithmetic (§8.2.2
+/// init_symbol, §8.2.3 read_bool, §8.2.5 read_literal, §8.2.6 read_symbol/decode_symbol including
+/// renormalization and CDF adaptation) exactly; only the way renormalization fetches its input bits differs.
 /// </summary>
 /// <remarks>
 /// Mutable reference type (not a <c>ref struct</c>), matching <c>Vp8BoolDecoder</c>'s own reasoning: a
 /// tile's decode is a deeply recursive call chain (partition tree -> mode info -> coefficients), and the
 /// decoder instance needs to be reachable throughout without threading it as a ref parameter everywhere.
-/// This is a direct, unoptimized transcription of the spec's own algorithm rather than the faster
-/// daala/libaom/dav1d-style bulk-refill reformulation the project plan suggested as a later option --
-/// correctness comes first (this decoder's Phase 2 priority), and a from-scratch reformulation would add
-/// exactly the kind of transcription risk this component most needs to avoid. See
-/// <c>Av1SymbolDecoderTests</c> for the verification strategy: hand-traced known input/output vectors
-/// (computed by manually executing the spec pseudocode on specific byte sequences, independent of this
-/// implementation) plus invariant checks over both synthetic and real tile data, since no independent
-/// reference AV1 decoder is available in this environment to differentially test against.
+/// The spec pulls <c>bits</c> fresh bits from the tile data one at a time on every renormalization; this
+/// decoder instead keeps a 64-bit left-aligned window of upcoming bits that is refilled a byte at a time
+/// (bulk refill, as libaom/dav1d do) and shifted out in a single operation. Bytes past the end of the tile
+/// read as zero, which is exactly what the spec's <c>SymbolMaxBits</c> zero-padding rule prescribes, so the
+/// decoded values are bit-identical. <see cref="SymbolMaxBits"/> still tracks the spec's own accounting.
+/// See <c>Av1SymbolDecoderTests</c> for the verification strategy.
 /// </remarks>
 internal sealed class Av1SymbolDecoder
 {
     private const int EcProbShift = 6;
     private const int EcMinProb = 4;
 
-    private readonly Av1BitReader _bits;
+    private readonly byte[] _data;
+    private readonly int _end;
     private readonly bool _disableCdfUpdate;
+
+    private int _pos;
+    private ulong _window;
+    private int _windowBits;
 
     private uint _symbolValue;
     private uint _symbolRange;
@@ -35,13 +42,18 @@ internal sealed class Av1SymbolDecoder
 
     public Av1SymbolDecoder(byte[] data, int start, int length, bool disableCdfUpdate)
     {
-        _bits = new Av1BitReader(data, start, length);
+        _data = data;
+        _pos = start;
+        _end = start + length;
         _disableCdfUpdate = disableCdfUpdate;
 
-        int numBits = Math.Min(length * 8, 15);
-        uint buf = _bits.ReadBits(numBits);
-        uint paddedBuf = buf << (15 - numBits);
-        _symbolValue = ((1u << 15) - 1) ^ paddedBuf;
+        Refill();
+
+        // The first 15 bits of the (zero-extended) tile data, per spec §8.2.2.
+        uint buf = (uint)(_window >> 49);
+        _window <<= 15;
+        _windowBits -= 15;
+        _symbolValue = ((1u << 15) - 1) ^ buf;
         _symbolRange = 1u << 15;
         _symbolMaxBits = (8 * length) - 15;
     }
@@ -52,8 +64,25 @@ internal sealed class Av1SymbolDecoder
     /// <summary><c>read_bool()</c> (spec §8.2.3): a fresh, non-adapting 50/50 CDF every call.</summary>
     public int ReadBool()
     {
-        Span<ushort> cdf = [1 << 14, 1 << 15, 0];
-        return ReadSymbolCore(cdf, adapt: false);
+        // read_symbol over the fixed CDF {1 << 14, 1 << 15}, specialised: symbol 0 is chosen when
+        // SymbolValue >= cur, where cur = ((range >> 8) * (16384 >> 6) >> 1) + EcMinProb.
+        uint range = _symbolRange;
+        uint cur = ((range >> 8) << 7) + EcMinProb;
+        int symbol;
+        if (_symbolValue >= cur)
+        {
+            symbol = 0;
+            _symbolRange = range - cur;
+            _symbolValue -= cur;
+        }
+        else
+        {
+            symbol = 1;
+            _symbolRange = cur;
+        }
+
+        Renormalize();
+        return symbol;
     }
 
     /// <summary><c>read_literal(n)</c> (spec §8.2.5): n raw bits, MSB first, each via <see cref="ReadBool"/>.</summary>
@@ -71,36 +100,38 @@ internal sealed class Av1SymbolDecoder
     /// <summary>
     /// <c>read_symbol(cdf)</c> (spec §8.2.6): decodes one of <c>cdf.Length - 1</c> symbols and adapts
     /// <paramref name="cdf"/> in place (unless <c>disable_cdf_update</c>). <paramref name="cdf"/> must be
-    /// the live, per-tile mutable CDF array (see the future <c>Av1CdfContext</c>) -- entries
+    /// the live, per-tile mutable CDF array (see <c>Av1CdfContext</c>) -- entries
     /// <c>[0, N)</c> are the AV1-convention cumulative distribution and entry <c>N</c> is the adaptation
     /// counter the spec's CDF-update process describes.
     /// </summary>
-    public int ReadSymbol(Span<ushort> cdf) => ReadSymbolCore(cdf, adapt: !_disableCdfUpdate);
-
-    private int ReadSymbolCore(Span<ushort> cdf, bool adapt)
+    public int ReadSymbol(Span<ushort> cdf)
     {
         int n = cdf.Length - 1;
+        ref ushort cdfRef = ref MemoryMarshal.GetReference(cdf);
 
-        uint cur = _symbolRange;
+        uint range = _symbolRange;
+        uint value = _symbolValue;
+        uint cur = range;
         uint prev;
         int symbol = -1;
 
+        // The last real CDF entry is 1 << 15, which gives cur == 0 at symbol n - 1, so the loop always
+        // terminates within the array.
         do
         {
             symbol++;
             prev = cur;
-            uint f = (1u << 15) - cdf[symbol];
-            cur = ((_symbolRange >> 8) * (f >> EcProbShift)) >> (7 - EcProbShift);
-            cur += (uint)(EcMinProb * (n - symbol - 1));
+            uint f = (1u << 15) - Unsafe.Add(ref cdfRef, symbol);
+            cur = (((range >> 8) * (f >> EcProbShift)) >> (7 - EcProbShift)) + (uint)(EcMinProb * (n - symbol - 1));
         }
-        while (_symbolValue < cur);
+        while (value < cur);
 
         _symbolRange = prev - cur;
-        _symbolValue -= cur;
+        _symbolValue = value - cur;
 
         Renormalize();
 
-        if (adapt)
+        if (!_disableCdfUpdate)
         {
             Av1CdfAdaptation.AdaptCdf(cdf, n, symbol);
         }
@@ -109,18 +140,33 @@ internal sealed class Av1SymbolDecoder
     }
 
     /// <summary>The renormalization steps following every symbol decode (spec §8.2.6, the seven ordered steps after the do-while loop).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Renormalize()
     {
-        int bits = 15 - FloorLog2(_symbolRange);
+        int bits = BitOperations.LeadingZeroCount(_symbolRange) - 16;
         _symbolRange <<= bits;
 
-        int numBits = Math.Min(bits, Math.Max(0, _symbolMaxBits));
-        uint newData = numBits > 0 ? _bits.ReadBits(numBits) : 0;
-        uint paddedData = newData << (bits - numBits);
+        if (_windowBits < bits)
+        {
+            Refill();
+        }
 
-        _symbolValue = paddedData ^ (((_symbolValue + 1) << bits) - 1);
+        uint newData = (uint)((_window >> 32) >> (32 - bits));
+        _window <<= bits;
+        _windowBits -= bits;
+
+        _symbolValue = newData ^ (((_symbolValue + 1) << bits) - 1);
         _symbolMaxBits -= bits;
     }
 
-    private static int FloorLog2(uint x) => Av1CdfAdaptation.FloorLog2(x);
+    /// <summary>Tops the window up to more than 56 bits; bytes past the end of the tile data are zero.</summary>
+    private void Refill()
+    {
+        while (_windowBits <= 56)
+        {
+            ulong b = _pos < _end ? _data[_pos++] : 0UL;
+            _window |= b << (56 - _windowBits);
+            _windowBits += 8;
+        }
+    }
 }
