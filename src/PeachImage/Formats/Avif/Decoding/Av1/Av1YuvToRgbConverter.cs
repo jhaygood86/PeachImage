@@ -1,4 +1,7 @@
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -40,14 +43,45 @@ internal static class Av1YuvToRgbConverter
         int outWidth,
         int outHeight)
     {
+        var pixels = new byte[OutputByteCount(monoChrome, bitDepth, alphaPlane is not null, outWidth, outHeight)];
+        ConvertInto(pixels, colorPlanes, colorWidths, monoChrome, subsamplingX, subsamplingY, matrixCoefficients, colorRangeFull, bitDepth, alphaPlane, alphaWidth, outWidth, outHeight);
+        return pixels;
+    }
+
+    /// <summary>The exact number of bytes <see cref="ConvertInto"/> writes (and <see cref="Convert"/> returns) for the given format.</summary>
+    public static int OutputByteCount(bool monoChrome, int bitDepth, bool hasAlpha, int outWidth, int outHeight)
+    {
+        int bytesPerChannel = bitDepth > 8 ? 2 : 1;
+        int channels = monoChrome ? (hasAlpha ? 4 : 1) : hasAlpha ? 4 : 3;
+        return outWidth * outHeight * channels * bytesPerChannel;
+    }
+
+    /// <summary>
+    /// <see cref="Convert"/> into a caller-supplied buffer of at least <see cref="OutputByteCount"/> bytes
+    /// (typically pool-rented, so its prior contents are arbitrary): every one of those bytes is written.
+    /// </summary>
+    [SkipLocalsInit]
+    public static void ConvertInto(
+        byte[] pixels,
+        int[][] colorPlanes,
+        int[] colorWidths,
+        bool monoChrome,
+        bool subsamplingX,
+        bool subsamplingY,
+        int matrixCoefficients,
+        bool colorRangeFull,
+        int bitDepth,
+        int[]? alphaPlane,
+        int alphaWidth,
+        int outWidth,
+        int outHeight)
+    {
         bool hasAlpha = alphaPlane is not null;
         bool output16Bit = bitDepth > 8;
         int outMax = output16Bit ? 65535 : 255;
         int srcMax = (1 << bitDepth) - 1;
         int bytesPerChannel = output16Bit ? 2 : 1;
         int channels = monoChrome ? (hasAlpha ? 4 : 1) : hasAlpha ? 4 : 3;
-
-        var pixels = new byte[outWidth * outHeight * channels * bytesPerChannel];
 
         void WriteChannel(int byteOffset, int value)
         {
@@ -88,7 +122,7 @@ internal static class Av1YuvToRgbConverter
                 }
             }
 
-            return pixels;
+            return;
         }
 
         var uPlane = colorPlanes[1];
@@ -138,10 +172,34 @@ internal static class Av1YuvToRgbConverter
         var krVec256 = Vector256.Create(kr);
         var kbVec256 = Vector256.Create(kb);
         var kgVec256 = Vector256.Create(kg);
-        var yLoVec256 = Vector256.Create(yLo);
-        var yRangeVec256 = Vector256.Create(yRange);
-        var cLoVec256 = Vector256.Create(cLo);
-        var cRangeVec256 = Vector256.Create(cRange);
+        var outMaxVec256 = Vector256.Create((double)outMax);
+
+        // The per-sample normalisations (sample - lo) / range depend only on the sample value, so they are
+        // tabulated once per call: the table entries are the very same double divisions the per-pixel code
+        // would perform, so results are bit-identical, minus three vector divisions per four pixels.
+        // Sized for the largest sample any supported tile bit depth (<= 10) can hold rather than srcMax,
+        // since the planes of a grid's tiles are not required to share the primary item's bit depth.
+        const int TableSize = 1024;
+        Span<double> ynTab = stackalloc double[TableSize];
+        Span<double> cbnTab = stackalloc double[TableSize];
+        if (!identity)
+        {
+            for (int v = 0; v < TableSize; v++)
+            {
+                ynTab[v] = (v - yLo) / yRange;
+                cbnTab[v] = (v - cLo) / cRange;
+            }
+        }
+
+        Span<int> alphaTab = hasAlpha ? stackalloc int[TableSize] : default;
+        for (int v = 0; v < alphaTab.Length; v++)
+        {
+            alphaTab[v] = ScaleSample(v, srcMax, outMax);
+        }
+
+        Span<int> rLane = stackalloc int[4];
+        Span<int> gLane = stackalloc int[4];
+        Span<int> bLane = stackalloc int[4];
 
         for (int row = 0; row < outHeight; row++)
         {
@@ -153,61 +211,78 @@ internal static class Av1YuvToRgbConverter
             int col = 0;
 
             // 4-wide Vector256<double> fast path for the non-identity color-matrix case, falling back to
-            // 2-wide Vector128<double> and then scalar for the remainder. AVX2 (this repo's baseline x64
-            // target) double arithmetic is bit-identical to scalar double arithmetic on the same hardware
-            // regardless of vector width, so widening from 2 to 4 lanes is a pure speedup with no new
-            // precision divergence to verify -- same reasoning that already justified the 2-wide path.
-            if (!identity && Vector256.IsHardwareAccelerated)
+            // 2-wide Vector128<double> and then scalar for the remainder. Double arithmetic is bit-identical
+            // to scalar double arithmetic on the same hardware regardless of vector width, and the rounding
+            // below (VROUNDPD, nearest-even) is exactly Math.Round's default, so this matches the scalar
+            // path below sample for sample.
+            if (!identity && Avx.IsSupported)
             {
+                int channelStride = channels * bytesPerChannel;
                 for (; col + 3 < outWidth; col += 4)
                 {
-                    var ySamples = Vector256.Create((double)yPlane[rowBase + col], yPlane[rowBase + col + 1], yPlane[rowBase + col + 2], yPlane[rowBase + col + 3]);
-                    var uSamples = Vector256.Create((double)uPlane[uvRowBaseU + (col >> subX)], uPlane[uvRowBaseU + ((col + 1) >> subX)], uPlane[uvRowBaseU + ((col + 2) >> subX)], uPlane[uvRowBaseU + ((col + 3) >> subX)]);
-                    var vSamples = Vector256.Create((double)vPlane[uvRowBaseV + (col >> subX)], vPlane[uvRowBaseV + ((col + 1) >> subX)], vPlane[uvRowBaseV + ((col + 2) >> subX)], vPlane[uvRowBaseV + ((col + 3) >> subX)]);
+                    int uc = uvRowBaseU + (col >> subX);
+                    int vc = uvRowBaseV + (col >> subX);
+                    int u1 = uvRowBaseU + ((col + 1) >> subX);
+                    int u2 = uvRowBaseU + ((col + 2) >> subX);
+                    int u3 = uvRowBaseU + ((col + 3) >> subX);
+                    int v1 = uvRowBaseV + ((col + 1) >> subX);
+                    int v2 = uvRowBaseV + ((col + 2) >> subX);
+                    int v3 = uvRowBaseV + ((col + 3) >> subX);
 
-                    var yn = (ySamples - yLoVec256) / yRangeVec256;
-                    var cbn = (uSamples - cLoVec256) / cRangeVec256;
-                    var crn = (vSamples - cLoVec256) / cRangeVec256;
+                    var yn = Vector256.Create(
+                        Normalized(ynTab, yPlane[rowBase + col], yLo, yRange),
+                        Normalized(ynTab, yPlane[rowBase + col + 1], yLo, yRange),
+                        Normalized(ynTab, yPlane[rowBase + col + 2], yLo, yRange),
+                        Normalized(ynTab, yPlane[rowBase + col + 3], yLo, yRange));
+                    var cbn = Vector256.Create(
+                        Normalized(cbnTab, uPlane[uc], cLo, cRange),
+                        Normalized(cbnTab, uPlane[u1], cLo, cRange),
+                        Normalized(cbnTab, uPlane[u2], cLo, cRange),
+                        Normalized(cbnTab, uPlane[u3], cLo, cRange));
+                    var crn = Vector256.Create(
+                        Normalized(cbnTab, vPlane[vc], cLo, cRange),
+                        Normalized(cbnTab, vPlane[v1], cLo, cRange),
+                        Normalized(cbnTab, vPlane[v2], cLo, cRange),
+                        Normalized(cbnTab, vPlane[v3], cLo, cRange));
 
                     var r = yn + (twoKr256 * crn);
                     var b = yn + (twoKb256 * cbn);
                     var g = (yn - (krVec256 * r) - (kbVec256 * b)) / kgVec256;
 
-                    int channelStride = channels * bytesPerChannel;
-                    int idx0 = ((row * outWidth) + col) * channelStride;
-                    WriteChannel(idx0, ClampToRange(r[0], outMax));
-                    WriteChannel(idx0 + bytesPerChannel, ClampToRange(g[0], outMax));
-                    WriteChannel(idx0 + (2 * bytesPerChannel), ClampToRange(b[0], outMax));
-                    if (hasAlpha)
-                    {
-                        WriteChannel(idx0 + (3 * bytesPerChannel), ScaleSample(alphaPlane![alphaRowBase + col], srcMax, outMax));
-                    }
+                    ToClampedInts(r, outMaxVec256).StoreUnsafe(ref MemoryMarshal.GetReference(rLane));
+                    ToClampedInts(g, outMaxVec256).StoreUnsafe(ref MemoryMarshal.GetReference(gLane));
+                    ToClampedInts(b, outMaxVec256).StoreUnsafe(ref MemoryMarshal.GetReference(bLane));
 
-                    int idx1 = idx0 + channelStride;
-                    WriteChannel(idx1, ClampToRange(r[1], outMax));
-                    WriteChannel(idx1 + bytesPerChannel, ClampToRange(g[1], outMax));
-                    WriteChannel(idx1 + (2 * bytesPerChannel), ClampToRange(b[1], outMax));
-                    if (hasAlpha)
+                    int idx = ((row * outWidth) + col) * channelStride;
+                    for (int k = 0; k < 4; k++)
                     {
-                        WriteChannel(idx1 + (3 * bytesPerChannel), ScaleSample(alphaPlane![alphaRowBase + col + 1], srcMax, outMax));
-                    }
+                        if (output16Bit)
+                        {
+                            pixels[idx] = (byte)rLane[k];
+                            pixels[idx + 1] = (byte)(rLane[k] >> 8);
+                            pixels[idx + 2] = (byte)gLane[k];
+                            pixels[idx + 3] = (byte)(gLane[k] >> 8);
+                            pixels[idx + 4] = (byte)bLane[k];
+                            pixels[idx + 5] = (byte)(bLane[k] >> 8);
+                            if (hasAlpha)
+                            {
+                                int a16 = AlphaOut(alphaTab, alphaPlane![alphaRowBase + col + k], srcMax, outMax);
+                                pixels[idx + 6] = (byte)a16;
+                                pixels[idx + 7] = (byte)(a16 >> 8);
+                            }
+                        }
+                        else
+                        {
+                            pixels[idx] = (byte)rLane[k];
+                            pixels[idx + 1] = (byte)gLane[k];
+                            pixels[idx + 2] = (byte)bLane[k];
+                            if (hasAlpha)
+                            {
+                                pixels[idx + 3] = (byte)AlphaOut(alphaTab, alphaPlane![alphaRowBase + col + k], srcMax, outMax);
+                            }
+                        }
 
-                    int idx2 = idx1 + channelStride;
-                    WriteChannel(idx2, ClampToRange(r[2], outMax));
-                    WriteChannel(idx2 + bytesPerChannel, ClampToRange(g[2], outMax));
-                    WriteChannel(idx2 + (2 * bytesPerChannel), ClampToRange(b[2], outMax));
-                    if (hasAlpha)
-                    {
-                        WriteChannel(idx2 + (3 * bytesPerChannel), ScaleSample(alphaPlane![alphaRowBase + col + 2], srcMax, outMax));
-                    }
-
-                    int idx3 = idx2 + channelStride;
-                    WriteChannel(idx3, ClampToRange(r[3], outMax));
-                    WriteChannel(idx3 + bytesPerChannel, ClampToRange(g[3], outMax));
-                    WriteChannel(idx3 + (2 * bytesPerChannel), ClampToRange(b[3], outMax));
-                    if (hasAlpha)
-                    {
-                        WriteChannel(idx3 + (3 * bytesPerChannel), ScaleSample(alphaPlane![alphaRowBase + col + 3], srcMax, outMax));
+                        idx += channelStride;
                     }
                 }
             }
@@ -293,8 +368,25 @@ internal static class Av1YuvToRgbConverter
             }
         }
 
-        return pixels;
     }
+
+    /// <summary><c>Clamp((int)Math.Round(x * outMax), 0, outMax)</c> for four lanes; <paramref name="scaled"/> is <c>x</c> and <paramref name="outMax"/> the broadcast maximum. AVX only.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<int> ToClampedInts(Vector256<double> scaled, Vector256<double> outMax)
+    {
+        Vector256<double> rounded = Avx.RoundToNearestInteger(scaled * outMax);
+        return Avx.ConvertToVector128Int32(Vector256.Min(Vector256.Max(rounded, Vector256<double>.Zero), outMax));
+    }
+
+    /// <summary>Tabulated <see cref="ScaleSample"/>; falls back to the direct computation for a sample beyond the table (an alpha plane may carry more bits than the color planes).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int AlphaOut(Span<int> table, int sample, int srcMax, int outMax) =>
+        (uint)sample < (uint)table.Length ? table[sample] : ScaleSample(sample, srcMax, outMax);
+
+    /// <summary><c>(sample - lo) / range</c> through the table; samples outside it (never produced by a conforming decode, but possible from unclamped tile padding) take the direct computation, so results never differ from the scalar path.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static double Normalized(Span<double> table, int sample, double lo, double range) =>
+        (uint)sample < (uint)table.Length ? table[sample] : (sample - lo) / range;
 
     private static int ScaleSample(int sample, int srcMax, int outMax) =>
         Math.Clamp((int)Math.Round((double)sample * outMax / srcMax), 0, outMax);
