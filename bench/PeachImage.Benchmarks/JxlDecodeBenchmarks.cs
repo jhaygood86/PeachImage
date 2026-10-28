@@ -1,10 +1,11 @@
 using BenchmarkDotNet.Attributes;
+using PeachImage.Benchmarks.Native;
 using PeachImage.Formats.Jxl;
 
 namespace PeachImage.Benchmarks;
 
 /// <summary>
-/// JPEG XL decode throughput: PeachImage only (SkiaSharp has no JPEG XL codec). The inputs are libjxl conformance files chosen to
+/// JPEG XL decode throughput: against libjxl through a LibraryImport shim (SkiaSharp has no JPEG XL codec). The inputs are libjxl conformance files chosen to
 /// cover the decoder's main paths: a large lossy VarDCT image (DC frame, patches, EPF, ICC output), a lossless Modular image with
 /// patches, a lossy image with synthesized noise, and a lossless image whose splines dominate. Run pinned to P-cores and with
 /// <c>--warmupCount 5 --iterationCount 20</c> when comparing changes (see LIBRARY_COMPARISON.md's methodology notes).
@@ -29,21 +30,37 @@ public class JxlDecodeBenchmarks
         _splines = File.ReadAllBytes(Path.Combine(assetsDir, "jxl_lossless_splines_2048x2048.jxl"));
     }
 
-    [Benchmark]
+    [Benchmark(Baseline = true)]
     [BenchmarkCategory("Lossy 4064x2704")]
     public Image PeachImage_Decode_Lossy() => Decode(_lossy);
 
-    [Benchmark]
+    [Benchmark(Baseline = true)]
     [BenchmarkCategory("Lossless 1600x1096")]
     public Image PeachImage_Decode_LosslessPatches() => Decode(_lossless);
 
-    [Benchmark]
+    [Benchmark(Baseline = true)]
     [BenchmarkCategory("Lossy noise 500x606")]
     public Image PeachImage_Decode_LossyNoise() => Decode(_noise);
 
-    [Benchmark]
+    [Benchmark(Baseline = true)]
     [BenchmarkCategory("Lossless splines 2048x2048")]
     public Image PeachImage_Decode_LosslessSplines() => Decode(_splines);
+
+    [Benchmark]
+    [BenchmarkCategory("Lossy 4064x2704")]
+    public byte[] Libjxl_Decode_Lossy() => Libjxl.Decode(_lossy);
+
+    [Benchmark]
+    [BenchmarkCategory("Lossless 1600x1096")]
+    public byte[] Libjxl_Decode_LosslessPatches() => Libjxl.Decode(_lossless);
+
+    [Benchmark]
+    [BenchmarkCategory("Lossy noise 500x606")]
+    public byte[] Libjxl_Decode_LossyNoise() => Libjxl.Decode(_noise);
+
+    [Benchmark]
+    [BenchmarkCategory("Lossless splines 2048x2048")]
+    public byte[] Libjxl_Decode_LosslessSplines() => Libjxl.Decode(_splines);
 
     private static Image Decode(byte[] data)
     {

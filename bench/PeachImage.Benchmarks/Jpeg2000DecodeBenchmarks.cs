@@ -1,4 +1,5 @@
 using BenchmarkDotNet.Attributes;
+using PeachImage.Benchmarks.Native;
 using PeachImage.Formats.Jpeg2000;
 
 namespace PeachImage.Benchmarks;
@@ -15,6 +16,8 @@ public class Jpeg2000DecodeBenchmarks
 {
     private byte[] _lossless = null!;
     private byte[] _lossy = null!;
+    private PinnedBytes _nativeLossless = null!;
+    private PinnedBytes _nativeLossy = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -22,20 +25,34 @@ public class Jpeg2000DecodeBenchmarks
         string assetsDir = Path.Combine(AppContext.BaseDirectory, "Assets");
         _lossless = File.ReadAllBytes(Path.Combine(assetsDir, "jp2_lossless_1280x960.jp2"));
         _lossy = File.ReadAllBytes(Path.Combine(assetsDir, "jp2_lossy_1280x960.jp2"));
+        _nativeLossless = new PinnedBytes(_lossless);
+        _nativeLossy = new PinnedBytes(_lossy);
     }
 
-    [Benchmark]
+    [Benchmark(Baseline = true)]
     [BenchmarkCategory("Lossless 1280x960")]
     public Image PeachImage_Decode_Lossless() => Decode(_lossless);
 
-    [Benchmark]
+    [Benchmark(Baseline = true)]
     [BenchmarkCategory("Lossy 1280x960")]
     public Image PeachImage_Decode_Lossy() => Decode(_lossy);
 
-    [Benchmark]
-    [BenchmarkCategory("Lossless 1280x960")]
+    [Benchmark(Baseline = true)]
+    [BenchmarkCategory("Lossless 1280x960, half size")]
     public Image PeachImage_Decode_Lossless_HalfSize() =>
         Image.Load(_lossless, new Jpeg2000DecoderOptions { ReduceResolutionLevels = 1 });
+
+    [Benchmark]
+    [BenchmarkCategory("Lossless 1280x960")]
+    public int OpenJpeg_Decode_Lossless() => Openjpeg.Decode(_nativeLossless);
+
+    [Benchmark]
+    [BenchmarkCategory("Lossy 1280x960")]
+    public int OpenJpeg_Decode_Lossy() => Openjpeg.Decode(_nativeLossy);
+
+    [Benchmark]
+    [BenchmarkCategory("Lossless 1280x960, half size")]
+    public int OpenJpeg_Decode_Lossless_HalfSize() => Openjpeg.Decode(_nativeLossless, reduceResolutionLevels: 1);
 
     private static Image Decode(byte[] data) => Image.Load(data);
 }

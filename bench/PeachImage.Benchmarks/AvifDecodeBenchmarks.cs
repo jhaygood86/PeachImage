@@ -1,4 +1,5 @@
 using BenchmarkDotNet.Attributes;
+using PeachImage.Benchmarks.Native;
 using PeachImage.Formats.Avif;
 
 namespace PeachImage.Benchmarks;
@@ -23,6 +24,10 @@ public class AvifDecodeBenchmarks
     private byte[] _photographicAlpha = null!;
     private byte[] _photographicLossless = null!;
     private byte[] _small = null!;
+    private PinnedBytes _nativePhotographic420 = null!;
+    private PinnedBytes _nativePhotographicAlpha = null!;
+    private PinnedBytes _nativePhotographicLossless = null!;
+    private PinnedBytes _nativeSmall = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -32,6 +37,10 @@ public class AvifDecodeBenchmarks
         _photographicAlpha = File.ReadAllBytes(Path.Combine(assetsDir, "photo_1920x1080_alpha.avif"));
         _photographicLossless = File.ReadAllBytes(Path.Combine(assetsDir, "photo_1920x1080_lossless.avif"));
         _small = File.ReadAllBytes(Path.Combine(assetsDir, "small_32x24.avif"));
+        _nativePhotographic420 = new PinnedBytes(_photographic420);
+        _nativePhotographicAlpha = new PinnedBytes(_photographicAlpha);
+        _nativePhotographicLossless = new PinnedBytes(_photographicLossless);
+        _nativeSmall = new PinnedBytes(_small);
     }
 
     [Benchmark(Baseline = true)]
@@ -65,4 +74,20 @@ public class AvifDecodeBenchmarks
         using var stream = new MemoryStream(_photographicLossless);
         return AvifDecoder.Decode(stream);
     }
+
+    [Benchmark]
+    [BenchmarkCategory("Photographic-420")]
+    public int Libavif_Decode_Photographic420() => Libavif.Decode(_nativePhotographic420);
+
+    [Benchmark]
+    [BenchmarkCategory("Photographic-Alpha")]
+    public int Libavif_Decode_PhotographicAlpha() => Libavif.Decode(_nativePhotographicAlpha);
+
+    [Benchmark]
+    [BenchmarkCategory("Photographic-Lossless")]
+    public int Libavif_Decode_PhotographicLossless() => Libavif.Decode(_nativePhotographicLossless);
+
+    [Benchmark]
+    [BenchmarkCategory("Small-Image")]
+    public int Libavif_Decode_Small() => Libavif.Decode(_nativeSmall);
 }

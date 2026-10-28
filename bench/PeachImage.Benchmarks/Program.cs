@@ -29,5 +29,10 @@ if (args.Length > 0 && string.Equals(args[0], "png-profile", StringComparison.Or
     return PngProfileHarness.Run(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "native-smoke", StringComparison.OrdinalIgnoreCase))
+{
+    return NativeSmoke.Run();
+}
+
 BenchmarkSwitcher.FromAssembly(Assembly.GetExecutingAssembly()).Run(args);
 return 0;
