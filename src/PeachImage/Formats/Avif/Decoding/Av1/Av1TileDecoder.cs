@@ -888,11 +888,18 @@ internal sealed class Av1TileDecoder
 
                 _paletteSizesY[idx] = _paletteSizeY;
                 _paletteSizesUV[idx] = _paletteSizeUV;
-                int colorBase = idx * 8;
-                for (int k = 0; k < 8; k++)
+
+                // Only the first PaletteSizes entries at a position are ever read back (get_palette_cache), so
+                // blocks without a palette need no write -- and frames without allow_screen_content_tools
+                // allocate no color grid at all.
+                if (_paletteSizeY > 0 || _paletteSizeUV > 0)
                 {
-                    _paletteColorsYGrid[colorBase + k] = _paletteColorsY[k];
-                    _paletteColorsUGrid[colorBase + k] = _paletteColorsU[k];
+                    int colorBase = idx * 8;
+                    for (int k = 0; k < 8; k++)
+                    {
+                        _paletteColorsYGrid[colorBase + k] = _paletteColorsY[k];
+                        _paletteColorsUGrid[colorBase + k] = _paletteColorsU[k];
+                    }
                 }
 
                 _isInters[idx] = _isInter;

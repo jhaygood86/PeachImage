@@ -194,8 +194,8 @@ internal static class Av1FrameDecoder
         var interTxSizes = new int[frameSize];
         var paletteSizesY = new int[frameSize];
         var paletteSizesUV = new int[frameSize];
-        var paletteColorsYGrid = new int[frameSize * 8];
-        var paletteColorsUGrid = new int[frameSize * 8];
+        var paletteColorsYGrid = frame.AllowScreenContentTools ? new int[frameSize * 8] : [];
+        var paletteColorsUGrid = frame.AllowScreenContentTools ? new int[frameSize * 8] : [];
         var isInters = new bool[frameSize];
         var mvRowsGrid = new int[frameSize];
         var mvColsGrid = new int[frameSize];
