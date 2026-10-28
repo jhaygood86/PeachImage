@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -684,9 +685,41 @@ internal static class Av1InverseTransform
 
     private static Vector256<long> TruncateToInt32Batch(Vector256<long> x) => ((x & Int32Mask) ^ Int32SignBit) - Int32SignBit;
 
+    /// <summary>
+    /// Exact 64-bit product of two lanes that each hold a sign-extended 32-bit value (every transform
+    /// intermediate is truncated to int32 when stored, and every constant fits in 32 bits). On AVX2 that is
+    /// one <c>VPMULDQ</c> instead of the multi-instruction 64x64 emulation <c>*</c> compiles to without AVX-512.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<long> MulInt32(Vector256<long> a, Vector256<long> b) =>
+        Avx2.IsSupported ? Avx2.Multiply(a.AsInt32(), b.AsInt32()) : a * b;
+
+    /// <summary>The four lanes (already truncated to int32 by <see cref="RoundBatch"/>) packed into one <see cref="Vector128{T}"/> of ints. AVX2 only.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<int> NarrowToInt32(Vector256<long> x) =>
+        Avx2.PermuteVar8x32(x.AsInt32(), Vector256.Create(0, 2, 4, 6, 0, 2, 4, 6)).GetLower();
+
+    /// <summary>Transposes a 4x4 matrix of ints held as four row vectors. SSE2 (implied by AVX2).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Transpose4x4(
+        Vector128<int> a, Vector128<int> b, Vector128<int> c, Vector128<int> d,
+        out Vector128<int> o0, out Vector128<int> o1, out Vector128<int> o2, out Vector128<int> o3)
+    {
+        Vector128<int> t0 = Sse2.UnpackLow(a, b);
+        Vector128<int> t1 = Sse2.UnpackLow(c, d);
+        Vector128<int> t2 = Sse2.UnpackHigh(a, b);
+        Vector128<int> t3 = Sse2.UnpackHigh(c, d);
+        o0 = Sse2.UnpackLow(t0.AsInt64(), t1.AsInt64()).AsInt32();
+        o1 = Sse2.UnpackHigh(t0.AsInt64(), t1.AsInt64()).AsInt32();
+        o2 = Sse2.UnpackLow(t2.AsInt64(), t3.AsInt64()).AsInt32();
+        o3 = Sse2.UnpackHigh(t2.AsInt64(), t3.AsInt64()).AsInt32();
+    }
+
     private static Vector256<long> RoundBatch(Vector256<long> x, int n)
     {
-        Vector256<long> result = n == 0 ? x : Vector256.ShiftRightArithmetic(x + Vector256.Create(1L << (n - 1)), n);
+        // A logical shift is enough: the result is truncated to its low 32 bits right below, and for
+        // n <= 32 the bits where logical and arithmetic shifts differ (the top n) are all above bit 31.
+        Vector256<long> result = n == 0 ? x : Vector256.ShiftRightLogical(x + Vector256.Create(1L << (n - 1)), n);
         return TruncateToInt32Batch(result);
     }
 
@@ -696,8 +729,8 @@ internal static class Av1InverseTransform
         _ = r;
         var cos = Vector256.Create((long)Cos128(angle));
         var sin = Vector256.Create((long)Sin128(angle));
-        Vector256<long> x = (t[a] * cos) - (t[b] * sin);
-        Vector256<long> y = (t[a] * sin) + (t[b] * cos);
+        Vector256<long> x = MulInt32(t[a], cos) - MulInt32(t[b], sin);
+        Vector256<long> y = MulInt32(t[a], sin) + MulInt32(t[b], cos);
         Vector256<long> ra = RoundBatch(x, 12);
         Vector256<long> rb = RoundBatch(y, 12);
         if (flip)
@@ -1041,13 +1074,13 @@ internal static class Av1InverseTransform
         var sinpi3 = Vector256.Create((long)Sinpi3_9);
         var sinpi4 = Vector256.Create((long)Sinpi4_9);
 
-        Vector256<long> s0 = sinpi1 * t[0];
-        Vector256<long> s1 = sinpi2 * t[0];
-        Vector256<long> s2 = sinpi3 * t[1];
-        Vector256<long> s3 = sinpi4 * t[2];
-        Vector256<long> s4 = sinpi1 * t[2];
-        Vector256<long> s5 = sinpi2 * t[3];
-        Vector256<long> s6 = sinpi4 * t[3];
+        Vector256<long> s0 = MulInt32(sinpi1, t[0]);
+        Vector256<long> s1 = MulInt32(sinpi2, t[0]);
+        Vector256<long> s2 = MulInt32(sinpi3, t[1]);
+        Vector256<long> s3 = MulInt32(sinpi4, t[2]);
+        Vector256<long> s4 = MulInt32(sinpi1, t[2]);
+        Vector256<long> s5 = MulInt32(sinpi2, t[3]);
+        Vector256<long> s6 = MulInt32(sinpi4, t[3]);
         Vector256<long> a7 = t[0] - t[2];
         Vector256<long> b7 = a7 + t[3];
 
@@ -1199,7 +1232,7 @@ internal static class Av1InverseTransform
                 var scale2 = Vector256.Create(5793L);
                 for (int i = 0; i < 4; i++)
                 {
-                    t[i] = RoundBatch(t[i] * scale2, 12);
+                    t[i] = RoundBatch(MulInt32(t[i], scale2), 12);
                 }
 
                 break;
@@ -1214,7 +1247,7 @@ internal static class Av1InverseTransform
                 var scale4 = Vector256.Create(11586L);
                 for (int i = 0; i < 16; i++)
                 {
-                    t[i] = RoundBatch(t[i] * scale4, 12);
+                    t[i] = RoundBatch(MulInt32(t[i], scale4), 12);
                 }
 
                 break;
@@ -1288,7 +1321,28 @@ internal static class Av1InverseTransform
                 continue;
             }
 
-            for (int j = 0; j < colsLimit; j++)
+            int jl = 0;
+            if (Avx2.IsSupported)
+            {
+                // Four rows x four columns at a time: contiguous loads, an in-register 4x4 transpose, and a
+                // sign-extending widen replace sixteen scalar loads plus lane inserts. Rows past rowsLimit
+                // are forced to zero here exactly as the scalar path below does.
+                for (; jl + 4 <= colsLimit; jl += 4)
+                {
+                    int b0 = (i * 64) + jl;
+                    Vector128<int> r0 = Vector128.LoadUnsafe(ref dequant[b0]);
+                    Vector128<int> r1 = i + 1 < rowsLimit ? Vector128.LoadUnsafe(ref dequant[b0 + 64]) : Vector128<int>.Zero;
+                    Vector128<int> r2 = i + 2 < rowsLimit ? Vector128.LoadUnsafe(ref dequant[b0 + 128]) : Vector128<int>.Zero;
+                    Vector128<int> r3 = i + 3 < rowsLimit ? Vector128.LoadUnsafe(ref dequant[b0 + 192]) : Vector128<int>.Zero;
+                    Transpose4x4(r0, r1, r2, r3, out Vector128<int> c0, out Vector128<int> c1, out Vector128<int> c2, out Vector128<int> c3);
+                    t[jl] = Avx2.ConvertToVector256Int64(c0);
+                    t[jl + 1] = Avx2.ConvertToVector256Int64(c1);
+                    t[jl + 2] = Avx2.ConvertToVector256Int64(c2);
+                    t[jl + 3] = Avx2.ConvertToVector256Int64(c3);
+                }
+            }
+
+            for (int j = jl; j < colsLimit; j++)
             {
                 long v0 = dequant[(i * 64) + j];
                 long v1 = i + 1 < rowsLimit ? dequant[((i + 1) * 64) + j] : 0;
@@ -1306,7 +1360,7 @@ internal static class Av1InverseTransform
             {
                 for (int j = 0; j < w; j++)
                 {
-                    t[j] = RoundBatch(t[j] * rescaleFactor, 12);
+                    t[j] = RoundBatch(MulInt32(t[j], rescaleFactor), 12);
                 }
             }
 
@@ -1332,13 +1386,32 @@ internal static class Av1InverseTransform
                 InverseIdentityBatch(tRow, log2W);
             }
 
-            for (int j = 0; j < w; j++)
+            if (Avx2.IsSupported)
             {
-                Vector256<long> rounded = RoundBatch(tRow[j], rowShift);
-                residual[(i * w) + j] = (int)Vector256.GetElement(rounded, 0);
-                residual[((i + 1) * w) + j] = (int)Vector256.GetElement(rounded, 1);
-                residual[((i + 2) * w) + j] = (int)Vector256.GetElement(rounded, 2);
-                residual[((i + 3) * w) + j] = (int)Vector256.GetElement(rounded, 3);
+                for (int j = 0; j < w; j += 4)
+                {
+                    Transpose4x4(
+                        NarrowToInt32(RoundBatch(tRow[j], rowShift)),
+                        NarrowToInt32(RoundBatch(tRow[j + 1], rowShift)),
+                        NarrowToInt32(RoundBatch(tRow[j + 2], rowShift)),
+                        NarrowToInt32(RoundBatch(tRow[j + 3], rowShift)),
+                        out Vector128<int> o0, out Vector128<int> o1, out Vector128<int> o2, out Vector128<int> o3);
+                    o0.StoreUnsafe(ref residual[(i * w) + j]);
+                    o1.StoreUnsafe(ref residual[((i + 1) * w) + j]);
+                    o2.StoreUnsafe(ref residual[((i + 2) * w) + j]);
+                    o3.StoreUnsafe(ref residual[((i + 3) * w) + j]);
+                }
+            }
+            else
+            {
+                for (int j = 0; j < w; j++)
+                {
+                    Vector256<long> rounded = RoundBatch(tRow[j], rowShift);
+                    residual[(i * w) + j] = (int)Vector256.GetElement(rounded, 0);
+                    residual[((i + 1) * w) + j] = (int)Vector256.GetElement(rounded, 1);
+                    residual[((i + 2) * w) + j] = (int)Vector256.GetElement(rounded, 2);
+                    residual[((i + 3) * w) + j] = (int)Vector256.GetElement(rounded, 3);
+                }
             }
         }
 
@@ -1401,13 +1474,23 @@ internal static class Av1InverseTransform
         var tCol = ColScratchBatch();
         for (int j = 0; j < w; j += 4)
         {
-            for (int i = 0; i < h; i++)
+            if (Avx2.IsSupported)
             {
-                tCol[i] = Vector256.Create(
-                    (long)residual[(i * w) + j],
-                    (long)residual[(i * w) + j + 1],
-                    (long)residual[(i * w) + j + 2],
-                    (long)residual[(i * w) + j + 3]);
+                for (int i = 0; i < h; i++)
+                {
+                    tCol[i] = Avx2.ConvertToVector256Int64(Vector128.LoadUnsafe(ref residual[(i * w) + j]));
+                }
+            }
+            else
+            {
+                for (int i = 0; i < h; i++)
+                {
+                    tCol[i] = Vector256.Create(
+                        (long)residual[(i * w) + j],
+                        (long)residual[(i * w) + j + 1],
+                        (long)residual[(i * w) + j + 2],
+                        (long)residual[(i * w) + j + 3]);
+                }
             }
 
             if (lossless)
@@ -1427,13 +1510,23 @@ internal static class Av1InverseTransform
                 InverseIdentityBatch(tCol, log2H);
             }
 
-            for (int i = 0; i < h; i++)
+            if (Avx2.IsSupported)
             {
-                Vector256<long> rounded = RoundBatch(tCol[i], colShift);
-                residual[(i * w) + j] = (int)Vector256.GetElement(rounded, 0);
-                residual[(i * w) + j + 1] = (int)Vector256.GetElement(rounded, 1);
-                residual[(i * w) + j + 2] = (int)Vector256.GetElement(rounded, 2);
-                residual[(i * w) + j + 3] = (int)Vector256.GetElement(rounded, 3);
+                for (int i = 0; i < h; i++)
+                {
+                    NarrowToInt32(RoundBatch(tCol[i], colShift)).StoreUnsafe(ref residual[(i * w) + j]);
+                }
+            }
+            else
+            {
+                for (int i = 0; i < h; i++)
+                {
+                    Vector256<long> rounded = RoundBatch(tCol[i], colShift);
+                    residual[(i * w) + j] = (int)Vector256.GetElement(rounded, 0);
+                    residual[(i * w) + j + 1] = (int)Vector256.GetElement(rounded, 1);
+                    residual[(i * w) + j + 2] = (int)Vector256.GetElement(rounded, 2);
+                    residual[(i * w) + j + 3] = (int)Vector256.GetElement(rounded, 3);
+                }
             }
         }
     }
