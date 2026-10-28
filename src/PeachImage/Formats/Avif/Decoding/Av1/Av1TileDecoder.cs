@@ -2512,12 +2512,10 @@ internal sealed class Av1TileDecoder
                 _reconPred, _planes[plane], stride, startX, startY, w, h,
                 _mvRow, _mvCol, subX, subY, lastX, lastY, _seq.BitDepth);
 
+            var destPlane = _planes[plane];
             for (int i = 0; i < h; i++)
             {
-                for (int j = 0; j < w; j++)
-                {
-                    _planes[plane][((startY + i) * stride) + startX + j] = _reconPred[(i * w) + j];
-                }
+                _reconPred.AsSpan(i * w, w).CopyTo(destPlane.AsSpan(((startY + i) * stride) + startX, w));
             }
         }
         else if (usesPalette)
@@ -2563,12 +2561,10 @@ internal sealed class Av1TileDecoder
                 plane == 0 && _useFilterIntra, _filterIntraMode, angleDelta, _seq.EnableIntraEdgeFilter,
                 filterTypeSmooth, maxX - 1, maxY - 1, startX, startY, _seq.BitDepth);
 
+            var destPlane = _planes[plane];
             for (int i = 0; i < h; i++)
             {
-                for (int j = 0; j < w; j++)
-                {
-                    _planes[plane][((startY + i) * stride) + startX + j] = _reconPred[(i * w) + j];
-                }
+                _reconPred.AsSpan(i * w, w).CopyTo(destPlane.AsSpan(((startY + i) * stride) + startX, w));
             }
         }
 
@@ -2596,13 +2592,12 @@ internal sealed class Av1TileDecoder
         }
 
         int lfStride = _loopfilterTxSizeStrides[plane];
+        var blockDecoded = _blockDecoded[plane];
+        var lfTxSizes = _loopfilterTxSizes[plane];
         for (int i = 0; i < stepY; i++)
         {
-            for (int j = 0; j < stepX; j++)
-            {
-                SetBlockDecoded(plane, (subBlockMiRow >> subY) + i, (subBlockMiCol >> subX) + j, true);
-                _loopfilterTxSizes[plane][(((row >> subY) + i) * lfStride) + (col >> subX) + j] = txSz;
-            }
+            blockDecoded.AsSpan(((subBlockMiRow >> subY) + i + 1) * BlockDecodedStride + (subBlockMiCol >> subX) + 1, stepX).Fill(true);
+            lfTxSizes.AsSpan((((row >> subY) + i) * lfStride) + (col >> subX), stepX).Fill(txSz);
         }
     }
 

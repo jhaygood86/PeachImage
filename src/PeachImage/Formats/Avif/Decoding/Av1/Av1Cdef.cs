@@ -61,7 +61,7 @@ internal static class Av1Cdef
         {
             int length = result.PlaneWidths[plane] * result.PlaneHeights[plane];
             cdefPlanes[plane] = ArrayPool<int>.Shared.Rent(length);
-            Array.Clear(cdefPlanes[plane], 0, length);
+            ClearPadding(cdefPlanes[plane], result, seq, frame, plane);
         }
 
         var state = new State(result, cdefPlanes);
@@ -166,6 +166,30 @@ internal static class Av1Cdef
             CdefFilter(state, 1, r, c, priStr, secStr, damping, dir);
             CdefFilter(state, 2, r, c, priStr, secStr, damping, dir);
         }
+    }
+
+    /// <summary>
+    /// Zeroes the part of a rented output plane that <see cref="CopyStrip"/> will not overwrite: the columns
+    /// right of the copied width in each copied row, and every row below the last strip.
+    /// </summary>
+    private static void ClearPadding(int[] plane, Av1FrameDecodeResult result, Av1SequenceHeader seq, Av1FrameHeader frame, int planeIndex)
+    {
+        int subX = planeIndex > 0 && seq.SubsamplingX ? 1 : 0;
+        int subY = planeIndex > 0 && seq.SubsamplingY ? 1 : 0;
+        int stride = result.PlaneWidths[planeIndex];
+        int height = result.PlaneHeights[planeIndex];
+        int copiedWidth = (((frame.MiCols + 1) & ~1) * 4) >> subX;
+
+        // CopyStrip covers rows [0, last strip end), where strips start at even mi rows and span 8 luma rows.
+        int lastStripStartMi = ((frame.MiRows - 1) / 2) * 2;
+        int stripEnd = Math.Min(height, ((lastStripStartMi * 4) + 8) >> subY);
+
+        for (int y = 0; y < stripEnd; y++)
+        {
+            plane.AsSpan((y * stride) + copiedWidth, stride - copiedWidth).Clear();
+        }
+
+        plane.AsSpan(stripEnd * stride, (height - stripEnd) * stride).Clear();
     }
 
     /// <summary>
