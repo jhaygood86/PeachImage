@@ -1242,13 +1242,17 @@ internal static class Av1InverseTransform
     /// <c>2D inverse transform process</c> (spec §7.13.3): transforms <paramref name="dequant"/> (a flat
     /// <c>64x64</c> row-major buffer, as written by <see cref="Av1Dequantizer.Dequantize"/>) into
     /// <paramref name="residual"/> (a flat <c>w x h</c> row-major buffer).
+    /// <paramref name="nzRows"/>/<paramref name="nzCols"/> (default: the whole coded region) declare that all
+    /// non-zero coefficients lie in <c>[0, nzRows) x [0, nzCols)</c> of <paramref name="dequant"/>; anything
+    /// outside it is never read. The result is bit-identical to the full form: a transform of an all-zero row
+    /// is all zero, so those rows are skipped, and a DC-only DCT_DCT block is computed from a single column.
     /// </summary>
     // `t` (the only stackalloc in this method) is fully overwritten, index by index, for j in [0, w) at the
     // top of every row iteration below, before any read -- same reasoning as Av1ForwardTransform.Forward2D's
     // own [SkipLocalsInit] (see that method's remarks), and this is the single hottest per-block call in the
     // entire decoder (called via both real decode and every encoder-side RDO reconstruction trial).
     [SkipLocalsInit]
-    public static void Inverse2D(int[] dequant, int[] residual, int txSz, int planeTxType, bool lossless, int bitDepth)
+    public static void Inverse2D(int[] dequant, int[] residual, int txSz, int planeTxType, bool lossless, int bitDepth, int nzRows = 32, int nzCols = 32)
     {
         int log2W = Av1TxDimensions.WidthLog2[txSz];
         int log2H = Av1TxDimensions.HeightLog2[txSz];
@@ -1273,15 +1277,29 @@ internal static class Av1InverseTransform
         // previously h separate calls to the scalar row transform above -- see this class's own remarks
         // above InverseDctBatch for why this axis (batching independent rows), not vectorizing within one
         // row's own butterfly network, is what real AV1 SIMD kernels do.
+        int rowsLimit = Math.Min(nzRows, 32);
+        int colsLimit = Math.Min(nzCols, 32);
         for (int i = 0; i < h; i += 4)
         {
-            for (int j = 0; j < w; j++)
+            if (i >= rowsLimit)
             {
-                long v0 = i < 32 && j < 32 ? dequant[(i * 64) + j] : 0;
-                long v1 = i + 1 < 32 && j < 32 ? dequant[((i + 1) * 64) + j] : 0;
-                long v2 = i + 2 < 32 && j < 32 ? dequant[((i + 2) * 64) + j] : 0;
-                long v3 = i + 3 < 32 && j < 32 ? dequant[((i + 3) * 64) + j] : 0;
+                // Four all-zero input rows transform to four all-zero output rows.
+                Array.Clear(residual, i * w, 4 * w);
+                continue;
+            }
+
+            for (int j = 0; j < colsLimit; j++)
+            {
+                long v0 = dequant[(i * 64) + j];
+                long v1 = i + 1 < rowsLimit ? dequant[((i + 1) * 64) + j] : 0;
+                long v2 = i + 2 < rowsLimit ? dequant[((i + 2) * 64) + j] : 0;
+                long v3 = i + 3 < rowsLimit ? dequant[((i + 3) * 64) + j] : 0;
                 t[j] = Vector256.Create(v0, v1, v2, v3);
+            }
+
+            for (int j = colsLimit; j < w; j++)
+            {
+                t[j] = Vector256<long>.Zero;
             }
 
             if (rescale)
@@ -1328,6 +1346,38 @@ internal static class Av1InverseTransform
         // order, so this is a single unconditional elementwise clamp over the whole buffer -- no per-row
         // structure to preserve -- vectorizable as one flat pass regardless of w/h individually.
         int colBound = 1 << (colClampRange - 1);
+
+        // DC-only DCT_DCT: the row pass turns the lone DC into a constant row 0, so every column's input is
+        // the identical vector [dc, 0, ...] and one column transform is replicated across the block. The
+        // constant-row property is verified rather than assumed.
+        if (!lossless && planeTxType == Av1TxType.DctDct && rowsLimit == 1 && colsLimit == 1)
+        {
+            bool uniform = true;
+            for (int j = 1; j < w; j++)
+            {
+                uniform &= residual[j] == residual[0];
+            }
+
+            if (uniform)
+            {
+                var tDc = ColScratchBatch();
+                tDc[0] = Vector256.Create((long)Math.Clamp(residual[0], -colBound, colBound - 1), 0L, 0L, 0L);
+                for (int i = 1; i < h; i++)
+                {
+                    tDc[i] = Vector256<long>.Zero;
+                }
+
+                InverseDctBatch(tDc, log2H, colClampRange);
+                for (int i = 0; i < h; i++)
+                {
+                    int value = (int)Vector256.GetElement(RoundBatch(tDc[i], colShift), 0);
+                    residual.AsSpan(i * w, w).Fill(value);
+                }
+
+                return;
+            }
+        }
+
         int total = h * w;
         int k = 0;
         if (Vector256.IsHardwareAccelerated)

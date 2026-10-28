@@ -222,6 +222,11 @@ internal sealed class Av1TileDecoder
     /// <summary>Padded per-block coefficient level grid, (32 + <see cref="LevelPad"/>)^2 -- the largest coded transform area is 32x32.</summary>
     private readonly byte[] _levels = new byte[(32 + LevelPad) * (32 + LevelPad)];
 
+    /// <summary>Extent (rows / columns, within the coded <c>Min(32,h) x Min(32,w)</c> region) covering every non-zero coefficient of the block <see cref="Coeffs"/> last read.</summary>
+    private int _nzRows;
+
+    private int _nzCols;
+
     /// <summary><c>Sig_Ref_Diff_Offset</c> / <c>Mag_Ref_Offset_With_Tx_Class</c> converted to flat offsets into <see cref="_levels"/>, indexed <c>[adjustedTxSz * 3 + txClass]</c> (the padded row stride depends only on the adjusted transform width).</summary>
     private static readonly int[][] SigLevelOffsets = BuildLevelOffsets(Av1CoeffTables.SigRefDiffOffset);
 
@@ -2717,8 +2722,8 @@ internal sealed class Av1TileDecoder
         // just wrote, and for i>=32 (only reachable when h>32) the read is skipped entirely (substituted
         // with 0), so a previous call's leftover values at any position this call doesn't read can never
         // surface. Confirmed by the byte-identical hash baseline before/after removing this clear.
-        Av1Dequantizer.Dequantize(_quant, _reconDequant, txSz, GetDcQuant(plane), GetAcQuant(plane), _seq.BitDepth);
-        Av1InverseTransform.Inverse2D(_reconDequant, _reconResidual, txSz, _planeTxType, _lossless, _seq.BitDepth);
+        Av1Dequantizer.Dequantize(_quant, _reconDequant, txSz, GetDcQuant(plane), GetAcQuant(plane), _seq.BitDepth, _nzRows, _nzCols);
+        Av1InverseTransform.Inverse2D(_reconDequant, _reconResidual, txSz, _planeTxType, _lossless, _seq.BitDepth, _nzRows, _nzCols);
 
         bool flipUd = _planeTxType is Av1TxType.FlipadstDct or Av1TxType.FlipadstAdst or Av1TxType.VFlipadst or Av1TxType.FlipadstFlipadst;
         bool flipLr = _planeTxType is Av1TxType.DctFlipadst or Av1TxType.AdstFlipadst or Av1TxType.HFlipadst or Av1TxType.FlipadstFlipadst;
@@ -2860,6 +2865,8 @@ internal sealed class Av1TileDecoder
             var baseCtxOffsets = Av1CoeffTables.CoeffBaseCtxOffset[txSz];
             const int BrMagCap = Av1CoeffTables.CoeffBaseRange + Av1CoeffTables.NumBaseLevels + 1;
 
+            int maxRow = 0;
+            int maxCol = 0;
             for (int c = eob - 1; c >= 0; c--)
             {
                 int pos = scan[c];
@@ -2933,7 +2940,15 @@ internal sealed class Av1TileDecoder
 
                 _quant[pos] = level;
                 levels[p] = (byte)level;
+                if (level != 0)
+                {
+                    maxRow = Math.Max(maxRow, row);
+                    maxCol = Math.Max(maxCol, col);
+                }
             }
+
+            _nzRows = maxRow + 1;
+            _nzCols = maxCol + 1;
 
             for (int c = 0; c < eob; c++)
             {

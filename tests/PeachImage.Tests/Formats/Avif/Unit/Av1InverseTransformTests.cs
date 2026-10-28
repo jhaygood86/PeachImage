@@ -24,7 +24,7 @@ public class Av1InverseTransformTests
     private static int[] Inverse2D(int[] dequant, int txSz, int planeTxType, bool lossless, int bitDepth)
     {
         var residual = new int[64 * 64];
-        Inverse2DMethod.Invoke(null, [dequant, residual, txSz, planeTxType, lossless, bitDepth]);
+        Inverse2DMethod.Invoke(null, [dequant, residual, txSz, planeTxType, lossless, bitDepth, 32, 32]);
         return residual;
     }
 
