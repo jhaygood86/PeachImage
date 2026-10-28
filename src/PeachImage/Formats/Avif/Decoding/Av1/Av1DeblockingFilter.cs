@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
 /// <summary>
@@ -98,18 +100,17 @@ internal static class Av1DeblockingFilter
         int miCols = frame.MiCols;
         int lfStride = result.LoopfilterTxSizeStrides[plane];
         int txSz = result.LoopfilterTxSizes[plane][((row >> subY) * lfStride) + (col >> subX)];
-        int prevTxSz = result.LoopfilterTxSizes[plane][((prevRow >> subY) * lfStride) + (prevCol >> subX)];
-
         // applyFilter (spec §7.14.2) reduces to isTxEdge here: isIntra is always true for this
         // intra-only decoder, and applyFilter is 1 whenever isTxEdge && (isBlockEdge || !skip ||
         // isIntra) -- with isIntra always true, the isBlockEdge/skip terms never change the result, so
         // isBlockEdge (and the MiSizes/Skips reads it would need) is never computed.
         bool isTxEdge;
-        if (pass == 0 && xP % Av1TxDimensions.Width[txSz] == 0)
+        // Transform dimensions are powers of two, so the modulo is a mask.
+        if (pass == 0 && (xP & (Av1TxDimensions.Width[txSz] - 1)) == 0)
         {
             isTxEdge = true;
         }
-        else if (pass == 1 && yP % Av1TxDimensions.Height[txSz] == 0)
+        else if (pass == 1 && (yP & (Av1TxDimensions.Height[txSz] - 1)) == 0)
         {
             isTxEdge = true;
         }
@@ -125,6 +126,7 @@ internal static class Av1DeblockingFilter
             return;
         }
 
+        int prevTxSz = result.LoopfilterTxSizes[plane][((prevRow >> subY) * lfStride) + (prevCol >> subX)];
         int filterSize = FilterSize(txSz, prevTxSz, pass, plane);
 
         var (lvl, limit, blimit, thresh) = AdaptiveFilterStrength(result, row, col, plane, pass);
@@ -138,9 +140,18 @@ internal static class Av1DeblockingFilter
             return;
         }
 
+        // The four samples along this 4-sample edge segment: each filter reads/writes a line of samples
+        // perpendicular to the edge (stride `step`), and consecutive lines are `advance` apart.
+        var buf = result.Planes[plane];
+        int stride = result.PlaneWidths[plane];
+        int step = (dy * stride) + dx;
+        int advance = (dx * stride) + dy;
+        int pos = (yP * stride) + xP;
+        int bitDepth = seq.BitDepth;
         for (int i = 0; i < 4; i++)
         {
-            SampleFilter(result, plane, xP + (dy * i), yP + (dx * i), limit, blimit, thresh, dx, dy, filterSize);
+            SampleFilter(buf, pos, step, plane, bitDepth, limit, blimit, thresh, filterSize);
+            pos += advance;
         }
     }
 
@@ -187,67 +198,45 @@ internal static class Av1DeblockingFilter
         return (lvl, limit, blimit, thresh);
     }
 
-    /// <summary><c>Sample filtering process</c> (spec §7.14.6.1).</summary>
-    private static void SampleFilter(Av1FrameDecodeResult result, int plane, int x, int y, int limit, int blimit, int thresh, int dx, int dy, int filterSize)
+    /// <summary>
+    /// <c>Sample filtering process</c> (spec §7.14.6.1) including the <c>Filter mask process</c> (§7.14.6.2),
+    /// on the line of samples through <paramref name="buf"/>[<paramref name="pos"/>] (q0) running
+    /// perpendicular to the edge with element stride <paramref name="step"/> (p0 is at <c>pos - step</c>).
+    /// Samples the selected filter length never consults (p2/p3/q2/q3 for short filters) are not read.
+    /// </summary>
+    private static void SampleFilter(int[] buf, int pos, int step, int plane, int bitDepth, int limit, int blimit, int thresh, int filterSize)
     {
-        var (hevMask, filterMask, flatMask, flatMask2) = FilterMask(result, plane, x, y, limit, blimit, thresh, dx, dy, filterSize);
-        if (!filterMask)
-        {
-            return;
-        }
-
-        if (filterSize == 4 || !flatMask)
-        {
-            NarrowFilter(result, hevMask, x, y, plane, dx, dy);
-        }
-        else if (filterSize == 8 || !flatMask2)
-        {
-            WideFilter(result, x, y, plane, dx, dy, 3);
-        }
-        else
-        {
-            WideFilter(result, x, y, plane, dx, dy, 4);
-        }
-    }
-
-    /// <summary><c>Filter mask process</c> (spec §7.14.6.2).</summary>
-    private static (bool HevMask, bool FilterMask, bool FlatMask, bool FlatMask2) FilterMask(Av1FrameDecodeResult result, int plane, int x, int y, int limit, int blimit, int thresh, int dx, int dy, int filterSize)
-    {
-        int bitDepth = result.Sequence.BitDepth;
-        var buf = result.Planes[plane];
-        int stride = result.PlaneWidths[plane];
-
-        int Sample(int offset) => buf[((y + (dy * offset)) * stride) + x + (dx * offset)];
-
-        int q0 = Sample(0);
-        int q1 = Sample(1);
-        int q2 = Sample(2);
-        int q3 = Sample(3);
-        int p0 = Sample(-1);
-        int p1 = Sample(-2);
-        int p2 = Sample(-3);
-        int p3 = Sample(-4);
-        int q4 = 0, q5 = 0, q6 = 0, p4 = 0, p5 = 0, p6 = 0;
-        if (filterSize == 16)
-        {
-            q4 = Sample(4);
-            q5 = Sample(5);
-            q6 = Sample(6);
-            p4 = Sample(-5);
-            p5 = Sample(-6);
-            p6 = Sample(-7);
-        }
-
-        int threshBd = thresh << (bitDepth - 8);
-        bool hevMask = Math.Abs(p1 - p0) > threshBd || Math.Abs(q1 - q0) > threshBd;
+        int q0 = buf[pos];
+        int q1 = buf[pos + step];
+        int p0 = buf[pos - step];
+        int p1 = buf[pos - (2 * step)];
 
         int filterLen = filterSize == 4 ? 4 : plane != 0 ? 6 : filterSize == 8 ? 8 : 16;
+        int q2 = 0, q3 = 0, p2 = 0, p3 = 0;
+        if (filterLen >= 6)
+        {
+            q2 = buf[pos + (2 * step)];
+            p2 = buf[pos - (3 * step)];
+        }
 
-        int limitBd = limit << (bitDepth - 8);
-        int blimitBd = blimit << (bitDepth - 8);
-        bool mask = Math.Abs(p1 - p0) > limitBd
-            || Math.Abs(q1 - q0) > limitBd
-            || (Math.Abs(p0 - q0) * 2) + (Math.Abs(p1 - q1) / 2) > blimitBd;
+        if (filterLen >= 8)
+        {
+            q3 = buf[pos + (3 * step)];
+            p3 = buf[pos - (4 * step)];
+        }
+
+        int shift = bitDepth - 8;
+        int threshBd = thresh << shift;
+        int limitBd = limit << shift;
+        int blimitBd = blimit << shift;
+
+        int absP1P0 = Math.Abs(p1 - p0);
+        int absQ1Q0 = Math.Abs(q1 - q0);
+        bool hevMask = absP1P0 > threshBd || absQ1Q0 > threshBd;
+
+        bool mask = absP1P0 > limitBd
+            || absQ1Q0 > limitBd
+            || (Math.Abs(p0 - q0) * 2) + (Math.Abs(p1 - q1) >> 1) > blimitBd;
 
         if (filterLen >= 6)
         {
@@ -259,14 +248,17 @@ internal static class Av1DeblockingFilter
             mask = mask || Math.Abs(p3 - p2) > limitBd || Math.Abs(q3 - q2) > limitBd;
         }
 
-        bool filterMask = !mask;
+        if (mask)
+        {
+            return;
+        }
 
+        int thresholdBd = 1 << shift;
         bool flatMask = false;
         if (filterSize >= 8)
         {
-            int thresholdBd = 1 << (bitDepth - 8);
-            bool m = Math.Abs(p1 - p0) > thresholdBd
-                || Math.Abs(q1 - q0) > thresholdBd
+            bool m = absP1P0 > thresholdBd
+                || absQ1Q0 > thresholdBd
                 || Math.Abs(p2 - p0) > thresholdBd
                 || Math.Abs(q2 - q0) > thresholdBd;
 
@@ -278,90 +270,92 @@ internal static class Av1DeblockingFilter
             flatMask = !m;
         }
 
-        bool flatMask2 = false;
-        if (filterSize >= 16)
+        if (filterSize == 4 || !flatMask)
         {
-            int thresholdBd = 1 << (bitDepth - 8);
-            bool m = Math.Abs(p6 - p0) > thresholdBd
-                || Math.Abs(q6 - q0) > thresholdBd
-                || Math.Abs(p5 - p0) > thresholdBd
-                || Math.Abs(q5 - q0) > thresholdBd
-                || Math.Abs(p4 - p0) > thresholdBd
-                || Math.Abs(q4 - q0) > thresholdBd;
-            flatMask2 = !m;
+            NarrowFilter(buf, pos, step, hevMask, p1, p0, q0, q1, bitDepth);
+            return;
         }
 
-        return (hevMask, filterMask, flatMask, flatMask2);
+        if (filterSize == 8)
+        {
+            WideFilter(buf, pos, step, plane, 3);
+            return;
+        }
+
+        // filterSize == 16 (luma only): flat_mask2 looks at the outer six samples.
+        bool flatMask2 = !(Math.Abs(buf[pos - (7 * step)] - p0) > thresholdBd
+            || Math.Abs(buf[pos + (6 * step)] - q0) > thresholdBd
+            || Math.Abs(buf[pos - (6 * step)] - p0) > thresholdBd
+            || Math.Abs(buf[pos + (5 * step)] - q0) > thresholdBd
+            || Math.Abs(buf[pos - (5 * step)] - p0) > thresholdBd
+            || Math.Abs(buf[pos + (4 * step)] - q0) > thresholdBd);
+
+        WideFilter(buf, pos, step, plane, flatMask2 ? 4 : 3);
     }
 
     /// <summary><c>Narrow filter process</c> (spec §7.14.6.3).</summary>
-    private static void NarrowFilter(Av1FrameDecodeResult result, bool hevMask, int x, int y, int plane, int dx, int dy)
+    private static void NarrowFilter(int[] buf, int pos, int step, bool hevMask, int p1, int p0, int q0, int q1, int bitDepth)
     {
-        int bitDepth = result.Sequence.BitDepth;
-        var buf = result.Planes[plane];
-        int stride = result.PlaneWidths[plane];
-
-        int Idx(int offset) => ((y + (dy * offset)) * stride) + x + (dx * offset);
-
-        int q0 = buf[Idx(0)];
-        int q1 = buf[Idx(1)];
-        int p0 = buf[Idx(-1)];
-        int p1 = buf[Idx(-2)];
-
         int bound = 1 << (bitDepth - 1);
-        int Clamp(int v) => Math.Clamp(v, -bound, bound - 1);
-
         int bias = 0x80 << (bitDepth - 8);
         int ps1 = p1 - bias;
         int ps0 = p0 - bias;
         int qs0 = q0 - bias;
         int qs1 = q1 - bias;
 
-        int filter = hevMask ? Clamp(ps1 - qs1) : 0;
-        filter = Clamp(filter + (3 * (qs0 - ps0)));
-        int filter1 = Clamp(filter + 4) >> 3;
-        int filter2 = Clamp(filter + 3) >> 3;
+        int filter = hevMask ? Math.Clamp(ps1 - qs1, -bound, bound - 1) : 0;
+        filter = Math.Clamp(filter + (3 * (qs0 - ps0)), -bound, bound - 1);
+        int filter1 = Math.Clamp(filter + 4, -bound, bound - 1) >> 3;
+        int filter2 = Math.Clamp(filter + 3, -bound, bound - 1) >> 3;
 
-        buf[Idx(0)] = Clamp(qs0 - filter1) + bias;
-        buf[Idx(-1)] = Clamp(ps0 + filter2) + bias;
+        buf[pos] = Math.Clamp(qs0 - filter1, -bound, bound - 1) + bias;
+        buf[pos - step] = Math.Clamp(ps0 + filter2, -bound, bound - 1) + bias;
 
         if (!hevMask)
         {
-            int f = Round2(filter1, 1);
-            buf[Idx(1)] = Clamp(qs1 - f) + bias;
-            buf[Idx(-2)] = Clamp(ps1 + f) + bias;
+            int f = (filter1 + 1) >> 1;
+            buf[pos + step] = Math.Clamp(qs1 - f, -bound, bound - 1) + bias;
+            buf[pos - (2 * step)] = Math.Clamp(ps1 + f, -bound, bound - 1) + bias;
         }
     }
 
     /// <summary><c>Wide filter process</c> (spec §7.14.6.4).</summary>
-    private static void WideFilter(Av1FrameDecodeResult result, int x, int y, int plane, int dx, int dy, int log2Size)
+    [SkipLocalsInit]
+    private static void WideFilter(int[] buf, int pos, int step, int plane, int log2Size)
     {
-        var buf = result.Planes[plane];
-        int stride = result.PlaneWidths[plane];
-        int Idx(int offset) => ((y + (dy * offset)) * stride) + x + (dx * offset);
-
         int n = log2Size == 4 ? 6 : plane == 0 ? 3 : 2;
         int n2 = log2Size == 3 && plane == 0 ? 0 : 1;
 
-        var f = new int[2 * n];
+        // Samples at offsets [-(n+1), n] around the edge, indexed offset + n + 1. Sums stay far inside int
+        // (at most 2n+2 taps of weight <= 2 on samples < 2^12).
+        Span<int> s = stackalloc int[14];
+        int count = (2 * n) + 2;
+        int p = pos - ((n + 1) * step);
+        for (int k = 0; k < count; k++)
+        {
+            s[k] = buf[p];
+            p += step;
+        }
+
+        Span<int> f = stackalloc int[12];
+        int rounding = 1 << (log2Size - 1);
         for (int i = -n; i < n; i++)
         {
-            long t = 0;
+            int t = 0;
             for (int j = -n; j <= n; j++)
             {
-                int p = Math.Clamp(i + j, -(n + 1), n);
-                int tap = Math.Abs(j) <= n2 ? 2 : 1;
-                t += (long)buf[Idx(p)] * tap;
+                int idx = Math.Clamp(i + j, -(n + 1), n) + n + 1;
+                t += s[idx] * (Math.Abs(j) <= n2 ? 2 : 1);
             }
 
-            f[i + n] = Round2(t, log2Size);
+            f[i + n] = (t + rounding) >> log2Size;
         }
 
-        for (int i = -n; i < n; i++)
+        p = pos - (n * step);
+        for (int k = 0; k < 2 * n; k++)
         {
-            buf[Idx(i)] = f[i + n];
+            buf[p] = f[k];
+            p += step;
         }
     }
-
-    private static int Round2(long x, int n) => n == 0 ? (int)x : (int)((x + (1L << (n - 1))) >> n);
 }
