@@ -20,6 +20,12 @@ internal static class Av1DeblockingFilter
         var frame = result.Frame;
         var level = frame.LoopFilter.Level;
 
+        // Only cells whose top-left sample is inside the frame can carry an edge; the frame-edge exclusions
+        // (x == 0 for vertical edges, y == 0 for horizontal ones) are folded into the loop starts.
+        int rowEnd = Math.Min(frame.MiRows, (frame.FrameHeight + 3) >> 2);
+        int colEnd = Math.Min(frame.MiCols, (frame.FrameWidth + 3) >> 2);
+
+        var memo = new StrengthMemo();
         for (int plane = 0; plane < seq.NumPlanes; plane++)
         {
             if (plane != 0 && level[1 + plane] == 0)
@@ -34,20 +40,39 @@ internal static class Av1DeblockingFilter
                 int subY = chroma && seq.SubsamplingY ? 1 : 0;
                 int rowStep = plane == 0 ? 1 : 1 << subY;
                 int colStep = plane == 0 ? 1 : 1 << subX;
+                int rowStart = pass == 1 ? rowStep : 0;
+                int colStart = pass == 0 ? colStep : 0;
 
-                for (int row = 0; row < frame.MiRows; row += rowStep)
+                memo.Reset();
+                for (int row = rowStart; row < rowEnd; row += rowStep)
                 {
-                    for (int col = 0; col < frame.MiCols; col += colStep)
+                    for (int col = colStart; col < colEnd; col += colStep)
                     {
-                        LoopFilterEdge(result, plane, pass, row, col);
+                        LoopFilterEdge(result, plane, pass, row, col, ref memo);
                     }
                 }
             }
         }
     }
 
+    /// <summary>
+    /// Filter strength of the last (segment, delta-LF) pair seen. Strength depends only on those two values
+    /// (plus the fixed plane/pass of the current loop), which are constant across long runs of cells.
+    /// </summary>
+    private struct StrengthMemo
+    {
+        public int Segment;
+        public int DeltaLf;
+        public int Lvl;
+        public int Limit;
+        public int Blimit;
+        public int Thresh;
+
+        public void Reset() => Segment = -1;
+    }
+
     /// <summary><c>loop_filter_edge</c> / the edge loop filter process (spec §7.14.2).</summary>
-    private static void LoopFilterEdge(Av1FrameDecodeResult result, int plane, int pass, int row, int col)
+    private static void LoopFilterEdge(Av1FrameDecodeResult result, int plane, int pass, int row, int col, ref StrengthMemo memo)
     {
         var seq = result.Sequence;
         var frame = result.Frame;
@@ -64,80 +89,54 @@ internal static class Av1DeblockingFilter
         row |= subY;
         col |= subX;
 
-        bool onScreen;
-        if (x >= frame.FrameWidth)
-        {
-            onScreen = false;
-        }
-        else if (y >= frame.FrameHeight)
-        {
-            onScreen = false;
-        }
-        else if (pass == 0 && x == 0)
-        {
-            onScreen = false;
-        }
-        else if (pass == 1 && y == 0)
-        {
-            onScreen = false;
-        }
-        else
-        {
-            onScreen = true;
-        }
-
-        if (!onScreen)
-        {
-            return;
-        }
-
         int xP = x >> subX;
         int yP = y >> subY;
 
-        int prevRow = row - (dy << subY);
-        int prevCol = col - (dx << subX);
-
-        int miCols = frame.MiCols;
         int lfStride = result.LoopfilterTxSizeStrides[plane];
         int txSz = result.LoopfilterTxSizes[plane][((row >> subY) * lfStride) + (col >> subX)];
+
         // applyFilter (spec §7.14.2) reduces to isTxEdge here: isIntra is always true for this
         // intra-only decoder, and applyFilter is 1 whenever isTxEdge && (isBlockEdge || !skip ||
         // isIntra) -- with isIntra always true, the isBlockEdge/skip terms never change the result, so
-        // isBlockEdge (and the MiSizes/Skips reads it would need) is never computed.
-        bool isTxEdge;
-        // Transform dimensions are powers of two, so the modulo is a mask.
-        if (pass == 0 && (xP & (Av1TxDimensions.Width[txSz] - 1)) == 0)
-        {
-            isTxEdge = true;
-        }
-        else if (pass == 1 && (yP & (Av1TxDimensions.Height[txSz] - 1)) == 0)
-        {
-            isTxEdge = true;
-        }
-        else
-        {
-            isTxEdge = false;
-        }
-
-        // isIntra is always true (intra-only decoder), so applyFilter reduces to isTxEdge && (isBlockEdge || !skip || true) == isTxEdge.
-        bool applyFilter = isTxEdge;
-        if (!applyFilter)
+        // isBlockEdge (and the MiSizes/Skips reads it would need) is never computed. Transform dimensions
+        // are powers of two, so the "multiple of the transform size" test is a mask.
+        bool isTxEdge = pass == 0
+            ? (xP & (Av1TxDimensions.Width[txSz] - 1)) == 0
+            : (yP & (Av1TxDimensions.Height[txSz] - 1)) == 0;
+        if (!isTxEdge)
         {
             return;
         }
 
+        int prevRow = row - (dy << subY);
+        int prevCol = col - (dx << subX);
         int prevTxSz = result.LoopfilterTxSizes[plane][((prevRow >> subY) * lfStride) + (prevCol >> subX)];
         int filterSize = FilterSize(txSz, prevTxSz, pass, plane);
 
-        var (lvl, limit, blimit, thresh) = AdaptiveFilterStrength(result, row, col, plane, pass);
-        if (lvl == 0)
+        int idx = (row * frame.MiCols) + col;
+        int segment = result.SegmentIds[idx];
+        int i = plane == 0 ? pass : plane + 1;
+        int deltaLf = frame.DeltaLfMulti ? result.DeltaLfs[i][idx] : result.DeltaLfs[0][idx];
+        if (memo.Segment != segment || memo.DeltaLf != deltaLf)
         {
-            (lvl, limit, blimit, thresh) = AdaptiveFilterStrength(result, prevRow, prevCol, plane, pass);
+            memo.Segment = segment;
+            memo.DeltaLf = deltaLf;
+            memo.Lvl = FilterStrength(frame, segment, deltaLf, i, out memo.Limit, out memo.Blimit, out memo.Thresh);
         }
 
+        int lvl = memo.Lvl;
+        int limit = memo.Limit;
+        int blimit = memo.Blimit;
+        int thresh = memo.Thresh;
         if (lvl == 0)
         {
-            return;
+            int prevIdx = (prevRow * frame.MiCols) + prevCol;
+            int prevDeltaLf = frame.DeltaLfMulti ? result.DeltaLfs[i][prevIdx] : result.DeltaLfs[0][prevIdx];
+            lvl = FilterStrength(frame, result.SegmentIds[prevIdx], prevDeltaLf, i, out limit, out blimit, out thresh);
+            if (lvl == 0)
+            {
+                return;
+            }
         }
 
         // The four samples along this 4-sample edge segment: each filter reads/writes a line of samples
@@ -148,7 +147,7 @@ internal static class Av1DeblockingFilter
         int advance = (dx * stride) + dy;
         int pos = (yP * stride) + xP;
         int bitDepth = seq.BitDepth;
-        for (int i = 0; i < 4; i++)
+        for (int k = 0; k < 4; k++)
         {
             SampleFilter(buf, pos, step, plane, bitDepth, limit, blimit, thresh, filterSize);
             pos += advance;
@@ -165,15 +164,9 @@ internal static class Av1DeblockingFilter
         return plane == 0 ? Math.Min(16, baseSize) : Math.Min(8, baseSize);
     }
 
-    /// <summary><c>Adaptive filter strength process</c> + <c>selection process</c> (spec §7.14.4-§7.14.5), restricted to the intra-only path.</summary>
-    private static (int Lvl, int Limit, int Blimit, int Thresh) AdaptiveFilterStrength(Av1FrameDecodeResult result, int row, int col, int plane, int pass)
+    /// <summary><c>Adaptive filter strength process</c> + <c>selection process</c> (spec §7.14.4-§7.14.5), restricted to the intra-only path. <paramref name="i"/> is the spec's loop-filter-level index (pass for luma, plane + 1 for chroma).</summary>
+    private static int FilterStrength(Av1FrameHeader frame, int segment, int deltaLf, int i, out int limit, out int blimit, out int thresh)
     {
-        var frame = result.Frame;
-        int idx = (row * frame.MiCols) + col;
-        int segment = result.SegmentIds[idx];
-        int i = plane == 0 ? pass : plane + 1;
-        int deltaLf = frame.DeltaLfMulti ? result.DeltaLfs[i][idx] : result.DeltaLfs[0][idx];
-
         int baseFilterLevel = Math.Clamp(deltaLf + frame.LoopFilter.Level[i], 0, MaxLoopFilter);
         int lvlSeg = baseFilterLevel;
         int feature = SegLvlAltLfYV + i;
@@ -191,11 +184,10 @@ internal static class Av1DeblockingFilter
         int lvl = lvlSeg;
         int sharpness = frame.LoopFilter.Sharpness;
         int shift = sharpness > 4 ? 2 : sharpness > 0 ? 1 : 0;
-        int limit = sharpness > 0 ? Math.Clamp(lvl >> shift, 1, 9 - sharpness) : Math.Max(1, lvl >> shift);
-        int blimit = (2 * (lvl + 2)) + limit;
-        int thresh = lvl >> 4;
-
-        return (lvl, limit, blimit, thresh);
+        limit = sharpness > 0 ? Math.Clamp(lvl >> shift, 1, 9 - sharpness) : Math.Max(1, lvl >> shift);
+        blimit = (2 * (lvl + 2)) + limit;
+        thresh = lvl >> 4;
+        return lvl;
     }
 
     /// <summary>
