@@ -303,17 +303,18 @@ across runs; the horizontal pass (which delegates straight to the Vector128 tier
 
 ## AVIF
 
-Decode baseline: libavif 1.4.2 with the dav1d 1.5.4 AV1 decoder and libyuv YUV-to-RGB conversion, single-threaded
-(PeachImage's AV1 decode is single-threaded too), producing 8-bit RGBA. SkiaSharp 4.154.0 does not decode AVIF.
+Decode baseline: libavif 1.4.2 with the dav1d 1.5.4 AV1 decoder and libyuv YUV-to-RGB conversion, single-threaded,
+producing 8-bit RGBA. PeachImage's AV1 decode is multi-threaded: tiles of 256x256 samples or more reconstruct pixels
+on a second thread while the first parses, and deblocking, CDEF and YUV-to-RGB run in parallel row bands. SkiaSharp 4.154.0 does not decode AVIF.
 
 ### Decode
 
 | Scenario | PeachImage | libavif | Ratio | PeachImage allocated |
 |---|---:|---:|---:|---:|
-| Photographic, 8-bit 4:2:0 | 127.4 ms | 19.6 ms | **6.50×** | 33.0 MB |
-| Photographic, 8-bit 4:2:0 + alpha | 145.7 ms | 21.8 ms | **6.70×** | 34.5 MB |
-| Photographic, lossless (4:4:4) | 569.7 ms | 134.5 ms | **4.24×** | 48.5 MB |
-| Small image (32×24) | 132.9 µs | 13.1 µs | **10.2×** | 260 KB |
+| Photographic, 8-bit 4:2:0 | 44.3 ms | 19.7 ms | **2.25×** | 19.5 MB |
+| Photographic, 8-bit 4:2:0 + alpha | 51.0 ms | 21.8 ms | **2.34×** | 19.4 MB |
+| Photographic, lossless (4:4:4) | 315.0 ms | 134.1 ms | **2.35×** | 35.4 MB |
+| Small image (32×24) | 73.8 µs | 12.9 µs | **5.72×** | 270 KB |
 
 AV1 decode is the format where PeachImage is furthest from a hand-tuned native decoder: dav1d is SIMD-assembly
 throughout. Per-image managed allocation is a PeachImage-only concern (libavif's buffers are unmanaged).
@@ -470,7 +471,7 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 | GIF | SkiaSharp | **2.31×–6.28×** (animated 6.28×, static 2.31×–3.99×) | no baseline (PeachImage-only) |
 | PNG | SkiaSharp | 0.91×–1.35× | 0.45×–1.42× |
 | WebP | SkiaSharp (libwebp) | 0.19×–2.02× (animated **0.19×**, static 1.18×–2.02×) | 1.04×–1.35× lossless (0.15× small-image outlier), 0.32× lossy |
-| AVIF | libavif / dav1d | **4.24×–10.2×** | implemented, throughput not measured here |
+| AVIF | libavif / dav1d | **2.25×–5.72×** | implemented, throughput not measured here |
 | TIFF | libtiff | 1.76× (LZW), 6.9× (uncompressed/PackBits) | not implemented (decode-only) |
 | JPEG 2000 | OpenJPEG | 1.62×–1.82× | not implemented (decode-only) |
 | JBIG2 | none (no shared build of jbig2dec) | 5.92 ms arithmetic / 3.04 ms MMR for 850x1100 | not implemented (decode-only) |
