@@ -20,6 +20,7 @@ namespace PeachImage.Formats.Avif.Decoding.Av1;
 /// [MiRowStart,MiRowEnd) x [MiColStart,MiColEnd) bounds -- so a later tile can never observe an earlier
 /// tile's leftover values, even though the backing storage is shared.
 /// </remarks>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1001", Justification = "Created, finished and disposed within DecodeTile; never outlives it.")]
 internal sealed class Av1TileDecoder
 {
     private readonly Av1SymbolDecoder _s;
@@ -99,17 +100,13 @@ internal sealed class Av1TileDecoder
     private int _maxLumaW;
     private int _maxLumaH;
 
-    // Reusable scratch buffers for reconstruction (spec §7.12.3), sized for the largest possible
-    // transform block (64x64) to avoid a heap allocation per transform block decoded.
+    // Scratch for IntraBC block-copy prediction, the one prediction written from the parse side (it reads
+    // pixels, so it runs only after the reconstruction pipeline has drained). Everything else -- intra
+    // prediction, CFL and residual reconstruction -- is described by an Av1ReconCommand and executed by
+    // _recon, which owns the matching scratch buffers.
     private readonly int[] _reconPred = new int[64 * 64];
-    private readonly int[] _reconDequant = new int[64 * 64];
-    private readonly int[] _reconResidual = new int[64 * 64];
 
-    // Reusable AboveRow/LeftCol edge buffers for intra prediction (spec §7.11.2.1), sized for the
-    // largest possible capacity (4*(w+h)+16 with w+h maxing out at 64+64) and refilled by
-    // Av1IntraPrediction.BuildEdges for every transform block rather than allocated per call.
-    private readonly Av1EdgeArray _aboveRow = new(528);
-    private readonly Av1EdgeArray _leftCol = new(528);
+    private Av1ReconPipeline _recon = null!;
 
     private int _currentQIndex;
     private readonly int[] _deltaLf = new int[4];
@@ -375,22 +372,46 @@ internal sealed class Av1TileDecoder
         int sbSize = _seq.Use128x128Superblock ? Av1BlockSize.Block128x128 : Av1BlockSize.Block64x64;
         int sbSize4 = Av1BlockTables.Num4x4BlocksWide[sbSize];
 
-        for (int r = _miRowStart; r < _miRowEnd; r += sbSize4)
-        {
-            ClearLeftContext();
+        // Large tiles split parse and pixel reconstruction across two threads; small ones (where starting a
+        // thread would cost more than it saves) and single-core hosts reconstruct inline.
+        bool threaded = Environment.ProcessorCount > 1
+            && (_miRowEnd - _miRowStart) * (_miColEnd - _miColStart) >= PipelineMinMiArea;
+        _recon = new Av1ReconPipeline(new Av1ReconWorker(_planes, _planeWidths, _seq), threaded);
 
-            for (int c = _miColStart; c < _miColEnd; c += sbSize4)
+        try
+        {
+            for (int r = _miRowStart; r < _miRowEnd; r += sbSize4)
             {
-                _readDeltas = _frame.DeltaQPresent;
-                ClearCdef(r, c);
-                ClearBlockDecodedFlags(r, c, sbSize4);
-                ReadLr(r, c, sbSize);
-                DecodePartition(r, c, sbSize);
+                ClearLeftContext();
+
+                for (int c = _miColStart; c < _miColEnd; c += sbSize4)
+                {
+                    _readDeltas = _frame.DeltaQPresent;
+                    ClearCdef(r, c);
+                    ClearBlockDecodedFlags(r, c, sbSize4);
+                    ReadLr(r, c, sbSize);
+                    DecodePartition(r, c, sbSize);
+                    _recon.Flush();
+                }
             }
+
+            _recon.Finish();
+        }
+        catch
+        {
+            _recon.Abort();
+            throw;
+        }
+        finally
+        {
+            _recon.Dispose();
         }
 
         StoppedAtResidual = true;
     }
+
+    /// <summary>Tiles covering fewer 4x4 units than this (256x256 luma samples) reconstruct inline rather than on a second thread.</summary>
+    private const int PipelineMinMiArea = 4096;
 
     /// <summary><c>clear_cdef(r, c)</c> (spec §5.11.55).</summary>
     private void ClearCdef(int r, int c)
@@ -2507,12 +2528,24 @@ internal sealed class Av1TileDecoder
         bool usesPalette = plane == 0 ? _paletteSizeY > 0 : _paletteSizeUV > 0;
         int stride = _planeWidths[plane];
 
+        var cmd = new Av1ReconCommand
+        {
+            Plane = plane,
+            StartX = startX,
+            StartY = startY,
+            TxSz = txSz,
+            LastX = maxX - 1,
+            LastY = maxY - 1,
+            Lossless = _lossless,
+        };
+
         if (_isInter)
         {
-            // IntraBC block-copy prediction (spec §7.11.3, refIdx=-1): see Av1InterPrediction's remarks for
+            // IntraBC block-copy prediction (spec 7.11.3, refIdx=-1): see Av1InterPrediction's remarks for
             // why this needs real (if simplified) subpel filtering rather than a plain strided copy -- a
             // luma DV is always integer-pixel (force_integer_mv=1), but the equivalent chroma DV can land on
             // a half-pixel position once subsampling divides an odd luma-pixel displacement.
+            _recon.Drain();
             int lastX = ((_frame.UpscaledWidth + subX) >> subX) - 1;
             int lastY = ((_frame.FrameHeight + subY) >> subY) - 1;
             Av1InterPrediction.PredictIntrabc(
@@ -2527,6 +2560,7 @@ internal sealed class Av1TileDecoder
         }
         else if (usesPalette)
         {
+            _recon.Drain();
             int[] palette = plane switch { 0 => _paletteColorsY, 1 => _paletteColorsU, _ => _paletteColorsV };
             int[] colorMap = plane == 0 ? _colorMapY : _colorMapUv;
             int mapWidth = GetPaletteMapWidth(plane);
@@ -2550,37 +2584,24 @@ internal sealed class Av1TileDecoder
         }
         else
         {
-            bool haveLeft = (plane == 0 ? _availL : _availLChroma) || x > 0;
-            bool haveAbove = (plane == 0 ? _availU : _availUChroma) || y > 0;
-            bool haveAboveRight = GetBlockDecoded(plane, (subBlockMiRow >> subY) - 1, (subBlockMiCol >> subX) + stepX);
-            bool haveBelowLeft = GetBlockDecoded(plane, (subBlockMiRow >> subY) + stepY, (subBlockMiCol >> subX) - 1);
-
-            Av1IntraPrediction.BuildEdges(
-                _aboveRow, _leftCol,
-                _planes[plane], _planeWidths[plane], startX, startY, w, h,
-                haveLeft, haveAbove, haveAboveRight, haveBelowLeft, maxX - 1, maxY - 1, _seq.BitDepth);
-
-            bool filterTypeSmooth = GetFilterType(plane);
-            int angleDelta = plane == 0 ? _angleDeltaY : _angleDeltaUv;
-
-            Av1IntraPrediction.Predict(
-                _reconPred, w, h, log2W, log2H, _aboveRow, _leftCol, mode, haveLeft, haveAbove,
-                plane == 0 && _useFilterIntra, _filterIntraMode, angleDelta, _seq.EnableIntraEdgeFilter,
-                filterTypeSmooth, maxX - 1, maxY - 1, startX, startY, _seq.BitDepth);
-
-            var destPlane = _planes[plane];
-            for (int i = 0; i < h; i++)
-            {
-                _reconPred.AsSpan(i * w, w).CopyTo(destPlane.AsSpan(((startY + i) * stride) + startX, w));
-            }
+            cmd.Predict = true;
+            cmd.Mode = mode;
+            cmd.HaveLeft = (plane == 0 ? _availL : _availLChroma) || x > 0;
+            cmd.HaveAbove = (plane == 0 ? _availU : _availUChroma) || y > 0;
+            cmd.HaveAboveRight = GetBlockDecoded(plane, (subBlockMiRow >> subY) - 1, (subBlockMiCol >> subX) + stepX);
+            cmd.HaveBelowLeft = GetBlockDecoded(plane, (subBlockMiRow >> subY) + stepY, (subBlockMiCol >> subX) - 1);
+            cmd.FilterTypeSmooth = GetFilterType(plane);
+            cmd.AngleDelta = plane == 0 ? _angleDeltaY : _angleDeltaUv;
+            cmd.UseFilterIntra = plane == 0 && _useFilterIntra;
+            cmd.FilterIntraMode = _filterIntraMode;
         }
 
         if (isCfl)
         {
-            int alpha = plane == 1 ? _cflAlphaU : _cflAlphaV;
-            Av1IntraPrediction.PredictChromaFromLuma(
-                _planes[plane], _planeWidths[plane], _planes[0], _planeWidths[0],
-                startX, startY, w, h, log2W, log2H, subX, subY, alpha, _maxLumaW, _maxLumaH, _seq.BitDepth);
+            cmd.IsCfl = true;
+            cmd.CflAlpha = plane == 1 ? _cflAlphaU : _cflAlphaV;
+            cmd.MaxLumaW = _maxLumaW;
+            cmd.MaxLumaH = _maxLumaH;
         }
 
         if (plane == 0)
@@ -2589,14 +2610,25 @@ internal sealed class Av1TileDecoder
             _maxLumaH = startY + (stepY * 4);
         }
 
+        int coefCount = 0;
         if (!_skip)
         {
             int eob = Coeffs(plane, startX, startY, txSz);
             if (eob > 0)
             {
-                Reconstruct(plane, startX, startY, txSz);
+                cmd.HasResidual = true;
+                cmd.TxType = _planeTxType;
+                cmd.NzRows = _nzRows;
+                cmd.NzCols = _nzCols;
+                cmd.DcQuant = GetDcQuant(plane);
+                cmd.AcQuant = GetAcQuant(plane);
+
+                // Dequantize reads rows [0, NzRows) of the coded (Min(32,w)-wide) coefficient grid.
+                coefCount = _nzRows * Math.Min(32, w);
             }
         }
+
+        _recon.Submit(ref cmd, _quant, coefCount);
 
         int lfStride = _loopfilterTxSizeStrides[plane];
         var blockDecoded = _blockDecoded[plane];
@@ -2711,90 +2743,6 @@ internal sealed class Av1TileDecoder
         1 => Av1Dequantizer.AcQ(GetQIndex(_segmentId) + _frame.DeltaQUAc, _seq.BitDepth),
         _ => Av1Dequantizer.AcQ(GetQIndex(_segmentId) + _frame.DeltaQVAc, _seq.BitDepth),
     };
-
-    /// <summary><c>reconstruct()</c> (spec §7.12.3): dequantize, invoke the 2D inverse transform, and add the (flip-adjusted) residual back into <see cref="_planes"/>.</summary>
-    private void Reconstruct(int plane, int x, int y, int txSz)
-    {
-        int w = Av1TxDimensions.Width[txSz];
-        int h = Av1TxDimensions.Height[txSz];
-
-        // No Array.Clear needed here: Av1Dequantizer.Dequantize writes exactly [0,th)x[0,tw) (th/tw =
-        // Min(32,h)/Min(32,w) for this same txSz), and Av1InverseTransform.Inverse2D's row loop only ever
-        // reads dequant[(i*64)+j] when i<32 && j<32 -- for i<32 that's bounded by the same th/tw Dequantize
-        // just wrote, and for i>=32 (only reachable when h>32) the read is skipped entirely (substituted
-        // with 0), so a previous call's leftover values at any position this call doesn't read can never
-        // surface. Confirmed by the byte-identical hash baseline before/after removing this clear.
-        Av1Dequantizer.Dequantize(_quant, _reconDequant, txSz, GetDcQuant(plane), GetAcQuant(plane), _seq.BitDepth, _nzRows, _nzCols);
-        Av1InverseTransform.Inverse2D(_reconDequant, _reconResidual, txSz, _planeTxType, _lossless, _seq.BitDepth, _nzRows, _nzCols);
-
-        bool flipUd = _planeTxType is Av1TxType.FlipadstDct or Av1TxType.FlipadstAdst or Av1TxType.VFlipadst or Av1TxType.FlipadstFlipadst;
-        bool flipLr = _planeTxType is Av1TxType.DctFlipadst or Av1TxType.AdstFlipadst or Av1TxType.HFlipadst or Av1TxType.FlipadstFlipadst;
-
-        int stride = _planeWidths[plane];
-        int maxSample = (1 << _seq.BitDepth) - 1;
-
-        // The common case (no FLIPADST-involving transform type -- the overwhelming majority of blocks)
-        // reduces to a plain contiguous add-then-clamp per row, vectorizable directly: unlike the flipped
-        // case below, source (_reconResidual) and destination (_planes) indices advance together, so no
-        // reversal is needed. Kept as a separate fast path rather than folding flip handling into the
-        // vectorized loop, since a flip turns the destination into a reversed-stride write that Vector256
-        // can't express as a single contiguous store.
-        if (!flipUd && !flipLr)
-        {
-            var destPlane = _planes[plane];
-            var zeroVec = Vector256<int>.Zero;
-            var maxVec = Vector256.Create(maxSample);
-
-            for (int i = 0; i < h; i++)
-            {
-                int rowBase = ((y + i) * stride) + x;
-                int resBase = i * w;
-                int j = 0;
-
-                if (Vector256.IsHardwareAccelerated)
-                {
-                    for (; j + 8 <= w; j += 8)
-                    {
-                        var pred = Vector256.LoadUnsafe(ref destPlane[rowBase + j]);
-                        var res = Vector256.LoadUnsafe(ref _reconResidual[resBase + j]);
-                        var clamped = Vector256.Min(Vector256.Max(pred + res, zeroVec), maxVec);
-                        clamped.StoreUnsafe(ref destPlane[rowBase + j]);
-                    }
-                }
-                else if (Vector128.IsHardwareAccelerated)
-                {
-                    var zero128 = Vector128<int>.Zero;
-                    var max128 = Vector128.Create(maxSample);
-                    for (; j + 4 <= w; j += 4)
-                    {
-                        var pred = Vector128.LoadUnsafe(ref destPlane[rowBase + j]);
-                        var res = Vector128.LoadUnsafe(ref _reconResidual[resBase + j]);
-                        var clamped = Vector128.Min(Vector128.Max(pred + res, zero128), max128);
-                        clamped.StoreUnsafe(ref destPlane[rowBase + j]);
-                    }
-                }
-
-                for (; j < w; j++)
-                {
-                    int idx = rowBase + j;
-                    destPlane[idx] = Math.Clamp(destPlane[idx] + _reconResidual[resBase + j], 0, maxSample);
-                }
-            }
-
-            return;
-        }
-
-        for (int i = 0; i < h; i++)
-        {
-            int yy = flipUd ? h - i - 1 : i;
-            for (int j = 0; j < w; j++)
-            {
-                int xx = flipLr ? w - j - 1 : j;
-                int idx = ((y + yy) * stride) + x + xx;
-                _planes[plane][idx] = Math.Clamp(_planes[plane][idx] + _reconResidual[(i * w) + j], 0, maxSample);
-            }
-        }
-    }
 
     /// <summary><c>coeffs(plane, startX, startY, txSz)</c> (spec §5.11.39): reads one transform block's coefficients into <see cref="_quant"/> and returns <c>eob</c>.</summary>
     private int Coeffs(int plane, int startX, int startY, int txSz)

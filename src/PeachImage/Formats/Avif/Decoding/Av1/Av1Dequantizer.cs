@@ -20,7 +20,7 @@ internal static class Av1Dequantizer
     /// nothing outside it -- <see cref="Av1InverseTransform.Inverse2D"/> takes the same two bounds.
     /// </para>
     /// </summary>
-    public static void Dequantize(int[] quant, int[] dequant, int txSz, int dcQuant, int acQuant, int bitDepth, int nzRows = 32, int nzCols = 32)
+    public static void Dequantize(ReadOnlySpan<int> quant, int[] dequant, int txSz, int dcQuant, int acQuant, int bitDepth, int nzRows = 32, int nzCols = 32)
     {
         int dqDenom = txSz is Av1TxSize.Tx32x32 or Av1TxSize.Tx16x32 or Av1TxSize.Tx32x16 or Av1TxSize.Tx16x64 or Av1TxSize.Tx64x16
             ? 2
