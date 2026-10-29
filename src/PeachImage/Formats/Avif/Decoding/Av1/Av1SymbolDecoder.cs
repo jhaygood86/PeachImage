@@ -108,6 +108,18 @@ internal sealed class Av1SymbolDecoder
         int n = cdf.Length - 1;
         ref ushort cdfRef = ref MemoryMarshal.GetReference(cdf);
 
+        // Binary and four-symbol alphabets dominate coefficient coding (skip / eob / sign flags, coeff_base,
+        // coeff_br), so they get unrolled search-and-adapt paths with identical arithmetic.
+        if (n == 4)
+        {
+            return ReadSymbol4(ref cdfRef);
+        }
+
+        if (n == 2)
+        {
+            return ReadSymbol2(ref cdfRef);
+        }
+
         uint range = _symbolRange;
         uint value = _symbolValue;
         uint cur = range;
@@ -133,6 +145,107 @@ internal sealed class Av1SymbolDecoder
         if (!_disableCdfUpdate)
         {
             Av1CdfAdaptation.AdaptCdf(cdf, n, symbol);
+        }
+
+        return symbol;
+    }
+
+    private int ReadSymbol4(ref ushort c)
+    {
+        uint range = _symbolRange;
+        uint value = _symbolValue;
+        uint r = range >> 8;
+
+        // v_i = ((r * ((32768 - cdf[i]) >> 6)) >> 1) + EcMinProb * (3 - i); v_3 == 0 as cdf[3] == 32768.
+        uint v0 = ((r * ((32768u - c) >> EcProbShift)) >> 1) + (EcMinProb * 3);
+        int symbol;
+        uint prev;
+        uint cur;
+        if (value >= v0)
+        {
+            symbol = 0;
+            prev = range;
+            cur = v0;
+        }
+        else
+        {
+            uint v1 = ((r * ((32768u - Unsafe.Add(ref c, 1)) >> EcProbShift)) >> 1) + (EcMinProb * 2);
+            if (value >= v1)
+            {
+                symbol = 1;
+                prev = v0;
+                cur = v1;
+            }
+            else
+            {
+                uint v2 = ((r * ((32768u - Unsafe.Add(ref c, 2)) >> EcProbShift)) >> 1) + EcMinProb;
+                if (value >= v2)
+                {
+                    symbol = 2;
+                    prev = v1;
+                    cur = v2;
+                }
+                else
+                {
+                    symbol = 3;
+                    prev = v2;
+                    cur = 0;
+                }
+            }
+        }
+
+        _symbolRange = prev - cur;
+        _symbolValue = value - cur;
+        Renormalize();
+
+        if (!_disableCdfUpdate)
+        {
+            int count = Unsafe.Add(ref c, 4);
+            int rate = 5 + (count > 15 ? 1 : 0) + (count > 31 ? 1 : 0);
+            ref ushort e1 = ref Unsafe.Add(ref c, 1);
+            ref ushort e2 = ref Unsafe.Add(ref c, 2);
+            c = symbol > 0 ? (ushort)(c - (c >> rate)) : (ushort)(c + ((32768 - c) >> rate));
+            e1 = symbol > 1 ? (ushort)(e1 - (e1 >> rate)) : (ushort)(e1 + ((32768 - e1) >> rate));
+            e2 = symbol > 2 ? (ushort)(e2 - (e2 >> rate)) : (ushort)(e2 + ((32768 - e2) >> rate));
+            if (count < 32)
+            {
+                Unsafe.Add(ref c, 4) = (ushort)(count + 1);
+            }
+        }
+
+        return symbol;
+    }
+
+    private int ReadSymbol2(ref ushort c)
+    {
+        uint range = _symbolRange;
+        uint value = _symbolValue;
+
+        uint v0 = (((range >> 8) * ((32768u - c) >> EcProbShift)) >> 1) + EcMinProb;
+        int symbol;
+        if (value >= v0)
+        {
+            symbol = 0;
+            _symbolRange = range - v0;
+            _symbolValue = value - v0;
+        }
+        else
+        {
+            symbol = 1;
+            _symbolRange = v0;
+        }
+
+        Renormalize();
+
+        if (!_disableCdfUpdate)
+        {
+            int count = Unsafe.Add(ref c, 2);
+            int rate = 4 + (count > 15 ? 1 : 0) + (count > 31 ? 1 : 0);
+            c = symbol > 0 ? (ushort)(c - (c >> rate)) : (ushort)(c + ((32768 - c) >> rate));
+            if (count < 32)
+            {
+                Unsafe.Add(ref c, 2) = (ushort)(count + 1);
+            }
         }
 
         return symbol;
