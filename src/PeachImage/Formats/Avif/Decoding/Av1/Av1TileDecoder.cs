@@ -251,6 +251,85 @@ internal sealed class Av1TileDecoder
         return result;
     }
 
+    /// <summary>Per-position part of the <c>coeff_base</c> context (spec 8.3.2 get_coeff_base_ctx), indexed <c>[txSz * 3 + txClass][row * width + col]</c> with the adjusted transform width; the neighbor-magnitude part is added at decode time.</summary>
+    private static readonly byte[][] BaseCtxPosTables = BuildBaseCtxPosTables();
+
+    /// <summary>Per-position offset of the <c>coeff_br</c> context (spec 8.3.2 get_coeff_br_ctx), same indexing as <see cref="BaseCtxPosTables"/>; position 0 is 0.</summary>
+    private static readonly byte[][] BrCtxPosTables = BuildBrCtxPosTables();
+
+    private static byte[][] BuildBaseCtxPosTables()
+    {
+        var result = new byte[Av1CoeffTables.AdjustedTxSize.Length * 3][];
+        for (int txSz = 0; txSz < Av1CoeffTables.AdjustedTxSize.Length; txSz++)
+        {
+            int adj = Av1CoeffTables.AdjustedTxSize[txSz];
+            int w = Av1TxDimensions.Width[adj];
+            int h = Av1TxDimensions.Height[adj];
+            for (int txClass = 0; txClass < 3; txClass++)
+            {
+                var table = new byte[w * h];
+                for (int row = 0; row < h; row++)
+                {
+                    for (int col = 0; col < w; col++)
+                    {
+                        int offset = txClass == Av1TxClass.Class2D
+                            ? Av1CoeffTables.CoeffBaseCtxOffset[txSz][Math.Min(row, 4)][Math.Min(col, 4)]
+                            : Av1CoeffTables.CoeffBasePosCtxOffset[Math.Min(txClass == Av1TxClass.ClassVert ? row : col, 2)];
+                        table[(row * w) + col] = (byte)offset;
+                    }
+                }
+
+                result[(txSz * 3) + txClass] = table;
+            }
+        }
+
+        return result;
+    }
+
+    private static byte[][] BuildBrCtxPosTables()
+    {
+        var result = new byte[Av1CoeffTables.AdjustedTxSize.Length * 3][];
+        for (int txSz = 0; txSz < Av1CoeffTables.AdjustedTxSize.Length; txSz++)
+        {
+            int adj = Av1CoeffTables.AdjustedTxSize[txSz];
+            int w = Av1TxDimensions.Width[adj];
+            int h = Av1TxDimensions.Height[adj];
+            for (int txClass = 0; txClass < 3; txClass++)
+            {
+                var table = new byte[w * h];
+                for (int row = 0; row < h; row++)
+                {
+                    for (int col = 0; col < w; col++)
+                    {
+                        int offset;
+                        if (row == 0 && col == 0)
+                        {
+                            offset = 0;
+                        }
+                        else if (txClass == Av1TxClass.Class2D)
+                        {
+                            offset = row < 2 && col < 2 ? 7 : 14;
+                        }
+                        else if (txClass == Av1TxClass.ClassHoriz)
+                        {
+                            offset = col == 0 ? 7 : 14;
+                        }
+                        else
+                        {
+                            offset = row == 0 ? 7 : 14;
+                        }
+
+                        table[(row * w) + col] = (byte)offset;
+                    }
+                }
+
+                result[(txSz * 3) + txClass] = table;
+            }
+        }
+
+        return result;
+    }
+
     // Per-coeffs()-call transient state.
     private int _planeTxType;
     private int _eobValue;
@@ -2786,7 +2865,7 @@ internal sealed class Av1TileDecoder
                 for (int i = 1; i < Math.Max(0, eobPt - 2); i++)
                 {
                     eobShift = Math.Max(0, eobPt - 2) - 1 - i;
-                    if (_s.ReadLiteral(1) != 0)
+                    if (_s.ReadBool() != 0)
                     {
                         eob += 1 << eobShift;
                     }
@@ -2812,7 +2891,11 @@ internal sealed class Av1TileDecoder
 
             var baseCdfs = _cdf.CoeffBase[txSzCtx][ptype];
             var brCdfs = _cdf.CoeffBr[Math.Min(txSzCtx, Av1TxSize.Tx32x32)][ptype];
-            var baseCtxOffsets = Av1CoeffTables.CoeffBaseCtxOffset[txSz];
+            byte[] basePosCtx = BaseCtxPosTables[(txSz * 3) + txClass];
+            byte[] brPosCtx = BrCtxPosTables[(txSz * 3) + txClass];
+            bool class2D = txClass == Av1TxClass.Class2D;
+            int s0 = sigOff[0], s1 = sigOff[1], s2 = sigOff[2], s3 = sigOff[3], s4 = sigOff[4];
+            int b0 = brOff[0], b1 = brOff[1], b2 = brOff[2];
             const int BrMagCap = Av1CoeffTables.CoeffBaseRange + Av1CoeffTables.NumBaseLevels + 1;
 
             int maxRow = 0;
@@ -2832,49 +2915,26 @@ internal sealed class Av1TileDecoder
                 }
                 else
                 {
-                    int mag = Math.Min((int)Unsafe.Add(ref lv, p + sigOff[0]), 3)
-                        + Math.Min((int)Unsafe.Add(ref lv, p + sigOff[1]), 3)
-                        + Math.Min((int)Unsafe.Add(ref lv, p + sigOff[2]), 3)
-                        + Math.Min((int)Unsafe.Add(ref lv, p + sigOff[3]), 3)
-                        + Math.Min((int)Unsafe.Add(ref lv, p + sigOff[4]), 3);
+                    int mag = Math.Min((int)Unsafe.Add(ref lv, p + s0), 3)
+                        + Math.Min((int)Unsafe.Add(ref lv, p + s1), 3)
+                        + Math.Min((int)Unsafe.Add(ref lv, p + s2), 3)
+                        + Math.Min((int)Unsafe.Add(ref lv, p + s3), 3)
+                        + Math.Min((int)Unsafe.Add(ref lv, p + s4), 3);
 
-                    int ctx = Math.Min((mag + 1) >> 1, 4);
-                    if (txClass == Av1TxClass.Class2D)
-                    {
-                        ctx = row == 0 && col == 0 ? 0 : ctx + baseCtxOffsets[Math.Min(row, 4)][Math.Min(col, 4)];
-                    }
-                    else
-                    {
-                        ctx += Av1CoeffTables.CoeffBasePosCtxOffset[Math.Min(txClass == Av1TxClass.ClassVert ? row : col, 2)];
-                    }
+                    // Position 0 is always the last coefficient decoded (c == 0); in 2D classes its context
+                    // is 0 outright rather than magnitude-derived.
+                    int ctx = c == 0 && class2D ? 0 : Math.Min((mag + 1) >> 1, 4) + basePosCtx[pos];
 
                     level = _s.ReadSymbol(baseCdfs[ctx]);
                 }
 
                 if (level > Av1CoeffTables.NumBaseLevels)
                 {
-                    int brMag = Math.Min((int)Unsafe.Add(ref lv, p + brOff[0]), BrMagCap)
-                        + Math.Min((int)Unsafe.Add(ref lv, p + brOff[1]), BrMagCap)
-                        + Math.Min((int)Unsafe.Add(ref lv, p + brOff[2]), BrMagCap);
+                    int brMag = Math.Min((int)Unsafe.Add(ref lv, p + b0), BrMagCap)
+                        + Math.Min((int)Unsafe.Add(ref lv, p + b1), BrMagCap)
+                        + Math.Min((int)Unsafe.Add(ref lv, p + b2), BrMagCap);
 
-                    brMag = Math.Min((brMag + 1) >> 1, 6);
-                    int brCtx;
-                    if (pos == 0)
-                    {
-                        brCtx = brMag;
-                    }
-                    else if (txClass == Av1TxClass.Class2D)
-                    {
-                        brCtx = row < 2 && col < 2 ? brMag + 7 : brMag + 14;
-                    }
-                    else if (txClass == Av1TxClass.ClassHoriz)
-                    {
-                        brCtx = col == 0 ? brMag + 7 : brMag + 14;
-                    }
-                    else
-                    {
-                        brCtx = row == 0 ? brMag + 7 : brMag + 14;
-                    }
+                    int brCtx = Math.Min((brMag + 1) >> 1, 6) + brPosCtx[pos];
 
                     var brCdf = brCdfs[brCtx];
                     for (int idx = 0; idx < Av1CoeffTables.CoeffBaseRange / (Av1CoeffTables.BrCdfSize - 1); idx++)
@@ -2913,7 +2973,7 @@ internal sealed class Av1TileDecoder
                     }
                     else
                     {
-                        sign = (int)_s.ReadLiteral(1);
+                        sign = _s.ReadBool();
                     }
                 }
                 else
@@ -2928,7 +2988,7 @@ internal sealed class Av1TileDecoder
                     do
                     {
                         length++;
-                        golombLengthBit = _s.ReadLiteral(1) != 0;
+                        golombLengthBit = _s.ReadBool() != 0;
                         if (length > 20)
                         {
                             throw new AvifDecodingException("AV1 Exp-Golomb coefficient code exceeded the supported length (malformed or unsupported bitstream).");
@@ -2939,7 +2999,7 @@ internal sealed class Av1TileDecoder
                     int x = 1;
                     for (int i = length - 2; i >= 0; i--)
                     {
-                        int golombDataBit = (int)_s.ReadLiteral(1);
+                        int golombDataBit = _s.ReadBool();
                         x = (x << 1) | golombDataBit;
                     }
 
