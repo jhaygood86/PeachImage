@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using System.Threading.Tasks;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -60,7 +61,6 @@ internal static class Av1YuvToRgbConverter
     /// <see cref="Convert"/> into a caller-supplied buffer of at least <see cref="OutputByteCount"/> bytes
     /// (typically pool-rented, so its prior contents are arbitrary): every one of those bytes is written.
     /// </summary>
-    [SkipLocalsInit]
     public static void ConvertInto(
         byte[] pixels,
         int[][] colorPlanes,
@@ -75,6 +75,46 @@ internal static class Av1YuvToRgbConverter
         int alphaWidth,
         int outWidth,
         int outHeight)
+    {
+        // Rows are independent (each reads only its own source rows and writes only its own output bytes),
+        // so tall images are converted in row bands on the thread pool.
+        int bands = Math.Min(Environment.ProcessorCount, outHeight / MinRowsPerBand);
+        if (bands < 2)
+        {
+            ConvertRows(pixels, colorPlanes, colorWidths, monoChrome, subsamplingX, subsamplingY, matrixCoefficients, colorRangeFull, bitDepth, alphaPlane, alphaWidth, outWidth, 0, outHeight);
+            return;
+        }
+
+        // Band edges are even rows so a 4:2:0 chroma row is never shared in a way that matters (reads only).
+        int bandRows = ((outHeight + bands - 1) / bands + 1) & ~1;
+        int bandCount = (outHeight + bandRows - 1) / bandRows;
+        Parallel.For(0, bandCount, band =>
+        {
+            int start = band * bandRows;
+            int end = Math.Min(outHeight, start + bandRows);
+            ConvertRows(pixels, colorPlanes, colorWidths, monoChrome, subsamplingX, subsamplingY, matrixCoefficients, colorRangeFull, bitDepth, alphaPlane, alphaWidth, outWidth, start, end);
+        });
+    }
+
+    /// <summary>Images shorter than twice this are converted on the calling thread.</summary>
+    private const int MinRowsPerBand = 128;
+
+    [SkipLocalsInit]
+    private static void ConvertRows(
+        byte[] pixels,
+        int[][] colorPlanes,
+        int[] colorWidths,
+        bool monoChrome,
+        bool subsamplingX,
+        bool subsamplingY,
+        int matrixCoefficients,
+        bool colorRangeFull,
+        int bitDepth,
+        int[]? alphaPlane,
+        int alphaWidth,
+        int outWidth,
+        int rowStart,
+        int rowEnd)
     {
         bool hasAlpha = alphaPlane is not null;
         bool output16Bit = bitDepth > 8;
@@ -102,7 +142,7 @@ internal static class Av1YuvToRgbConverter
 
         if (monoChrome)
         {
-            for (int row = 0; row < outHeight; row++)
+            for (int row = rowStart; row < rowEnd; row++)
             {
                 for (int col = 0; col < outWidth; col++)
                 {
@@ -201,7 +241,7 @@ internal static class Av1YuvToRgbConverter
         Span<int> gLane = stackalloc int[4];
         Span<int> bLane = stackalloc int[4];
 
-        for (int row = 0; row < outHeight; row++)
+        for (int row = rowStart; row < rowEnd; row++)
         {
             int uvRow = row >> subY;
             int rowBase = row * yStride;

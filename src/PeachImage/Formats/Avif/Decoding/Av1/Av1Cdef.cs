@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Threading.Tasks;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -14,6 +15,9 @@ namespace PeachImage.Formats.Avif.Decoding.Av1;
 /// </summary>
 internal static class Av1Cdef
 {
+    /// <summary>Frames with fewer 8-row strips than this are filtered on the calling thread.</summary>
+    private const int ParallelMinStrips = 32;
+
     private static readonly int[] DivTable = [0, 840, 420, 280, 210, 168, 140, 120, 105];
 
     /// <summary><c>Cdef_Uv_Dir</c> (spec §7.15.1), indexed <c>[subsampling_x][subsampling_y][yDir]</c>.</summary>
@@ -64,22 +68,27 @@ internal static class Av1Cdef
             ClearPadding(cdefPlanes[plane], result, seq, frame, plane);
         }
 
-        var state = new State(result, cdefPlanes);
-
         int step4 = Av1BlockTables.Num4x4BlocksWide[Av1BlockSize.Block8x8];
         int cdefSize4 = Av1BlockTables.Num4x4BlocksWide[Av1BlockSize.Block64x64];
         int cdefMask4 = ~(cdefSize4 - 1);
 
-        for (int r = 0; r < frame.MiRows; r += step4)
+        // Each 8-luma-row strip reads only the (immutable) deblocked planes and writes only its own rows of
+        // the output planes, so strips run independently; the per-strip State carries the availability flag.
+        int strips = (frame.MiRows + step4 - 1) / step4;
+        if (strips >= ParallelMinStrips && Environment.ProcessorCount > 1)
         {
-            CopyStrip(result, cdefPlanes, seq, r, frame.MiCols);
-
-            for (int c = 0; c < frame.MiCols; c += step4)
+            Parallel.For(0, strips, () => new State(result, cdefPlanes), (strip, _, state) =>
             {
-                int baseR = r & cdefMask4;
-                int baseC = c & cdefMask4;
-                int idx = result.CdefIdx[(baseR * frame.MiCols) + baseC];
-                CdefBlock(state, r, c, idx);
+                CdefStrip(result, state, cdefPlanes, strip * step4, step4, cdefMask4);
+                return state;
+            }, static _ => { });
+        }
+        else
+        {
+            var state = new State(result, cdefPlanes);
+            for (int strip = 0; strip < strips; strip++)
+            {
+                CdefStrip(result, state, cdefPlanes, strip * step4, step4, cdefMask4);
             }
         }
 
@@ -91,6 +100,20 @@ internal static class Av1Cdef
         {
             ArrayPool<int>.Shared.Return(result.Planes[plane]);
             result.Planes[plane] = cdefPlanes[plane];
+        }
+    }
+
+    private static void CdefStrip(Av1FrameDecodeResult result, State state, int[][] cdefPlanes, int r, int step4, int cdefMask4)
+    {
+        var frame = result.Frame;
+        CopyStrip(result, cdefPlanes, result.Sequence, r, frame.MiCols);
+
+        for (int c = 0; c < frame.MiCols; c += step4)
+        {
+            int baseR = r & cdefMask4;
+            int baseC = c & cdefMask4;
+            int idx = result.CdefIdx[(baseR * frame.MiCols) + baseC];
+            CdefBlock(state, r, c, idx);
         }
     }
 
