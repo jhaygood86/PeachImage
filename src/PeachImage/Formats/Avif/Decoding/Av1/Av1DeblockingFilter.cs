@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -25,7 +26,6 @@ internal static class Av1DeblockingFilter
         int rowEnd = Math.Min(frame.MiRows, (frame.FrameHeight + 3) >> 2);
         int colEnd = Math.Min(frame.MiCols, (frame.FrameWidth + 3) >> 2);
 
-        var memo = new StrengthMemo();
         for (int plane = 0; plane < seq.NumPlanes; plane++)
         {
             if (plane != 0 && level[1 + plane] == 0)
@@ -43,14 +43,51 @@ internal static class Av1DeblockingFilter
                 int rowStart = pass == 1 ? rowStep : 0;
                 int colStart = pass == 0 ? colStep : 0;
 
-                memo.Reset();
-                for (int row = rowStart; row < rowEnd; row += rowStep)
+                // A vertical-edge pass (0) filters along sample rows and a horizontal-edge pass (1) along
+                // sample columns, so within a pass the mi rows (pass 0) or mi columns (pass 1) are fully
+                // independent as long as each chunk keeps its own cells in order. Chunks are multiples of
+                // BandCells (a multiple of every step), and the pass boundary is the barrier between them.
+                int span = pass == 0 ? rowEnd : colEnd;
+                int chunks = (span + BandCells - 1) / BandCells;
+                if (span >= ParallelMinCells && chunks > 1 && Environment.ProcessorCount > 1)
                 {
-                    for (int col = colStart; col < colEnd; col += colStep)
+                    Parallel.For(0, chunks, chunk =>
                     {
-                        LoopFilterEdge(result, plane, pass, row, col, ref memo);
-                    }
+                        int lo = chunk * BandCells;
+                        int hi = Math.Min(span, lo + BandCells);
+                        if (pass == 0)
+                        {
+                            FilterRegion(result, plane, pass, Math.Max(lo, rowStart), hi, rowStep, colStart, colEnd, colStep);
+                        }
+                        else
+                        {
+                            FilterRegion(result, plane, pass, rowStart, rowEnd, rowStep, Math.Max(lo, colStart), hi, colStep);
+                        }
+                    });
                 }
+                else
+                {
+                    FilterRegion(result, plane, pass, rowStart, rowEnd, rowStep, colStart, colEnd, colStep);
+                }
+            }
+        }
+    }
+
+    /// <summary>Mi rows or columns per parallel chunk; a multiple of every plane's cell step.</summary>
+    private const int BandCells = 32;
+
+    /// <summary>Frames spanning fewer mi rows/columns than this are filtered on the calling thread.</summary>
+    private const int ParallelMinCells = 128;
+
+    private static void FilterRegion(Av1FrameDecodeResult result, int plane, int pass, int rowStart, int rowEnd, int rowStep, int colStart, int colEnd, int colStep)
+    {
+        var memo = new StrengthMemo();
+        memo.Reset();
+        for (int row = rowStart; row < rowEnd; row += rowStep)
+        {
+            for (int col = colStart; col < colEnd; col += colStep)
+            {
+                LoopFilterEdge(result, plane, pass, row, col, ref memo);
             }
         }
     }
