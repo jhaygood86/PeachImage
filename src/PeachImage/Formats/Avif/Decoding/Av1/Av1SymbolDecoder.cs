@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -38,7 +39,6 @@ internal sealed class Av1SymbolDecoder
 
     private uint _symbolValue;
     private uint _symbolRange;
-    private int _symbolMaxBits;
 
     public Av1SymbolDecoder(byte[] data, int start, int length, bool disableCdfUpdate)
     {
@@ -55,11 +55,10 @@ internal sealed class Av1SymbolDecoder
         _windowBits -= 15;
         _symbolValue = ((1u << 15) - 1) ^ buf;
         _symbolRange = 1u << 15;
-        _symbolMaxBits = (8 * length) - 15;
     }
 
     /// <summary>Bits still available to read from the underlying byte range, per spec's <c>SymbolMaxBits</c> -- negative once all real bits are exhausted and only implicit zero-padding remains.</summary>
-    public int SymbolMaxBits => _symbolMaxBits;
+    public int SymbolMaxBits => (8 * (_end - _pos)) + _windowBits;
 
     /// <summary><c>read_bool()</c> (spec §8.2.3): a fresh, non-adapting 50/50 CDF every call.</summary>
     public int ReadBool()
@@ -156,15 +155,29 @@ internal sealed class Av1SymbolDecoder
         _windowBits -= bits;
 
         _symbolValue = newData ^ (((_symbolValue + 1) << bits) - 1);
-        _symbolMaxBits -= bits;
     }
 
-    /// <summary>Tops the window up to more than 56 bits; bytes past the end of the tile data are zero.</summary>
+    /// <summary>
+    /// Tops the window up to at least 57 bits; bytes past the end of the tile data are zero. <c>_pos</c> keeps
+    /// counting past <c>_end</c> so the remaining-bit accounting stays exact. The bulk path ORs in a whole
+    /// big-endian word: the bits beyond the whole bytes accounted for are the true next bits, so OR-ing
+    /// them again on the next refill is idempotent.
+    /// </summary>
     private void Refill()
     {
+        if (_pos + 8 <= _end)
+        {
+            _window |= BinaryPrimitives.ReadUInt64BigEndian(_data.AsSpan(_pos)) >> _windowBits;
+            int bytes = (64 - _windowBits) >> 3;
+            _pos += bytes;
+            _windowBits += bytes << 3;
+            return;
+        }
+
         while (_windowBits <= 56)
         {
-            ulong b = _pos < _end ? _data[_pos++] : 0UL;
+            ulong b = _pos < _end ? _data[_pos] : 0UL;
+            _pos++;
             _window |= b << (56 - _windowBits);
             _windowBits += 8;
         }
