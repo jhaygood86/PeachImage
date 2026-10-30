@@ -13,7 +13,7 @@ namespace PeachImage.Formats.Avif.Decoding.Av1;
 /// identity transforms, and the 2D transform block process tying them together with the row/column shift
 /// and clamping rules.
 /// </summary>
-internal static class Av1InverseTransform
+internal static partial class Av1InverseTransform
 {
     /// <summary><c>Cos128_Lookup</c> (spec §7.13.2.1), extracted directly from the specification text.</summary>
     private static readonly int[] Cos128Lookup =
@@ -1272,6 +1272,23 @@ internal static class Av1InverseTransform
     private static Vector256<long>[] ColScratchBatch() => _colScratchBatch ??= new Vector256<long>[64];
 
     /// <summary>
+    /// <c>2D inverse transform process</c> (spec §7.13.3). Uses the eight-lane <see cref="int"/> kernels on
+    /// AVX2 hardware and the exact 64-bit four-lane kernels (<see cref="Inverse2DExact"/>) elsewhere; the two
+    /// agree for every conformant stream (see <c>Av1InverseTransform.Lanes8.cs</c>).
+    /// </summary>
+    public static void Inverse2D(int[] dequant, int[] residual, int txSz, int planeTxType, bool lossless, int bitDepth, int nzRows = 32, int nzCols = 32)
+    {
+        if (Avx2.IsSupported)
+        {
+            Inverse2DLanes8(dequant, residual, txSz, planeTxType, lossless, bitDepth, nzRows, nzCols);
+        }
+        else
+        {
+            Inverse2DExact(dequant, residual, txSz, planeTxType, lossless, bitDepth, nzRows, nzCols);
+        }
+    }
+
+    /// <summary>
     /// <c>2D inverse transform process</c> (spec §7.13.3): transforms <paramref name="dequant"/> (a flat
     /// <c>64x64</c> row-major buffer, as written by <see cref="Av1Dequantizer.Dequantize"/>) into
     /// <paramref name="residual"/> (a flat <c>w x h</c> row-major buffer).
@@ -1285,7 +1302,7 @@ internal static class Av1InverseTransform
     // own [SkipLocalsInit] (see that method's remarks), and this is the single hottest per-block call in the
     // entire decoder (called via both real decode and every encoder-side RDO reconstruction trial).
     [SkipLocalsInit]
-    public static void Inverse2D(int[] dequant, int[] residual, int txSz, int planeTxType, bool lossless, int bitDepth, int nzRows = 32, int nzCols = 32)
+    public static void Inverse2DExact(int[] dequant, int[] residual, int txSz, int planeTxType, bool lossless, int bitDepth, int nzRows = 32, int nzCols = 32)
     {
         int log2W = Av1TxDimensions.WidthLog2[txSz];
         int log2H = Av1TxDimensions.HeightLog2[txSz];
