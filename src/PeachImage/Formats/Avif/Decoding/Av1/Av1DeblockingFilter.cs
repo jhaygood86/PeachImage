@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 
@@ -7,7 +8,7 @@ namespace PeachImage.Formats.Avif.Decoding.Av1;
 /// The deblocking loop filter (spec §7.14), restricted to the intra-only path: <c>ref</c> is always
 /// <c>INTRA_FRAME</c> and <c>isIntra</c> is always true, so the inter-only <c>loop_filter_mode_deltas</c>
 /// branch and the <c>modeType</c> distinction (spec §7.14.4) never apply. Mutates
-/// <see cref="Av1FrameDecodeResult.Planes"/> in place, matching the spec's own in-place <c>CurrFrame</c>
+/// <see cref="Av1FrameDecodeResult{TPixel}.Planes"/> in place, matching the spec's own in-place <c>CurrFrame</c>
 /// semantics.
 /// </summary>
 internal static class Av1DeblockingFilter
@@ -15,7 +16,8 @@ internal static class Av1DeblockingFilter
     private const int MaxLoopFilter = 63;
     private const int SegLvlAltLfYV = 1;
 
-    public static void Apply(Av1FrameDecodeResult result)
+    public static void Apply<TPixel>(Av1FrameDecodeResult<TPixel> result)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var seq = result.Sequence;
         var frame = result.Frame;
@@ -79,7 +81,8 @@ internal static class Av1DeblockingFilter
     /// <summary>Frames spanning fewer mi rows/columns than this are filtered on the calling thread.</summary>
     private const int ParallelMinCells = 128;
 
-    private static void FilterRegion(Av1FrameDecodeResult result, int plane, int pass, int rowStart, int rowEnd, int rowStep, int colStart, int colEnd, int colStep)
+    private static void FilterRegion<TPixel>(Av1FrameDecodeResult<TPixel> result, int plane, int pass, int rowStart, int rowEnd, int rowStep, int colStart, int colEnd, int colStep)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var memo = new StrengthMemo();
         memo.Reset();
@@ -109,7 +112,8 @@ internal static class Av1DeblockingFilter
     }
 
     /// <summary><c>loop_filter_edge</c> / the edge loop filter process (spec §7.14.2).</summary>
-    private static void LoopFilterEdge(Av1FrameDecodeResult result, int plane, int pass, int row, int col, ref StrengthMemo memo)
+    private static void LoopFilterEdge<TPixel>(Av1FrameDecodeResult<TPixel> result, int plane, int pass, int row, int col, ref StrengthMemo memo)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var seq = result.Sequence;
         var frame = result.Frame;
@@ -233,25 +237,26 @@ internal static class Av1DeblockingFilter
     /// perpendicular to the edge with element stride <paramref name="step"/> (p0 is at <c>pos - step</c>).
     /// Samples the selected filter length never consults (p2/p3/q2/q3 for short filters) are not read.
     /// </summary>
-    private static void SampleFilter(int[] buf, int pos, int step, int plane, int bitDepth, int limit, int blimit, int thresh, int filterSize)
+    private static void SampleFilter<TPixel>(TPixel[] buf, int pos, int step, int plane, int bitDepth, int limit, int blimit, int thresh, int filterSize)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
-        int q0 = buf[pos];
-        int q1 = buf[pos + step];
-        int p0 = buf[pos - step];
-        int p1 = buf[pos - (2 * step)];
+        int q0 = int.CreateTruncating(buf[pos]);
+        int q1 = int.CreateTruncating(buf[pos + step]);
+        int p0 = int.CreateTruncating(buf[pos - step]);
+        int p1 = int.CreateTruncating(buf[pos - (2 * step)]);
 
         int filterLen = filterSize == 4 ? 4 : plane != 0 ? 6 : filterSize == 8 ? 8 : 16;
         int q2 = 0, q3 = 0, p2 = 0, p3 = 0;
         if (filterLen >= 6)
         {
-            q2 = buf[pos + (2 * step)];
-            p2 = buf[pos - (3 * step)];
+            q2 = int.CreateTruncating(buf[pos + (2 * step)]);
+            p2 = int.CreateTruncating(buf[pos - (3 * step)]);
         }
 
         if (filterLen >= 8)
         {
-            q3 = buf[pos + (3 * step)];
-            p3 = buf[pos - (4 * step)];
+            q3 = int.CreateTruncating(buf[pos + (3 * step)]);
+            p3 = int.CreateTruncating(buf[pos - (4 * step)]);
         }
 
         int shift = bitDepth - 8;
@@ -312,18 +317,19 @@ internal static class Av1DeblockingFilter
         }
 
         // filterSize == 16 (luma only): flat_mask2 looks at the outer six samples.
-        bool flatMask2 = !(Math.Abs(buf[pos - (7 * step)] - p0) > thresholdBd
-            || Math.Abs(buf[pos + (6 * step)] - q0) > thresholdBd
-            || Math.Abs(buf[pos - (6 * step)] - p0) > thresholdBd
-            || Math.Abs(buf[pos + (5 * step)] - q0) > thresholdBd
-            || Math.Abs(buf[pos - (5 * step)] - p0) > thresholdBd
-            || Math.Abs(buf[pos + (4 * step)] - q0) > thresholdBd);
+        bool flatMask2 = !(Math.Abs(int.CreateTruncating(buf[pos - (7 * step)]) - p0) > thresholdBd
+            || Math.Abs(int.CreateTruncating(buf[pos + (6 * step)]) - q0) > thresholdBd
+            || Math.Abs(int.CreateTruncating(buf[pos - (6 * step)]) - p0) > thresholdBd
+            || Math.Abs(int.CreateTruncating(buf[pos + (5 * step)]) - q0) > thresholdBd
+            || Math.Abs(int.CreateTruncating(buf[pos - (5 * step)]) - p0) > thresholdBd
+            || Math.Abs(int.CreateTruncating(buf[pos + (4 * step)]) - q0) > thresholdBd);
 
         WideFilter(buf, pos, step, plane, flatMask2 ? 4 : 3);
     }
 
     /// <summary><c>Narrow filter process</c> (spec §7.14.6.3).</summary>
-    private static void NarrowFilter(int[] buf, int pos, int step, bool hevMask, int p1, int p0, int q0, int q1, int bitDepth)
+    private static void NarrowFilter<TPixel>(TPixel[] buf, int pos, int step, bool hevMask, int p1, int p0, int q0, int q1, int bitDepth)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         int bound = 1 << (bitDepth - 1);
         int bias = 0x80 << (bitDepth - 8);
@@ -337,20 +343,21 @@ internal static class Av1DeblockingFilter
         int filter1 = Math.Clamp(filter + 4, -bound, bound - 1) >> 3;
         int filter2 = Math.Clamp(filter + 3, -bound, bound - 1) >> 3;
 
-        buf[pos] = Math.Clamp(qs0 - filter1, -bound, bound - 1) + bias;
-        buf[pos - step] = Math.Clamp(ps0 + filter2, -bound, bound - 1) + bias;
+        buf[pos] = TPixel.CreateTruncating(Math.Clamp(qs0 - filter1, -bound, bound - 1) + bias);
+        buf[pos - step] = TPixel.CreateTruncating(Math.Clamp(ps0 + filter2, -bound, bound - 1) + bias);
 
         if (!hevMask)
         {
             int f = (filter1 + 1) >> 1;
-            buf[pos + step] = Math.Clamp(qs1 - f, -bound, bound - 1) + bias;
-            buf[pos - (2 * step)] = Math.Clamp(ps1 + f, -bound, bound - 1) + bias;
+            buf[pos + step] = TPixel.CreateTruncating(Math.Clamp(qs1 - f, -bound, bound - 1) + bias);
+            buf[pos - (2 * step)] = TPixel.CreateTruncating(Math.Clamp(ps1 + f, -bound, bound - 1) + bias);
         }
     }
 
     /// <summary><c>Wide filter process</c> (spec §7.14.6.4).</summary>
     [SkipLocalsInit]
-    private static void WideFilter(int[] buf, int pos, int step, int plane, int log2Size)
+    private static void WideFilter<TPixel>(TPixel[] buf, int pos, int step, int plane, int log2Size)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         int n = log2Size == 4 ? 6 : plane == 0 ? 3 : 2;
         int n2 = log2Size == 3 && plane == 0 ? 0 : 1;
@@ -362,7 +369,7 @@ internal static class Av1DeblockingFilter
         int p = pos - ((n + 1) * step);
         for (int k = 0; k < count; k++)
         {
-            s[k] = buf[p];
+            s[k] = int.CreateTruncating(buf[p]);
             p += step;
         }
 
@@ -383,7 +390,7 @@ internal static class Av1DeblockingFilter
         p = pos - (n * step);
         for (int k = 0; k < 2 * n; k++)
         {
-            buf[p] = f[k];
+            buf[p] = TPixel.CreateTruncating(f[k]);
             p += step;
         }
     }

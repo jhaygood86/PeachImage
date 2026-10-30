@@ -4,7 +4,7 @@ using System.Runtime.ExceptionServices;
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
 /// <summary>
-/// Feeds <see cref="Av1ReconCommand"/>s from a tile's parse loop to an <see cref="Av1ReconWorker"/>. Entropy
+/// Feeds <see cref="Av1ReconCommand"/>s from a tile's parse loop to an <see cref="IAv1ReconWorker"/>. Entropy
 /// decoding never reads reconstructed pixels, and reconstruction never touches parser state, so on large
 /// tiles the two halves run on separate threads: the parser batches commands (with a private copy of each
 /// block's quantized coefficients) and a dedicated thread executes the batches in order. The arithmetic is
@@ -17,7 +17,7 @@ internal sealed class Av1ReconPipeline : IDisposable
     private const int CoefsPerBatch = 16384;
     private const int MaxQueuedBatches = 8;
 
-    private readonly Av1ReconWorker _worker;
+    private readonly IAv1ReconWorker _worker;
     private readonly bool _threaded;
 
     private BlockingCollection<Batch>? _queue;
@@ -28,7 +28,7 @@ internal sealed class Av1ReconPipeline : IDisposable
     private ManualResetEventSlim? _drained;
     private ExceptionDispatchInfo? _error;
 
-    public Av1ReconPipeline(Av1ReconWorker worker, bool threaded)
+    public Av1ReconPipeline(IAv1ReconWorker worker, bool threaded)
     {
         _worker = worker;
         _threaded = threaded;

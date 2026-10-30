@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
@@ -30,8 +31,8 @@ internal static class Av1YuvToRgbConverter
     /// that exact size, so it is a plain heap allocation rather than a (possibly larger) pool rental; a
     /// caller that wants a pooled buffer for the final <see cref="Image"/> rents and copies separately.
     /// </summary>
-    public static byte[] Convert(
-        int[][] colorPlanes,
+    public static byte[] Convert<TColor, TAlpha>(
+        TColor[][] colorPlanes,
         int[] colorWidths,
         bool monoChrome,
         bool subsamplingX,
@@ -39,14 +40,57 @@ internal static class Av1YuvToRgbConverter
         int matrixCoefficients,
         bool colorRangeFull,
         int bitDepth,
-        int[]? alphaPlane,
+        TAlpha[]? alphaPlane,
         int alphaWidth,
         int outWidth,
         int outHeight)
+        where TColor : unmanaged, IBinaryInteger<TColor>
+        where TAlpha : unmanaged, IBinaryInteger<TAlpha>
     {
         var pixels = new byte[OutputByteCount(monoChrome, bitDepth, alphaPlane is not null, outWidth, outHeight)];
         ConvertInto(pixels, colorPlanes, colorWidths, monoChrome, subsamplingX, subsamplingY, matrixCoefficients, colorRangeFull, bitDepth, alphaPlane, alphaWidth, outWidth, outHeight);
         return pixels;
+    }
+
+    /// <summary>
+    /// <see cref="ConvertInto{TColor, TAlpha}"/> for composited frames of any sample type: picks the
+    /// instantiation matching the color and (optional) alpha planes' storage types.
+    /// </summary>
+    public static void ConvertInto(
+        byte[] pixels,
+        Av1TileComposer.CompositedFrame color,
+        Av1TileComposer.CompositedFrame? alpha,
+        int outWidth,
+        int outHeight)
+    {
+        switch (color)
+        {
+            case Av1TileComposer.CompositedFrame<byte> c:
+                ConvertWithAlpha(pixels, c, alpha, outWidth, outHeight);
+                break;
+            default:
+                ConvertWithAlpha(pixels, (Av1TileComposer.CompositedFrame<ushort>)color, alpha, outWidth, outHeight);
+                break;
+        }
+    }
+
+    private static void ConvertWithAlpha<TColor>(byte[] pixels, Av1TileComposer.CompositedFrame<TColor> color, Av1TileComposer.CompositedFrame? alpha, int outWidth, int outHeight)
+        where TColor : unmanaged, IBinaryInteger<TColor>
+    {
+        var seq = color.Sequence;
+        switch (alpha)
+        {
+            case null:
+                ConvertInto<TColor, byte>(pixels, color.Planes, color.Widths, seq.MonoChrome, seq.SubsamplingX, seq.SubsamplingY, seq.MatrixCoefficients, seq.ColorRange, seq.BitDepth, null, 0, outWidth, outHeight);
+                break;
+            case Av1TileComposer.CompositedFrame<byte> a:
+                ConvertInto(pixels, color.Planes, color.Widths, seq.MonoChrome, seq.SubsamplingX, seq.SubsamplingY, seq.MatrixCoefficients, seq.ColorRange, seq.BitDepth, a.Planes[0], a.Widths[0], outWidth, outHeight);
+                break;
+            default:
+                var wide = (Av1TileComposer.CompositedFrame<ushort>)alpha;
+                ConvertInto(pixels, color.Planes, color.Widths, seq.MonoChrome, seq.SubsamplingX, seq.SubsamplingY, seq.MatrixCoefficients, seq.ColorRange, seq.BitDepth, wide.Planes[0], wide.Widths[0], outWidth, outHeight);
+                break;
+        }
     }
 
     /// <summary>The exact number of bytes <see cref="ConvertInto"/> writes (and <see cref="Convert"/> returns) for the given format.</summary>
@@ -61,9 +105,9 @@ internal static class Av1YuvToRgbConverter
     /// <see cref="Convert"/> into a caller-supplied buffer of at least <see cref="OutputByteCount"/> bytes
     /// (typically pool-rented, so its prior contents are arbitrary): every one of those bytes is written.
     /// </summary>
-    public static void ConvertInto(
+    public static void ConvertInto<TColor, TAlpha>(
         byte[] pixels,
-        int[][] colorPlanes,
+        TColor[][] colorPlanes,
         int[] colorWidths,
         bool monoChrome,
         bool subsamplingX,
@@ -71,10 +115,12 @@ internal static class Av1YuvToRgbConverter
         int matrixCoefficients,
         bool colorRangeFull,
         int bitDepth,
-        int[]? alphaPlane,
+        TAlpha[]? alphaPlane,
         int alphaWidth,
         int outWidth,
         int outHeight)
+        where TColor : unmanaged, IBinaryInteger<TColor>
+        where TAlpha : unmanaged, IBinaryInteger<TAlpha>
     {
         // Rows are independent (each reads only its own source rows and writes only its own output bytes),
         // so tall images are converted in row bands on the thread pool.
@@ -100,9 +146,9 @@ internal static class Av1YuvToRgbConverter
     private const int MinRowsPerBand = 128;
 
     [SkipLocalsInit]
-    private static void ConvertRows(
+    private static void ConvertRows<TColor, TAlpha>(
         byte[] pixels,
-        int[][] colorPlanes,
+        TColor[][] colorPlanes,
         int[] colorWidths,
         bool monoChrome,
         bool subsamplingX,
@@ -110,11 +156,13 @@ internal static class Av1YuvToRgbConverter
         int matrixCoefficients,
         bool colorRangeFull,
         int bitDepth,
-        int[]? alphaPlane,
+        TAlpha[]? alphaPlane,
         int alphaWidth,
         int outWidth,
         int rowStart,
         int rowEnd)
+        where TColor : unmanaged, IBinaryInteger<TColor>
+        where TAlpha : unmanaged, IBinaryInteger<TAlpha>
     {
         bool hasAlpha = alphaPlane is not null;
         bool output16Bit = bitDepth > 8;
@@ -146,14 +194,14 @@ internal static class Av1YuvToRgbConverter
             {
                 for (int col = 0; col < outWidth; col++)
                 {
-                    int gray = ScaleSample(yPlane[(row * yStride) + col], srcMax, outMax);
+                    int gray = ScaleSample(int.CreateTruncating(yPlane[(row * yStride) + col]), srcMax, outMax);
                     int idx = ((row * outWidth) + col) * channels * bytesPerChannel;
                     if (hasAlpha)
                     {
                         WriteChannel(idx, gray);
                         WriteChannel(idx + bytesPerChannel, gray);
                         WriteChannel(idx + (2 * bytesPerChannel), gray);
-                        WriteChannel(idx + (3 * bytesPerChannel), ScaleSample(alphaPlane![(row * alphaWidth) + col], srcMax, outMax));
+                        WriteChannel(idx + (3 * bytesPerChannel), ScaleSample(int.CreateTruncating(alphaPlane![(row * alphaWidth) + col]), srcMax, outMax));
                     }
                     else
                     {
@@ -270,20 +318,20 @@ internal static class Av1YuvToRgbConverter
                     int v3 = uvRowBaseV + ((col + 3) >> subX);
 
                     var yn = Vector256.Create(
-                        Normalized(ynTab, yPlane[rowBase + col], yLo, yRange),
-                        Normalized(ynTab, yPlane[rowBase + col + 1], yLo, yRange),
-                        Normalized(ynTab, yPlane[rowBase + col + 2], yLo, yRange),
-                        Normalized(ynTab, yPlane[rowBase + col + 3], yLo, yRange));
+                        Normalized(ynTab, int.CreateTruncating(yPlane[rowBase + col]), yLo, yRange),
+                        Normalized(ynTab, int.CreateTruncating(yPlane[rowBase + col + 1]), yLo, yRange),
+                        Normalized(ynTab, int.CreateTruncating(yPlane[rowBase + col + 2]), yLo, yRange),
+                        Normalized(ynTab, int.CreateTruncating(yPlane[rowBase + col + 3]), yLo, yRange));
                     var cbn = Vector256.Create(
-                        Normalized(cbnTab, uPlane[uc], cLo, cRange),
-                        Normalized(cbnTab, uPlane[u1], cLo, cRange),
-                        Normalized(cbnTab, uPlane[u2], cLo, cRange),
-                        Normalized(cbnTab, uPlane[u3], cLo, cRange));
+                        Normalized(cbnTab, int.CreateTruncating(uPlane[uc]), cLo, cRange),
+                        Normalized(cbnTab, int.CreateTruncating(uPlane[u1]), cLo, cRange),
+                        Normalized(cbnTab, int.CreateTruncating(uPlane[u2]), cLo, cRange),
+                        Normalized(cbnTab, int.CreateTruncating(uPlane[u3]), cLo, cRange));
                     var crn = Vector256.Create(
-                        Normalized(cbnTab, vPlane[vc], cLo, cRange),
-                        Normalized(cbnTab, vPlane[v1], cLo, cRange),
-                        Normalized(cbnTab, vPlane[v2], cLo, cRange),
-                        Normalized(cbnTab, vPlane[v3], cLo, cRange));
+                        Normalized(cbnTab, int.CreateTruncating(vPlane[vc]), cLo, cRange),
+                        Normalized(cbnTab, int.CreateTruncating(vPlane[v1]), cLo, cRange),
+                        Normalized(cbnTab, int.CreateTruncating(vPlane[v2]), cLo, cRange),
+                        Normalized(cbnTab, int.CreateTruncating(vPlane[v3]), cLo, cRange));
 
                     var r = yn + (twoKr256 * crn);
                     var b = yn + (twoKb256 * cbn);
@@ -306,7 +354,7 @@ internal static class Av1YuvToRgbConverter
                             pixels[idx + 5] = (byte)(bLane[k] >> 8);
                             if (hasAlpha)
                             {
-                                int a16 = AlphaOut(alphaTab, alphaPlane![alphaRowBase + col + k], srcMax, outMax);
+                                int a16 = AlphaOut(alphaTab, int.CreateTruncating(alphaPlane![alphaRowBase + col + k]), srcMax, outMax);
                                 pixels[idx + 6] = (byte)a16;
                                 pixels[idx + 7] = (byte)(a16 >> 8);
                             }
@@ -318,7 +366,7 @@ internal static class Av1YuvToRgbConverter
                             pixels[idx + 2] = (byte)bLane[k];
                             if (hasAlpha)
                             {
-                                pixels[idx + 3] = (byte)AlphaOut(alphaTab, alphaPlane![alphaRowBase + col + k], srcMax, outMax);
+                                pixels[idx + 3] = (byte)AlphaOut(alphaTab, int.CreateTruncating(alphaPlane![alphaRowBase + col + k]), srcMax, outMax);
                             }
                         }
 
@@ -335,9 +383,9 @@ internal static class Av1YuvToRgbConverter
             {
                 for (; col + 1 < outWidth; col += 2)
                 {
-                    var ySamples = Vector128.Create((double)yPlane[rowBase + col], yPlane[rowBase + col + 1]);
-                    var uSamples = Vector128.Create((double)uPlane[uvRowBaseU + (col >> subX)], uPlane[uvRowBaseU + ((col + 1) >> subX)]);
-                    var vSamples = Vector128.Create((double)vPlane[uvRowBaseV + (col >> subX)], vPlane[uvRowBaseV + ((col + 1) >> subX)]);
+                    var ySamples = Vector128.Create((double)int.CreateTruncating(yPlane[rowBase + col]), int.CreateTruncating(yPlane[rowBase + col + 1]));
+                    var uSamples = Vector128.Create((double)int.CreateTruncating(uPlane[uvRowBaseU + (col >> subX)]), int.CreateTruncating(uPlane[uvRowBaseU + ((col + 1) >> subX)]));
+                    var vSamples = Vector128.Create((double)int.CreateTruncating(vPlane[uvRowBaseV + (col >> subX)]), int.CreateTruncating(vPlane[uvRowBaseV + ((col + 1) >> subX)]));
 
                     var yn = (ySamples - yLoVec) / yRangeVec;
                     var cbn = (uSamples - cLoVec) / cRangeVec;
@@ -353,7 +401,7 @@ internal static class Av1YuvToRgbConverter
                     WriteChannel(idx0 + (2 * bytesPerChannel), ClampToRange(b[0], outMax));
                     if (hasAlpha)
                     {
-                        WriteChannel(idx0 + (3 * bytesPerChannel), ScaleSample(alphaPlane![alphaRowBase + col], srcMax, outMax));
+                        WriteChannel(idx0 + (3 * bytesPerChannel), ScaleSample(int.CreateTruncating(alphaPlane![alphaRowBase + col]), srcMax, outMax));
                     }
 
                     int idx1 = idx0 + (channels * bytesPerChannel);
@@ -362,7 +410,7 @@ internal static class Av1YuvToRgbConverter
                     WriteChannel(idx1 + (2 * bytesPerChannel), ClampToRange(b[1], outMax));
                     if (hasAlpha)
                     {
-                        WriteChannel(idx1 + (3 * bytesPerChannel), ScaleSample(alphaPlane![alphaRowBase + col + 1], srcMax, outMax));
+                        WriteChannel(idx1 + (3 * bytesPerChannel), ScaleSample(int.CreateTruncating(alphaPlane![alphaRowBase + col + 1]), srcMax, outMax));
                     }
                 }
             }
@@ -370,9 +418,9 @@ internal static class Av1YuvToRgbConverter
             for (; col < outWidth; col++)
             {
                 int uvCol = col >> subX;
-                int ySample = yPlane[rowBase + col];
-                int uSample = uPlane[uvRowBaseU + uvCol];
-                int vSample = vPlane[uvRowBaseV + uvCol];
+                int ySample = int.CreateTruncating(yPlane[rowBase + col]);
+                int uSample = int.CreateTruncating(uPlane[uvRowBaseU + uvCol]);
+                int vSample = int.CreateTruncating(vPlane[uvRowBaseV + uvCol]);
 
                 int rOut, gOut, bOut;
                 if (identity)
@@ -403,7 +451,7 @@ internal static class Av1YuvToRgbConverter
                 WriteChannel(idx + (2 * bytesPerChannel), bOut);
                 if (hasAlpha)
                 {
-                    WriteChannel(idx + (3 * bytesPerChannel), ScaleSample(alphaPlane![alphaRowBase + col], srcMax, outMax));
+                    WriteChannel(idx + (3 * bytesPerChannel), ScaleSample(int.CreateTruncating(alphaPlane![alphaRowBase + col]), srcMax, outMax));
                 }
             }
         }

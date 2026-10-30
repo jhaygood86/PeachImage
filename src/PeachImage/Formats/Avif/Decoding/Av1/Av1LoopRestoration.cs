@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 
@@ -8,8 +9,8 @@ namespace PeachImage.Formats.Avif.Decoding.Av1;
 /// Loop restoration (spec §7.17): Wiener and self-guided (SGRPROJ) restoration filters, applied per
 /// restoration unit over 64-luma-sample-tall stripes. Reads two frozen inputs -- the deblocked-only
 /// samples (<c>UpscaledCurrFrame</c>, snapshotted by the caller before CDEF ran) and the post-CDEF samples
-/// (<c>UpscaledCdefFrame</c>, <see cref="Av1FrameDecodeResult.Planes"/> as left by <see cref="Av1Cdef"/>)
-/// -- and writes a fresh <c>LrFrame</c> which then replaces <see cref="Av1FrameDecodeResult.Planes"/>, since
+/// (<c>UpscaledCdefFrame</c>, <see cref="Av1FrameDecodeResult{TPixel}.Planes"/> as left by <see cref="Av1Cdef"/>)
+/// -- and writes a fresh <c>LrFrame</c> which then replaces <see cref="Av1FrameDecodeResult{TPixel}.Planes"/>, since
 /// samples outside the current 64-sample stripe must come from the pre-CDEF version (spec §7.17.1's note on
 /// why loop restoration is designed to avoid needing extra CDEF line buffers).
 /// </summary>
@@ -37,7 +38,8 @@ internal static class Av1LoopRestoration
     /// <summary>Frames with fewer regions than this are restored on the calling thread.</summary>
     private const int ParallelMinRegions = 4;
 
-    public static void Apply(Av1FrameDecodeResult result, int[][] deblockedPlanes)
+    public static void Apply<TPixel>(Av1FrameDecodeResult<TPixel> result, TPixel[][] deblockedPlanes)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var frame = result.Frame;
 
@@ -48,16 +50,16 @@ internal static class Av1LoopRestoration
 
         // Rented (explicit width*height, not Clone()'s implicit "copy the source's whole backing Length",
         // since that source may itself be a larger-than-requested rented array) rather than `new`'d.
-        var lrPlanes = new int[3][];
+        var lrPlanes = new TPixel[3][];
         for (int plane = 0; plane < result.Sequence.NumPlanes; plane++)
         {
             int length = result.PlaneWidths[plane] * result.PlaneHeights[plane];
-            lrPlanes[plane] = ArrayPool<int>.Shared.Rent(length);
+            lrPlanes[plane] = ArrayPool<TPixel>.Shared.Rent(length);
             Array.Copy(result.Planes[plane], lrPlanes[plane], length);
         }
 
         var regions = BuildRegions(result);
-        var context = new Context(result, deblockedPlanes, lrPlanes);
+        var context = new Context<TPixel>(result, deblockedPlanes, lrPlanes);
 
         if (regions.Count >= ParallelMinRegions && Environment.ProcessorCount > 1)
         {
@@ -81,21 +83,22 @@ internal static class Av1LoopRestoration
         // target if CDEF didn't run) is likewise dead once superseded.
         for (int plane = 0; plane < result.Sequence.NumPlanes; plane++)
         {
-            ArrayPool<int>.Shared.Return(deblockedPlanes[plane]);
-            ArrayPool<int>.Shared.Return(result.Planes[plane]);
+            ArrayPool<TPixel>.Shared.Return(deblockedPlanes[plane]);
+            ArrayPool<TPixel>.Shared.Return(result.Planes[plane]);
             result.Planes[plane] = lrPlanes[plane];
         }
     }
 
-    private sealed class Context(Av1FrameDecodeResult result, int[][] currPlanes, int[][] lrPlanes)
+    private sealed class Context<TPixel>(Av1FrameDecodeResult<TPixel> result, TPixel[][] currPlanes, TPixel[][] lrPlanes)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
-        public Av1FrameDecodeResult Result { get; } = result;
+        public Av1FrameDecodeResult<TPixel> Result { get; } = result;
 
-        public int[][] CurrPlanes { get; } = currPlanes;
+        public TPixel[][] CurrPlanes { get; } = currPlanes;
 
-        public int[][] CdefPlanes { get; } = result.Planes;
+        public TPixel[][] CdefPlanes { get; } = result.Planes;
 
-        public int[][] LrPlanes { get; } = lrPlanes;
+        public TPixel[][] LrPlanes { get; } = lrPlanes;
     }
 
     /// <summary>One stripe of one restoration-unit column of a plane, with inclusive sample bounds.</summary>
@@ -192,7 +195,8 @@ internal static class Av1LoopRestoration
         }
     }
 
-    private static void RestoreRegion(Context context, Region region, Scratch scratch)
+    private static void RestoreRegion<TPixel>(Context<TPixel> context, Region region, Scratch scratch)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var result = context.Result;
         var grid = result.RestorationUnits[region.Plane]!;
@@ -217,7 +221,8 @@ internal static class Av1LoopRestoration
     /// the <c>Get source sample process</c> (spec §7.17.6): coordinates clamp to the plane, rows above the
     /// stripe (at most two) and below it come from the deblocked-only frame, rows inside it from the CDEF output.
     /// </summary>
-    private static void GatherSource(Context context, Region region, int w, int h, int sw, Scratch scratch)
+    private static void GatherSource<TPixel>(Context<TPixel> context, Region region, int w, int h, int sw, Scratch scratch)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var result = context.Result;
         int plane = region.Plane;
@@ -236,7 +241,7 @@ internal static class Av1LoopRestoration
         for (int r = 0; r < rows; r++)
         {
             int y = Math.Clamp(region.Y0 - Border + r, 0, planeEndY);
-            int[] source;
+            TPixel[] source;
             if (y < region.StripeStartY)
             {
                 y = Math.Max(region.StripeStartY - 2, y);
@@ -265,13 +270,14 @@ internal static class Av1LoopRestoration
                     x = Math.Clamp(x, 0, planeEndX);
                 }
 
-                src[dst + c] = source[rowBase + x];
+                src[dst + c] = int.CreateTruncating(source[rowBase + x]);
             }
         }
     }
 
     /// <summary><c>Wiener filter process</c> (spec §7.17.4), with rounding variables from §7.11.3.2 (<c>isCompound = 0</c>), over a whole region.</summary>
-    private static void WienerFilter(Context context, Av1RestorationUnitGrid grid, Region region, int w, int h, int sw, Scratch scratch)
+    private static void WienerFilter<TPixel>(Context<TPixel> context, Av1RestorationUnitGrid grid, Region region, int w, int h, int sw, Scratch scratch)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var result = context.Result;
         int bitDepth = result.Sequence.BitDepth;
@@ -352,7 +358,7 @@ internal static class Av1LoopRestoration
 
                     acc = Vector256.ShiftRightArithmetic(acc + Vector256.Create(roundV), interRound1);
                     acc = Vector256.Min(Vector256.Max(acc, Vector256<int>.Zero), Vector256.Create(maxSample));
-                    acc.StoreUnsafe(ref lr[outRow + c]);
+                    Av1PixelVector.Store8(acc, ref lr[outRow + c]);
                 }
             }
 
@@ -364,7 +370,7 @@ internal static class Av1LoopRestoration
                     s += vfilter[t] * inter[((r + t) * w) + c];
                 }
 
-                lr[outRow + c] = Math.Clamp((s + roundV) >> interRound1, 0, maxSample);
+                lr[outRow + c] = TPixel.CreateTruncating(Math.Clamp((s + roundV) >> interRound1, 0, maxSample));
             }
         }
     }
@@ -383,7 +389,8 @@ internal static class Av1LoopRestoration
     }
 
     /// <summary><c>Self guided filter process</c> (spec §7.17.2), over a whole region.</summary>
-    private static void SelfGuidedFilter(Context context, Av1RestorationUnitGrid grid, Region region, int w, int h, int sw, Scratch scratch)
+    private static void SelfGuidedFilter<TPixel>(Context<TPixel> context, Av1RestorationUnitGrid grid, Region region, int w, int h, int sw, Scratch scratch)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var result = context.Result;
         int bitDepth = result.Sequence.BitDepth;
@@ -427,7 +434,7 @@ internal static class Av1LoopRestoration
                 v += r0 != 0 ? (long)w0 * flt0[(i * w) + j] : w0 * u;
                 v += r1 != 0 ? (long)w2 * flt1[(i * w) + j] : w2 * u;
                 int s = Round2(v, SgrprojRstBits + SgrprojPrjBits);
-                lr[outRow + j] = Math.Clamp(s, 0, maxSample);
+                lr[outRow + j] = TPixel.CreateTruncating(Math.Clamp(s, 0, maxSample));
             }
         }
     }

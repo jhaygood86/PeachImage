@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
@@ -33,7 +34,7 @@ internal struct Av1ReconCommand
     public int DcQuant;
     public int AcQuant;
 
-    /// <summary>Offset of this block's quantized coefficients in the span handed to <see cref="Av1ReconWorker.Execute"/>.</summary>
+    /// <summary>Offset of this block's quantized coefficients in the span handed to <see cref="IAv1ReconWorker.Execute"/>.</summary>
     public int CoefOffset;
 
     /// <summary>False when the prediction was already written to the plane by the parse side (palette / IntraBC blocks).</summary>
@@ -54,9 +55,22 @@ internal struct Av1ReconCommand
 /// §7.11.2, §7.12.3) for <see cref="Av1ReconCommand"/>s, in the order they were issued. Owns every scratch
 /// buffer it uses, so one instance is driven by exactly one thread at a time.
 /// </summary>
-internal sealed class Av1ReconWorker
+internal interface IAv1ReconWorker
 {
-    private readonly int[][] _planes;
+    /// <summary>Runs one command; <paramref name="quant"/> holds the quantized coefficients its <see cref="Av1ReconCommand.CoefOffset"/> refers to.</summary>
+    void Execute(in Av1ReconCommand command, ReadOnlySpan<int> quant);
+
+    /// <summary>IntraBC block-copy prediction (spec 7.11.3, refIdx = -1) written straight into the plane; the caller must have drained any queued commands first.</summary>
+    void PredictIntrabc(int plane, int startX, int startY, int w, int h, int mvRow, int mvCol, int subX, int subY, int lastX, int lastY);
+
+    /// <summary>Writes palette colors for a <paramref name="w"/>x<paramref name="h"/> block from <paramref name="colorMap"/> (row stride <paramref name="mapWidth"/>, origin at <paramref name="localBaseX"/>/<paramref name="localBaseY"/>); the caller must have drained any queued commands first.</summary>
+    void WritePalette(int plane, int startX, int startY, int w, int h, int[] palette, int[] colorMap, int mapWidth, int localBaseX, int localBaseY);
+}
+
+internal sealed class Av1ReconWorker<TPixel> : IAv1ReconWorker
+    where TPixel : unmanaged, IBinaryInteger<TPixel>
+{
+    private readonly TPixel[][] _planes;
     private readonly int[] _planeWidths;
     private readonly int _bitDepth;
     private readonly bool _enableIntraEdgeFilter;
@@ -69,7 +83,7 @@ internal sealed class Av1ReconWorker
     private readonly Av1EdgeArray _aboveRow = new(528);
     private readonly Av1EdgeArray _leftCol = new(528);
 
-    public Av1ReconWorker(int[][] planes, int[] planeWidths, Av1SequenceHeader seq)
+    public Av1ReconWorker(TPixel[][] planes, int[] planeWidths, Av1SequenceHeader seq)
     {
         _planes = planes;
         _planeWidths = planeWidths;
@@ -104,7 +118,7 @@ internal sealed class Av1ReconWorker
 
             for (int i = 0; i < h; i++)
             {
-                _pred.AsSpan(i * w, w).CopyTo(destPlane.AsSpan(((c.StartY + i) * stride) + c.StartX, w));
+                Av1PixelVector.StoreRow<TPixel>(_pred.AsSpan(i * w, w), destPlane.AsSpan(((c.StartY + i) * stride) + c.StartX, w));
             }
         }
 
@@ -124,7 +138,7 @@ internal sealed class Av1ReconWorker
     }
 
     /// <summary><c>reconstruct()</c> (spec §7.12.3): dequantize, invoke the 2D inverse transform, and add the (flip-adjusted) residual back into the plane.</summary>
-    private void Reconstruct(in Av1ReconCommand c, ReadOnlySpan<int> quant, int[] destPlane, int stride, int w, int h)
+    private void Reconstruct(in Av1ReconCommand c, ReadOnlySpan<int> quant, TPixel[] destPlane, int stride, int w, int h)
     {
         int x = c.StartX;
         int y = c.StartY;
@@ -158,29 +172,17 @@ internal sealed class Av1ReconWorker
                 {
                     for (; j + 8 <= w; j += 8)
                     {
-                        var pred = Vector256.LoadUnsafe(ref destPlane[rowBase + j]);
+                        var pred = Av1PixelVector.Load8(ref destPlane[rowBase + j]);
                         var res = Vector256.LoadUnsafe(ref _residual[resBase + j]);
                         var clamped = Vector256.Min(Vector256.Max(pred + res, zeroVec), maxVec);
-                        clamped.StoreUnsafe(ref destPlane[rowBase + j]);
-                    }
-                }
-                else if (Vector128.IsHardwareAccelerated)
-                {
-                    var zero128 = Vector128<int>.Zero;
-                    var max128 = Vector128.Create(maxSample);
-                    for (; j + 4 <= w; j += 4)
-                    {
-                        var pred = Vector128.LoadUnsafe(ref destPlane[rowBase + j]);
-                        var res = Vector128.LoadUnsafe(ref _residual[resBase + j]);
-                        var clamped = Vector128.Min(Vector128.Max(pred + res, zero128), max128);
-                        clamped.StoreUnsafe(ref destPlane[rowBase + j]);
+                        Av1PixelVector.Store8(clamped, ref destPlane[rowBase + j]);
                     }
                 }
 
                 for (; j < w; j++)
                 {
                     int idx = rowBase + j;
-                    destPlane[idx] = Math.Clamp(destPlane[idx] + _residual[resBase + j], 0, maxSample);
+                    destPlane[idx] = TPixel.CreateTruncating(Math.Clamp(int.CreateTruncating(destPlane[idx]) + _residual[resBase + j], 0, maxSample));
                 }
             }
 
@@ -194,7 +196,33 @@ internal sealed class Av1ReconWorker
             {
                 int xx = flipLr ? w - j - 1 : j;
                 int idx = ((y + yy) * stride) + x + xx;
-                destPlane[idx] = Math.Clamp(destPlane[idx] + _residual[(i * w) + j], 0, maxSample);
+                destPlane[idx] = TPixel.CreateTruncating(Math.Clamp(int.CreateTruncating(destPlane[idx]) + _residual[(i * w) + j], 0, maxSample));
+            }
+        }
+    }
+
+    public void PredictIntrabc(int plane, int startX, int startY, int w, int h, int mvRow, int mvCol, int subX, int subY, int lastX, int lastY)
+    {
+        int stride = _planeWidths[plane];
+        var destPlane = _planes[plane];
+        Av1InterPrediction.PredictIntrabc(_pred, destPlane, stride, startX, startY, w, h, mvRow, mvCol, subX, subY, lastX, lastY, _bitDepth);
+
+        for (int i = 0; i < h; i++)
+        {
+            Av1PixelVector.StoreRow<TPixel>(_pred.AsSpan(i * w, w), destPlane.AsSpan(((startY + i) * stride) + startX, w));
+        }
+    }
+
+    public void WritePalette(int plane, int startX, int startY, int w, int h, int[] palette, int[] colorMap, int mapWidth, int localBaseX, int localBaseY)
+    {
+        int stride = _planeWidths[plane];
+        var destPlane = _planes[plane];
+        for (int i = 0; i < h; i++)
+        {
+            int mapRowBase = (localBaseY + i) * mapWidth;
+            for (int j = 0; j < w; j++)
+            {
+                destPlane[((startY + i) * stride) + startX + j] = TPixel.CreateTruncating(palette[colorMap[mapRowBase + localBaseX + j]]);
             }
         }
     }

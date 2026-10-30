@@ -128,8 +128,8 @@ internal static class Av1CdefSearch
         return (rentedY, rentedU, rentedV);
     }
 
-    /// <summary>Returns every plane <see cref="Av1Cdef.Apply"/> replaced <see cref="Av1FrameDecodeResult.Planes"/> with -- always pool-rented by <see cref="Av1Cdef.Apply"/> itself (see this type's own class-level ownership remarks), regardless of whether the arrays fed into that call originated from <see cref="RentAndCopy"/>.</summary>
-    private static void ReturnPlanes(Av1FrameDecodeResult result, bool monoChrome)
+    /// <summary>Returns every plane <see cref="Av1Cdef.Apply"/> replaced <see cref="Av1FrameDecodeResult{TPixel}.Planes"/> with -- always pool-rented by <see cref="Av1Cdef.Apply"/> itself (see this type's own class-level ownership remarks), regardless of whether the arrays fed into that call originated from <see cref="RentAndCopy"/>.</summary>
+    private static void ReturnPlanes(Av1FrameDecodeResult<int> result, bool monoChrome)
     {
         ArrayPool<int>.Shared.Return(result.Planes[0]);
         if (!monoChrome)
@@ -174,11 +174,11 @@ internal static class Av1CdefSearch
         return Av1FrameHeaderWriter.Write(scratchWriter, width, height, monoChrome, baseQIdx, lossless: false, loopFilterLevel, enableCdef: true, cdef);
     }
 
-    private static Av1FrameDecodeResult BuildDecodeResult(Av1SequenceHeader seq, Av1FrameHeader frame, int[] y, int[]? u, int[]? v, int miCols, int miRows, int width, int height, int chromaWidth, int chromaHeight)
+    private static Av1FrameDecodeResult<int> BuildDecodeResult(Av1SequenceHeader seq, Av1FrameHeader frame, int[] y, int[]? u, int[]? v, int miCols, int miRows, int width, int height, int chromaWidth, int chromaHeight)
     {
         int frameSize = miCols * miRows;
 
-        return new Av1FrameDecodeResult
+        return new Av1FrameDecodeResult<int>
         {
             Sequence = seq,
             Frame = frame,

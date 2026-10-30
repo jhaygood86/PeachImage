@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Numerics;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -9,7 +10,7 @@ namespace PeachImage.Formats.Avif.Decoding.Av1;
 /// verify the partition tree and mode-info decode actually ran meaningfully rather than failing
 /// immediately.
 /// </summary>
-internal sealed class Av1FrameDecodeResult
+internal abstract class Av1FrameDecodeResult
 {
     public required Av1SequenceHeader Sequence { get; init; }
 
@@ -21,13 +22,11 @@ internal sealed class Av1FrameDecodeResult
     /// <summary>How many tiles were processed.</summary>
     public required int TilesStarted { get; init; }
 
-    /// <summary>
-    /// Reconstructed sample planes (spec's <c>CurrFrame</c>), one flat row-major buffer per plane (Y, then
-    /// U/V when <see cref="Av1SequenceHeader.MonoChrome"/> is false), each exactly <see cref="PlaneWidths"/>
-    /// x <see cref="PlaneHeights"/> for that plane -- no border padding. Samples are plain integers in
-    /// <c>[0, (1 &lt;&lt; BitDepth) - 1]</c>, not yet packed into any particular byte layout.
-    /// </summary>
-    public required int[][] Planes { get; init; }
+    /// <summary>The plane's sample array (<see cref="byte"/>[], <see cref="ushort"/>[] or <see cref="int"/>[] depending on the result's sample type).</summary>
+    public abstract Array GetPlane(int plane);
+
+    /// <summary>Returns the first <paramref name="numPlanes"/> pool-rented planes to the pool they came from.</summary>
+    public abstract void ReturnPlanes(int numPlanes);
 
     public required int[] PlaneWidths { get; init; }
 
@@ -93,6 +92,30 @@ internal sealed class Av1FrameDecodeResult
     public required int MinSymbolMaxBitsAtExit { get; init; }
 }
 
+/// <summary>The decode result with its sample planes in their storage type: <see cref="byte"/> for 8-bit streams, <see cref="ushort"/> for higher bit depths (and <see cref="int"/> for the encoder's own reconstruction planes).</summary>
+internal sealed class Av1FrameDecodeResult<TPixel> : Av1FrameDecodeResult
+    where TPixel : unmanaged, IBinaryInteger<TPixel>
+{
+    /// <summary>
+    /// Reconstructed sample planes (spec's <c>CurrFrame</c>), one flat row-major buffer per plane (Y, then
+    /// U/V when <see cref="Av1SequenceHeader.MonoChrome"/> is false), each exactly <see cref="Av1FrameDecodeResult.PlaneWidths"/>
+    /// x <see cref="Av1FrameDecodeResult.PlaneHeights"/> for that plane -- no border padding. Samples are plain integers in
+    /// <c>[0, (1 &lt;&lt; BitDepth) - 1]</c>, not yet packed into any particular byte layout.
+    /// </summary>
+    public required TPixel[][] Planes { get; init; }
+
+    public override Array GetPlane(int plane) => Planes[plane];
+
+    public override void ReturnPlanes(int numPlanes)
+    {
+        for (int plane = 0; plane < numPlanes; plane++)
+        {
+            ArrayPool<TPixel>.Shared.Return(Planes[plane]);
+        }
+    }
+
+}
+
 /// <summary>
 /// The result of <see cref="Av1FrameDecoder.ParseFrameHeader"/>: the sequence/frame headers plus the
 /// byte range of the following tile group, before any tile/residual decode has run.
@@ -116,7 +139,9 @@ internal static class Av1FrameDecoder
     public static Av1FrameDecodeResult Decode(byte[] tileBytes)
     {
         var parsed = ParseFrameHeader(tileBytes);
-        return DecodeTileGroup(tileBytes, parsed.Sequence, parsed.Frame, parsed.TileGroupOffset, parsed.TileGroupLength);
+        return parsed.Sequence.BitDepth == 8
+            ? DecodeTileGroup<byte>(tileBytes, parsed.Sequence, parsed.Frame, parsed.TileGroupOffset, parsed.TileGroupLength)
+            : DecodeTileGroup<ushort>(tileBytes, parsed.Sequence, parsed.Frame, parsed.TileGroupOffset, parsed.TileGroupLength);
     }
 
     /// <summary>
@@ -181,7 +206,8 @@ internal static class Av1FrameDecoder
     }
 
     /// <summary>Parses <c>tile_group_obu()</c> and runs every tile's partition/mode-info decode. Frame-sized neighbor context arrays are shared across tiles -- see <see cref="Av1TileDecoder"/>'s remarks for why that's safe.</summary>
-    private static Av1FrameDecodeResult DecodeTileGroup(byte[] data, Av1SequenceHeader sequence, Av1FrameHeader frame, int tileGroupOffset, int tileGroupLength)
+    private static Av1FrameDecodeResult<TPixel> DecodeTileGroup<TPixel>(byte[] data, Av1SequenceHeader sequence, Av1FrameHeader frame, int tileGroupOffset, int tileGroupLength)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var tileRanges = Av1TileGroupObu.Parse(data, tileGroupOffset, tileGroupLength, frame.TileInfo);
 
@@ -219,7 +245,7 @@ internal static class Av1FrameDecoder
         int numPlanes = sequence.NumPlanes;
         var planeWidths = new int[3];
         var planeHeights = new int[3];
-        var planes = new int[3][];
+        var planes = new TPixel[3][];
         for (int plane = 0; plane < 3; plane++)
         {
             int subX = plane > 0 && sequence.SubsamplingX ? 1 : 0;
@@ -237,7 +263,7 @@ internal static class Av1FrameDecoder
             // pipeline via the same swap-and-return convention Av1Cdef/Av1LoopRestoration use for their own
             // output buffers; whichever generation survives the whole pipeline is finally returned by
             // Av1TileComposer.Composite once it's done reading from it.
-            planes[plane] = ArrayPool<int>.Shared.Rent(planeWidths[plane] * planeHeights[plane]);
+            planes[plane] = ArrayPool<TPixel>.Shared.Rent(planeWidths[plane] * planeHeights[plane]);
             Array.Clear(planes[plane], 0, planeWidths[plane] * planeHeights[plane]);
         }
 
@@ -298,6 +324,7 @@ internal static class Av1FrameDecoder
             int miColStart = frame.TileInfo.MiColStarts[tileRange.TileCol];
             int miColEnd = frame.TileInfo.MiColStarts[tileRange.TileCol + 1];
 
+            var worker = new Av1ReconWorker<TPixel>(planes, planeWidths, sequence);
             var cdf = new Av1CdfContext(frame.BaseQIdx);
             var symbols = new Av1SymbolDecoder(data, tileRange.Offset, tileRange.Length, frame.DisableCdfUpdate);
             var tileDecoder = new Av1TileDecoder(
@@ -305,7 +332,7 @@ internal static class Av1FrameDecoder
                 yModes, uvModes, miSizes, skips, segmentIds, interTxSizes,
                 paletteSizesY, paletteSizesUV, paletteColorsYGrid, paletteColorsUGrid,
                 isInters, mvRowsGrid, mvColsGrid, written,
-                planes, planeWidths, planeHeights,
+                worker, planeWidths, planeHeights,
                 deltaLfs, cdefIdx, loopfilterTxSizes, loopfilterTxSizeStrides, restorationUnits,
                 angleDeltaYGrid, angleDeltaUvGrid, useFilterIntraGrid, filterIntraModeGrid);
 
@@ -316,7 +343,7 @@ internal static class Av1FrameDecoder
             minSymbolMaxBitsAtExit = Math.Min(minSymbolMaxBitsAtExit, tileDecoder.SymbolMaxBitsAtExit);
         }
 
-        var result = new Av1FrameDecodeResult
+        var result = new Av1FrameDecodeResult<TPixel>
         {
             Sequence = sequence,
             Frame = frame,
@@ -357,13 +384,13 @@ internal static class Av1FrameDecoder
         // cloning three full planes (~12MB at 1080p) here would be pure waste for the (common) no-LR case.
         // Rented rather than Clone()'d (which would copy an oversized pooled source's full backing
         // Length); Av1LoopRestoration.Apply owns returning this once it's done reading from it.
-        var deblockedPlanes = frame.LoopRestoration.UsesLr ? new int[3][] : [];
+        var deblockedPlanes = frame.LoopRestoration.UsesLr ? new TPixel[3][] : [];
         if (frame.LoopRestoration.UsesLr)
         {
             for (int plane = 0; plane < numPlanes; plane++)
             {
                 int length = planeWidths[plane] * planeHeights[plane];
-                deblockedPlanes[plane] = ArrayPool<int>.Shared.Rent(length);
+                deblockedPlanes[plane] = ArrayPool<TPixel>.Shared.Rent(length);
                 Array.Copy(result.Planes[plane], deblockedPlanes[plane], length);
             }
         }

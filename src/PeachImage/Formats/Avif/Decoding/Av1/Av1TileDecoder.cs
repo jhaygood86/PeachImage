@@ -86,7 +86,7 @@ internal sealed class Av1TileDecoder
     // way -- matching the spec, which allows intra prediction to read reconstructed samples from a
     // different tile when available, only AvailU/AvailL/AvailAboveRight/AvailBelowLeft controls whether a
     // neighbor is treated as available at all).
-    private readonly int[][] _planes;
+    private readonly IAv1ReconWorker _worker;
     private readonly int[] _planeWidths;
     private readonly int[] _planeHeights;
 
@@ -100,12 +100,9 @@ internal sealed class Av1TileDecoder
     private int _maxLumaW;
     private int _maxLumaH;
 
-    // Scratch for IntraBC block-copy prediction, the one prediction written from the parse side (it reads
-    // pixels, so it runs only after the reconstruction pipeline has drained). Everything else -- intra
-    // prediction, CFL and residual reconstruction -- is described by an Av1ReconCommand and executed by
-    // _recon, which owns the matching scratch buffers.
-    private readonly int[] _reconPred = new int[64 * 64];
-
+    // Intra prediction, CFL and residual reconstruction are described by Av1ReconCommands and executed through
+    // _recon (on a second thread for large tiles); IntraBC and palette blocks read or write pixels directly, so
+    // they drain it first and go through _worker.
     private Av1ReconPipeline _recon = null!;
 
     private int _currentQIndex;
@@ -380,7 +377,7 @@ internal sealed class Av1TileDecoder
         int[] mvRowsGrid,
         int[] mvColsGrid,
         bool[] written,
-        int[][] planes,
+        IAv1ReconWorker worker,
         int[] planeWidths,
         int[] planeHeights,
         int[][] deltaLfs,
@@ -417,7 +414,7 @@ internal sealed class Av1TileDecoder
         _mvRowsGrid = mvRowsGrid;
         _mvColsGrid = mvColsGrid;
         _written = written;
-        _planes = planes;
+        _worker = worker;
         _planeWidths = planeWidths;
         _planeHeights = planeHeights;
         _deltaLfs = deltaLfs;
@@ -455,7 +452,7 @@ internal sealed class Av1TileDecoder
         // thread would cost more than it saves) and single-core hosts reconstruct inline.
         bool threaded = Environment.ProcessorCount > 1
             && (_miRowEnd - _miRowStart) * (_miColEnd - _miColStart) >= PipelineMinMiArea;
-        _recon = new Av1ReconPipeline(new Av1ReconWorker(_planes, _planeWidths, _seq), threaded);
+        _recon = new Av1ReconPipeline(_worker, threaded);
 
         try
         {
@@ -2627,15 +2624,7 @@ internal sealed class Av1TileDecoder
             _recon.Drain();
             int lastX = ((_frame.UpscaledWidth + subX) >> subX) - 1;
             int lastY = ((_frame.FrameHeight + subY) >> subY) - 1;
-            Av1InterPrediction.PredictIntrabc(
-                _reconPred, _planes[plane], stride, startX, startY, w, h,
-                _mvRow, _mvCol, subX, subY, lastX, lastY, _seq.BitDepth);
-
-            var destPlane = _planes[plane];
-            for (int i = 0; i < h; i++)
-            {
-                _reconPred.AsSpan(i * w, w).CopyTo(destPlane.AsSpan(((startY + i) * stride) + startX, w));
-            }
+            _worker.PredictIntrabc(plane, startX, startY, w, h, _mvRow, _mvCol, subX, subY, lastX, lastY);
         }
         else if (usesPalette)
         {
@@ -2651,15 +2640,7 @@ internal sealed class Av1TileDecoder
             int localBaseX = startX - baseX;
             int localBaseY = startY - baseY;
 
-            for (int i = 0; i < h; i++)
-            {
-                int mapRowBase = (localBaseY + i) * mapWidth;
-                for (int j = 0; j < w; j++)
-                {
-                    int colorIndex = colorMap[mapRowBase + localBaseX + j];
-                    _planes[plane][((startY + i) * stride) + startX + j] = palette[colorIndex];
-                }
-            }
+            _worker.WritePalette(plane, startX, startY, w, h, palette, colorMap, mapWidth, localBaseX, localBaseY);
         }
         else
         {
