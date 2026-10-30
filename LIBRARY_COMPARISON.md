@@ -321,6 +321,17 @@ on a second thread while the first parses, and deblocking, CDEF and YUV-to-RGB r
 AV1 decode is the format where PeachImage is furthest from a hand-tuned native decoder: dav1d is SIMD-assembly
 throughout. Per-image managed allocation is a PeachImage-only concern (libavif's buffers are unmanaged).
 
+### Encode (time)
+
+PeachImage only (no libavif encode baseline is collected), default options (4:2:0, quality 75) unless noted.
+
+| Scenario | PeachImage | PeachImage allocated |
+|---|---:|---:|
+| Photographic 1080p, lossy | 1,777 ms | 893 MB |
+| Photographic 1080p, lossless | 29.6 s | n/a |
+| Small image (32×24), lossy | 6.64 ms | 1.5 MB |
+| Small image (32×24), lossless | 5.12 ms | 3.4 MB |
+
 ### Encode (lossless size)
 
 `AvifEncoderOptions.Lossless = true` compared against this repo's own PNG encoder on the same pixels, plus
