@@ -32,7 +32,7 @@ internal static class TiffHeaderReader
 
         if (magic == BigTiffMagic)
         {
-            throw new TiffUnsupportedFeatureException("BigTIFF is not supported.");
+            throw new TiffUnsupportedFeatureException("BigTIFF is not supported; only classic TIFF files are decoded (see the TIFF section of the README).");
         }
 
         if (magic != ClassicTiffMagic)

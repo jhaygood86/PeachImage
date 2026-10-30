@@ -25,7 +25,7 @@ internal static class TiffValidation
 
         if (ifd.HasTag(TiffTags.TileWidth) || ifd.HasTag(TiffTags.TileOffsets))
         {
-            throw new TiffUnsupportedFeatureException("Tiled TIFF organization is not supported.");
+            throw new TiffUnsupportedFeatureException("Tiled TIFF organization is not supported; only strip-based TIFF files are decoded (see the TIFF section of the README).");
         }
 
         int compression = (int)ifd.GetUInt32(TiffTags.Compression, 1);
@@ -37,7 +37,7 @@ internal static class TiffValidation
         int planarConfiguration = (int)ifd.GetUInt32(TiffTags.PlanarConfiguration, 1);
         if (planarConfiguration != 1)
         {
-            throw new TiffUnsupportedFeatureException($"TIFF PlanarConfiguration {planarConfiguration} (planar/separate storage) is not supported.");
+            throw new TiffUnsupportedFeatureException($"TIFF PlanarConfiguration {planarConfiguration} (planar/separate storage) is not supported; only chunky storage is decoded (see the TIFF section of the README).");
         }
 
         int fillOrder = (int)ifd.GetUInt32(TiffTags.FillOrder, 1);
