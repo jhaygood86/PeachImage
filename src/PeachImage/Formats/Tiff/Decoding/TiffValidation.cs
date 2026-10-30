@@ -25,11 +25,11 @@ internal static class TiffValidation
 
         if (ifd.HasTag(TiffTags.TileWidth) || ifd.HasTag(TiffTags.TileOffsets))
         {
-            throw new TiffUnsupportedFeatureException("Tiled TIFF organization is not supported.");
+            throw new TiffUnsupportedFeatureException("Tiled TIFF organization is not supported; only strip-based TIFF files are decoded (see the TIFF section of the README).");
         }
 
         int compression = (int)ifd.GetUInt32(TiffTags.Compression, 1);
-        if (compression is not (1 or 2 or 3 or 4 or 5 or 32773))
+        if (compression is not (1 or 2 or 3 or 4 or 5 or 8 or 32773 or 32946))
         {
             throw new TiffUnsupportedFeatureException($"TIFF compression {compression} ({DescribeCompression(compression)}) is not supported.");
         }
@@ -37,14 +37,14 @@ internal static class TiffValidation
         int planarConfiguration = (int)ifd.GetUInt32(TiffTags.PlanarConfiguration, 1);
         if (planarConfiguration != 1)
         {
-            throw new TiffUnsupportedFeatureException($"TIFF PlanarConfiguration {planarConfiguration} (planar/separate storage) is not supported.");
+            throw new TiffUnsupportedFeatureException($"TIFF PlanarConfiguration {planarConfiguration} (planar/separate storage) is not supported; only chunky storage is decoded (see the TIFF section of the README).");
         }
 
         int fillOrder = (int)ifd.GetUInt32(TiffTags.FillOrder, 1);
         bool isFax = compression is 2 or 3 or 4;
-        if (fillOrder != 1 && !(isFax && fillOrder == 2))
+        if (fillOrder is not (1 or 2))
         {
-            throw new TiffUnsupportedFeatureException($"TIFF FillOrder {fillOrder} (LSB-first bit packing) is not supported.");
+            throw new TiffUnsupportedFeatureException($"TIFF FillOrder {fillOrder} is not supported.");
         }
 
         int sampleFormat = (int)ifd.GetUInt32(TiffTags.SampleFormat, 1);

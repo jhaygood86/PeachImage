@@ -92,6 +92,18 @@ internal static class TiffImageDecoder
             return DecodeCcitt(compressed, descriptor, expectedLength, rows);
         }
 
+        byte[]? reversed = null;
+        if (descriptor.FillOrder == 2)
+        {
+            reversed = compressed.ToArray();
+            for (int i = 0; i < reversed.Length; i++)
+            {
+                reversed[i] = ReverseBits(reversed[i]);
+            }
+
+            compressed = reversed;
+        }
+
         var output = new byte[expectedLength];
 
         switch (compression)
@@ -104,12 +116,50 @@ internal static class TiffImageDecoder
                 TiffLzwDecoder.Decode(compressed, output);
                 return output;
 
+            case 8: // Deflate (Adobe-style zlib).
+            case 32946: // Deflate (legacy code).
+                InflateInto(compressed, output);
+                return output;
+
             case 32773: // PackBits.
                 TiffPackBitsDecoder.Decode(compressed, output);
                 return output;
 
             default:
                 throw new TiffDecodingException($"Unreachable: compression {compression} should have been rejected during validation.");
+        }
+    }
+
+    private static byte ReverseBits(byte value)
+    {
+        int v = value;
+        v = ((v & 0xF0) >> 4) | ((v & 0x0F) << 4);
+        v = ((v & 0xCC) >> 2) | ((v & 0x33) << 2);
+        v = ((v & 0xAA) >> 1) | ((v & 0x55) << 1);
+        return (byte)v;
+    }
+
+    private static void InflateInto(ReadOnlySpan<byte> compressed, byte[] output)
+    {
+        try
+        {
+            using var input = new MemoryStream(compressed.ToArray(), writable: false);
+            using var zlib = new System.IO.Compression.ZLibStream(input, System.IO.Compression.CompressionMode.Decompress);
+            int total = 0;
+            while (total < output.Length)
+            {
+                int read = zlib.Read(output, total, output.Length - total);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                total += read;
+            }
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new TiffDecodingException("TIFF Deflate strip is corrupt.", ex);
         }
     }
 

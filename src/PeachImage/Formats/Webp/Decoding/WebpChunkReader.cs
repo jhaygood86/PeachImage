@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.IO;
 using System.Buffers.Binary;
 
 namespace PeachImage.Formats.Webp.Decoding;
@@ -35,8 +36,11 @@ internal static class WebpChunkReader
     /// <summary>Reads a chunk's payload in full (including consuming the trailing pad byte if <paramref name="size"/> is odd).</summary>
     public static byte[] ReadPayload(Stream stream, uint size)
     {
-        byte[] data = size == 0 ? [] : new byte[size];
-        WebpStreamHelpers.ReadExactlyOrThrow(stream, data);
+        if (!BoundedPayloadReader.TryRead(stream, size, out byte[] data))
+        {
+            throw new WebpDecodingException("Truncated WebP chunk.");
+        }
+
         SkipPadding(stream, size);
         return data;
     }

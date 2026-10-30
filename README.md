@@ -7,7 +7,7 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
 
 ## Status
 
-- **JPEG**: decode (baseline sequential + progressive, grayscale/YCbCr/RGB/CMYK/YCCK, all standard
+- **JPEG**: decode (baseline and extended (8-bit) sequential + progressive, grayscale/YCbCr/RGB/CMYK/YCCK, all standard
   chroma subsampling, restart markers) and encode (baseline sequential, grayscale/YCbCr) are implemented.
 - **BMP**: decode (OS/2 1.x/2.x and Windows BITMAPINFOHEADER through BITMAPV5HEADER variants, 1/4/8bpp
   indexed color, 16/24/32bpp direct color, RLE4/RLE8 compression, arbitrary BI_BITFIELDS/BI_ALPHABITFIELDS
@@ -58,12 +58,12 @@ Targets .NET 8.0 and .NET 10.0. No native interop — every codec is managed cod
   conversion, forward transform, and quantizer all use SIMD-tiered kernels (scalar/`Vector128`/`Vector256`,
   matching the JPEG/WebP encoders' own dispatch pattern) and pool their per-block working buffers rather
   than allocating per block.
-- **TIFF**: decode only (no encode). Covers both byte orders (`II`/`MM`), uncompressed/LZW/PackBits and
+- **TIFF**: decode only (no encode). Covers both byte orders (`II`/`MM`), uncompressed/LZW/Deflate/PackBits and
   CCITT (Modified Huffman, Group 3 one- and two-dimensional, Group 4; either `FillOrder`) compression,
   1/2/4/8/16-bit depth, and grayscale (WhiteIsZero/BlackIsZero), RGB (with optional straight or
   premultiplied alpha), palette, and CMYK color, including the Predictor=2 horizontal-differencing variant
-  LZW-compressed files commonly use. Tiled organization, planar (non-chunky) storage, any compression other
-  than none/CCITT/LZW/PackBits, BigTIFF, floating-point/signed samples, and photometric interpretations outside
+  LZW- and Deflate-compressed files commonly use. Tiled organization, planar (non-chunky) storage, any compression other
+  than none/CCITT/LZW/Deflate/PackBits, BigTIFF, floating-point/signed samples, and photometric interpretations outside
   that set (YCbCr, LogLuv, Lab) are deliberately out of scope and throw a clear
   `TiffUnsupportedFeatureException` rather than a silently wrong result — the goal is correctness on
   real-world scanner/export-tool output, not every TIFF extension ever specified. An embedded ICC profile

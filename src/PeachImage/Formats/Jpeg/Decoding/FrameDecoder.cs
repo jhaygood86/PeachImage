@@ -44,7 +44,7 @@ internal static class FrameDecoder
 
             switch (marker)
             {
-                case JpegMarker.Sof0 or JpegMarker.Sof2:
+                case JpegMarker.Sof0 or JpegMarker.Sof1 or JpegMarker.Sof2:
                 {
                     var frameHeader = JpegFrameHeader.Parse(ReadSegment(markerReader), isProgressive: marker == JpegMarker.Sof2);
                     ThrowIfDimensionsExceedLimits(frameHeader);
@@ -52,9 +52,9 @@ internal static class FrameDecoder
                     return (frameHeader, colorSpace, isAdobeInverted, orientation);
                 }
 
-                case JpegMarker.Sof1 or JpegMarker.Sof3 or JpegMarker.Sof5 or JpegMarker.Sof6 or JpegMarker.Sof7
+                case JpegMarker.Sof3 or JpegMarker.Sof5 or JpegMarker.Sof6 or JpegMarker.Sof7
                     or JpegMarker.Sof9 or JpegMarker.Sof10 or JpegMarker.Sof11 or JpegMarker.Sof13 or JpegMarker.Sof14 or JpegMarker.Sof15:
-                    throw new JpegDecodingException($"Unsupported JPEG encoding mode (marker 0x{(byte)marker:X2}). Only baseline sequential and progressive DCT with Huffman coding are supported.");
+                    throw new JpegDecodingException($"Unsupported JPEG encoding mode (marker 0x{(byte)marker:X2}). Only baseline/extended sequential and progressive DCT with Huffman coding are supported.");
 
                 case JpegMarker.Sos:
                     throw new JpegDecodingException("Reached scan data before a frame header (SOF) was found.");
@@ -203,6 +203,7 @@ internal static class FrameDecoder
                 }
 
                 case JpegMarker.Sof0:
+                case JpegMarker.Sof1:
                 case JpegMarker.Sof2:
                 {
                     if (frameHeader is not null)
@@ -216,9 +217,9 @@ internal static class FrameDecoder
                     break;
                 }
 
-                case JpegMarker.Sof1 or JpegMarker.Sof3 or JpegMarker.Sof5 or JpegMarker.Sof6 or JpegMarker.Sof7
+                case JpegMarker.Sof3 or JpegMarker.Sof5 or JpegMarker.Sof6 or JpegMarker.Sof7
                     or JpegMarker.Sof9 or JpegMarker.Sof10 or JpegMarker.Sof11 or JpegMarker.Sof13 or JpegMarker.Sof14 or JpegMarker.Sof15:
-                    throw new JpegDecodingException($"Unsupported JPEG encoding mode (marker 0x{(byte)marker:X2}). Only baseline sequential and progressive DCT with Huffman coding are supported.");
+                    throw new JpegDecodingException($"Unsupported JPEG encoding mode (marker 0x{(byte)marker:X2}). Only baseline/extended sequential and progressive DCT with Huffman coding are supported.");
 
                 case JpegMarker.App0:
                     metadata.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Jfif, Data = ReadSegment(markerReader) });

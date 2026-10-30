@@ -306,7 +306,7 @@ public class TiffImageDecoderTests
 
     [Theory]
     [InlineData(6)] // Old-style JPEG.
-    [InlineData(8)] // Deflate.
+    [InlineData(7)] // JPEG-in-TIFF.
     public void Decode_UnsupportedCompression_ThrowsUnsupportedFeature(int compression)
     {
         var builder = new TiffFixtureBuilder
