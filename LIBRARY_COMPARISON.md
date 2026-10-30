@@ -311,10 +311,12 @@ on a second thread while the first parses, and deblocking, CDEF and YUV-to-RGB r
 
 | Scenario | PeachImage | libavif | Ratio | PeachImage allocated |
 |---|---:|---:|---:|---:|
-| Photographic, 8-bit 4:2:0 | 44.3 ms | 19.7 ms | **2.25×** | 19.5 MB |
-| Photographic, 8-bit 4:2:0 + alpha | 51.0 ms | 21.8 ms | **2.34×** | 19.4 MB |
-| Photographic, lossless (4:4:4) | 315.0 ms | 134.1 ms | **2.35×** | 35.4 MB |
-| Small image (32×24) | 73.8 µs | 12.9 µs | **5.72×** | 270 KB |
+| Photographic, 8-bit 4:2:0 | 40.0 ms | 19.7 ms | **2.03×** | 19.3 MB |
+| Photographic, 8-bit 4:2:0 + alpha | 46.3 ms | 22.0 ms | **2.11×** | 19.4 MB |
+| Photographic, lossless (4:4:4) | 250.0 ms | 136.8 ms | **1.83×** | 35.6 MB |
+| Photographic, 8-bit 4:2:0 + loop restoration | 63.5 ms | 23.4 ms | **2.71×** | 20.6 MB |
+| Photographic, 10-bit 4:2:0 + loop restoration | 61.0 ms | 42.0 ms | **1.45×** | 28.0 MB |
+| Small image (32×24) | 72.9 µs | 13.1 µs | **5.56×** | 254 KB |
 
 AV1 decode is the format where PeachImage is furthest from a hand-tuned native decoder: dav1d is SIMD-assembly
 throughout. Per-image managed allocation is a PeachImage-only concern (libavif's buffers are unmanaged).
