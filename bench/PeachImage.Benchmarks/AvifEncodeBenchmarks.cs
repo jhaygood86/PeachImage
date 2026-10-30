@@ -1,4 +1,5 @@
 using BenchmarkDotNet.Attributes;
+using PeachImage.Benchmarks.Native;
 using PeachImage.Formats.Avif;
 
 namespace PeachImage.Benchmarks;
@@ -19,6 +20,8 @@ public class AvifEncodeBenchmarks
 {
     private Image _photographic420 = null!;
     private Image _small = null!;
+    private PinnedBytes _nativePhotographic420 = null!;
+    private PinnedBytes _nativeSmall = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -26,23 +29,41 @@ public class AvifEncodeBenchmarks
         string assetsDir = Path.Combine(AppContext.BaseDirectory, "Assets");
         _photographic420 = Decode(Path.Combine(assetsDir, "photo_1920x1080_420.avif"));
         _small = Decode(Path.Combine(assetsDir, "small_32x24.avif"));
+        _nativePhotographic420 = new PinnedBytes(ToRgba(_photographic420));
+        _nativeSmall = new PinnedBytes(ToRgba(_small));
     }
 
-    [Benchmark]
+    [Benchmark(Baseline = true)]
     [BenchmarkCategory("Photographic-420")]
     public MemoryStream PeachImage_Encode_Photographic420() => Encode(_photographic420, Lossy);
 
     [Benchmark]
+    [BenchmarkCategory("Photographic-420")]
+    public int Libavif_Encode_Photographic420() => Libavif.Encode(_nativePhotographic420, 1920, 1080, false, 75, 6);
+
+    [Benchmark(Baseline = true)]
     [BenchmarkCategory("Small-Image")]
     public MemoryStream PeachImage_Encode_Small() => Encode(_small, Lossy);
 
     [Benchmark]
+    [BenchmarkCategory("Small-Image")]
+    public int Libavif_Encode_Small() => Libavif.Encode(_nativeSmall, 32, 24, false, 75, 6);
+
+    [Benchmark(Baseline = true)]
     [BenchmarkCategory("Photographic-Lossless")]
     public MemoryStream PeachImage_Encode_Photographic420_Lossless() => Encode(_photographic420, Lossless);
 
     [Benchmark]
+    [BenchmarkCategory("Photographic-Lossless")]
+    public int Libavif_Encode_Photographic420_Lossless() => Libavif.Encode(_nativePhotographic420, 1920, 1080, true, 75, 6);
+
+    [Benchmark(Baseline = true)]
     [BenchmarkCategory("Small-Image-Lossless")]
     public MemoryStream PeachImage_Encode_Small_Lossless() => Encode(_small, Lossless);
+
+    [Benchmark]
+    [BenchmarkCategory("Small-Image-Lossless")]
+    public int Libavif_Encode_Small_Lossless() => Libavif.Encode(_nativeSmall, 32, 24, true, 75, 6);
 
     [Benchmark]
     [BenchmarkCategory("Photographic-420-Tiles")]
@@ -66,6 +87,12 @@ public class AvifEncodeBenchmarks
 
     private static readonly AvifEncoderOptions Lossy = new();
     private static readonly AvifEncoderOptions Lossless = new() { Lossless = true };
+
+    private static byte[] ToRgba(Image image)
+    {
+        using var rgba = image.ConvertTo(PixelFormat.Rgba32);
+        return rgba.GetPixelSpan().ToArray();
+    }
 
     private static Image Decode(string path)
     {

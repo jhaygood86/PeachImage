@@ -323,14 +323,17 @@ throughout. Per-image managed allocation is a PeachImage-only concern (libavif's
 
 ### Encode (time)
 
-PeachImage only (no libavif encode baseline is collected), default options (4:2:0, quality 75) unless noted.
+Baseline: libavif 1.4.2 with libaom, single-threaded (`maxThreads = 1`, speed 6), from 8-bit RGBA including the RGB-to-YUV
+conversion. Lossy is 4:2:0 at quality 75 for both; lossless is 4:4:4 (libavif: quality 100, identity matrix, full range).
+The two encoders make different rate/quality trade-offs and produce different output sizes, so these are throughput
+comparisons, not equal-output comparisons.
 
-| Scenario | PeachImage | PeachImage allocated |
-|---|---:|---:|
-| Photographic 1080p, lossy | 1,777 ms | 893 MB |
-| Photographic 1080p, lossless | 29.6 s | n/a |
-| Small image (32×24), lossy | 6.64 ms | 1.5 MB |
-| Small image (32×24), lossless | 5.12 ms | 3.4 MB |
+| Scenario | PeachImage | libavif | Ratio | PeachImage allocated |
+|---|---:|---:|---:|---:|
+| Photographic 1080p, lossy | 1,761 ms | 506 ms | **3.48×** | 893 MB |
+| Photographic 1080p, lossless | 29.6 s | 1,016 ms | **29.1×** | n/a |
+| Small image (32×24), lossy | 6.65 ms | 0.753 ms | **8.83×** | 1.5 MB |
+| Small image (32×24), lossless | 5.04 ms | 1.361 ms | **3.71×** | 3.4 MB |
 
 ### Encode (lossless size)
 
