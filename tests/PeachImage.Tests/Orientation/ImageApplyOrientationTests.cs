@@ -229,10 +229,16 @@ public class ImageApplyOrientationTests
             source.ApplyOrientation(orientation, destination);
             source.ApplyOrientationInPlace(orientation);
 
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            source.ApplyOrientation(orientation, destination);
-            source.ApplyOrientationInPlace(orientation);
-            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            // The runtime can charge a few hundred bytes of tiered-JIT bookkeeping to this thread (seen on macOS), so
+            // take the minimum over several runs: a real allocation in the code under test shows up on every run.
+            long allocated = long.MaxValue;
+            for (int attempt = 0; attempt < 5 && allocated != 0; attempt++)
+            {
+                long before = GC.GetAllocatedBytesForCurrentThread();
+                source.ApplyOrientation(orientation, destination);
+                source.ApplyOrientationInPlace(orientation);
+                allocated = Math.Min(allocated, GC.GetAllocatedBytesForCurrentThread() - before);
+            }
 
             Assert.True(allocated == 0, $"{orientation} allocated {allocated} bytes.");
         }
