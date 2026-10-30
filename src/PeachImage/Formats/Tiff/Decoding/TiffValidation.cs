@@ -29,7 +29,7 @@ internal static class TiffValidation
         }
 
         int compression = (int)ifd.GetUInt32(TiffTags.Compression, 1);
-        if (compression is not (1 or 2 or 3 or 4 or 5 or 32773))
+        if (compression is not (1 or 2 or 3 or 4 or 5 or 8 or 32773 or 32946))
         {
             throw new TiffUnsupportedFeatureException($"TIFF compression {compression} ({DescribeCompression(compression)}) is not supported.");
         }
@@ -42,9 +42,9 @@ internal static class TiffValidation
 
         int fillOrder = (int)ifd.GetUInt32(TiffTags.FillOrder, 1);
         bool isFax = compression is 2 or 3 or 4;
-        if (fillOrder != 1 && !(isFax && fillOrder == 2))
+        if (fillOrder is not (1 or 2))
         {
-            throw new TiffUnsupportedFeatureException($"TIFF FillOrder {fillOrder} (LSB-first bit packing) is not supported.");
+            throw new TiffUnsupportedFeatureException($"TIFF FillOrder {fillOrder} is not supported.");
         }
 
         int sampleFormat = (int)ifd.GetUInt32(TiffTags.SampleFormat, 1);

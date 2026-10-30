@@ -9,6 +9,7 @@
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
     <Authors>Justin Haygood</Authors>
     <Company>PeachImage</Company>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

@@ -20,7 +20,7 @@ internal sealed record TiffImageDescriptor
     /// <summary>Raw TIFF Compression tag value: 1 (none), 2 (CCITT RLE), 3 (T.4), 4 (T.6), 5 (LZW), or 32773 (PackBits) — the only values that pass validation.</summary>
     public required int Compression { get; init; }
 
-    /// <summary>Raw TIFF FillOrder: 1 (MSB first) or 2 (LSB first, accepted for CCITT compressions only).</summary>
+    /// <summary>Raw TIFF FillOrder: 1 (MSB first) or 2 (LSB first; strip bytes are bit-reversed before decompression for non-CCITT data).</summary>
     public required int FillOrder { get; init; }
 
     /// <summary>Raw T4Options (Compression 3) or T6Options (Compression 4); zero otherwise.</summary>

@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.IO;
 using System.Buffers.Binary;
 using PeachImage.Formats.Png.Internal;
 
@@ -39,8 +40,11 @@ internal static class PngChunkReader
     /// <summary>Reads a chunk's data payload and validates its trailing CRC32 against the type+data bytes.</summary>
     public static byte[] ReadDataAndValidateCrc(Stream stream, PngChunkHeader header)
     {
-        byte[] data = header.Length == 0 ? [] : new byte[header.Length];
-        ReadExactlyOrThrow(stream, data);
+        if (!BoundedPayloadReader.TryRead(stream, header.Length, out byte[] data))
+        {
+            throw new PngDecodingException("Truncated PNG chunk.");
+        }
+
         ValidateCrc(stream, header.Type, data);
         return data;
     }

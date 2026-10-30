@@ -35,6 +35,9 @@ internal static class GifLzwDecoder
     /// </summary>
     public static void DecodeInto(byte[] imageData, int imageDataLength, int minCodeSize, byte[] output, int pixelCount)
     {
+        // The buffer may be array-pool-rented, so unwritten pixels (truncated or corrupt data) must not keep stale indices.
+        output.AsSpan(0, pixelCount).Clear();
+
         if (minCodeSize is < 2 or > 8 || pixelCount == 0)
         {
             return;
