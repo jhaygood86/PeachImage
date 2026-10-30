@@ -20,6 +20,7 @@ internal static partial class Av1InverseTransform
         n == 0 ? x : Vector256.ShiftRightArithmetic(x + Vector256.Create(1 << (n - 1)), n);
 
     /// <summary>Batched <see cref="B"/> -- <paramref name="angle"/> is identical across all 4 lanes (broadcast, not gathered), since every lane is a different row/column undergoing the exact same butterfly step.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void BBatch8(Span<Vector256<int>> t, int a, int b, int angle, bool flip, int r)
     {
         _ = r;
@@ -39,6 +40,7 @@ internal static partial class Av1InverseTransform
     }
 
     /// <summary>Batched <see cref="H"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void HBatch8(Span<Vector256<int>> t, int a, int b, bool flip, int r)
     {
         if (flip)
