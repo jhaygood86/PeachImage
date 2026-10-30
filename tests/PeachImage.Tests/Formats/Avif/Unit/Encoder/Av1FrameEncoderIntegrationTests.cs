@@ -33,10 +33,10 @@ public class Av1FrameEncoderIntegrationTests
         Assert.Equal(height, encoded.Height);
         Assert.False(encoded.MonoChrome);
 
-        var decoded = Av1FrameDecoder.Decode(encoded.ObuBytes);
+        var decoded = (Av1FrameDecodeResult<byte>)Av1FrameDecoder.Decode(encoded.ObuBytes);
         Assert.True(decoded.BlocksDecoded > 0);
 
-        byte[] decodedRgb = Av1YuvToRgbConverter.Convert(
+        byte[] decodedRgb = Av1YuvToRgbConverter.Convert<byte, byte>(
             decoded.Planes, decoded.PlaneWidths, monoChrome: false,
             subsamplingX: true, subsamplingY: true,
             matrixCoefficients: Av1SequenceHeaderWriter.MatrixCoefficients,
@@ -65,9 +65,9 @@ public class Av1FrameEncoderIntegrationTests
         }
 
         var encoded = Av1FrameEncoder.Encode(rgb, width, height, monoChrome: false, quality: 90);
-        var decoded = Av1FrameDecoder.Decode(encoded.ObuBytes);
+        var decoded = (Av1FrameDecodeResult<byte>)Av1FrameDecoder.Decode(encoded.ObuBytes);
 
-        byte[] decodedRgb = Av1YuvToRgbConverter.Convert(
+        byte[] decodedRgb = Av1YuvToRgbConverter.Convert<byte, byte>(
             decoded.Planes, decoded.PlaneWidths, monoChrome: false,
             subsamplingX: true, subsamplingY: true,
             matrixCoefficients: Av1SequenceHeaderWriter.MatrixCoefficients,
@@ -92,11 +92,11 @@ public class Av1FrameEncoderIntegrationTests
         var encoded = Av1FrameEncoder.Encode(gray, width, height, monoChrome: true, quality: 85);
         Assert.True(encoded.MonoChrome);
 
-        var decoded = Av1FrameDecoder.Decode(encoded.ObuBytes);
+        var decoded = (Av1FrameDecodeResult<byte>)Av1FrameDecoder.Decode(encoded.ObuBytes);
         Assert.True(decoded.Sequence.MonoChrome);
         Assert.True(decoded.BlocksDecoded > 0);
 
-        int[] yPlane = decoded.Planes[0];
+        byte[] yPlane = decoded.Planes[0];
         int stride = decoded.PlaneWidths[0];
 
         long sumSquaredError = 0;

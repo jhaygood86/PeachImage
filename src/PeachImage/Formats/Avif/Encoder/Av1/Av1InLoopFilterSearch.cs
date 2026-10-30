@@ -156,7 +156,7 @@ internal static class Av1InLoopFilterSearch
         return Av1FrameHeaderWriter.Write(scratchWriter, width, height, monoChrome, baseQIdx, lossless: false, loopFilterLevel: level);
     }
 
-    private static Av1FrameDecodeResult BuildDecodeResult(Av1SequenceHeader seq, Av1FrameHeader frame, int[] y, int[]? u, int[]? v, int miCols, int miRows, int width, int height, int chromaWidth, int chromaHeight)
+    private static Av1FrameDecodeResult<int> BuildDecodeResult(Av1SequenceHeader seq, Av1FrameHeader frame, int[] y, int[]? u, int[]? v, int miCols, int miRows, int width, int height, int chromaWidth, int chromaHeight)
     {
         int frameSize = miCols * miRows;
         int chromaMiCols = miCols / 2;
@@ -184,7 +184,7 @@ internal static class Av1InLoopFilterSearch
             loopfilterTxSizes[2] = [];
         }
 
-        return new Av1FrameDecodeResult
+        return new Av1FrameDecodeResult<int>
         {
             Sequence = seq,
             Frame = frame,

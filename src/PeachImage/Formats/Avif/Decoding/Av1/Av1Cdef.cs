@@ -1,19 +1,24 @@
 using System.Buffers;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Threading.Tasks;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
 /// <summary>
 /// CDEF (constrained directional enhancement filter, spec §7.15): direction search per 8x8 luma block
-/// followed by primary/secondary directional filtering. Reads from <see cref="Av1FrameDecodeResult.Planes"/>
+/// followed by primary/secondary directional filtering. Reads from <see cref="Av1FrameDecodeResult{TPixel}.Planes"/>
 /// (the deblocked <c>CurrFrame</c>) and writes into freshly-allocated <c>CdefFrame</c> buffers (a copy of
-/// the input, selectively overwritten), which then replace <see cref="Av1FrameDecodeResult.Planes"/> --
+/// the input, selectively overwritten), which then replace <see cref="Av1FrameDecodeResult{TPixel}.Planes"/> --
 /// matching the spec's own read-from-CurrFrame / write-to-CdefFrame separation, which exists precisely so
 /// that filtering one 8x8 block never sees another 8x8 block's already-filtered output.
 /// </summary>
 internal static class Av1Cdef
 {
+    /// <summary>Frames with fewer 8-row strips than this are filtered on the calling thread.</summary>
+    private const int ParallelMinStrips = 32;
+
     private static readonly int[] DivTable = [0, 840, 420, 280, 210, 168, 140, 120, 105];
 
     /// <summary><c>Cdef_Uv_Dir</c> (spec §7.15.1), indexed <c>[subsampling_x][subsampling_y][yDir]</c>.</summary>
@@ -38,7 +43,8 @@ internal static class Av1Cdef
     private static readonly int[][] CdefPriTaps = [[4, 2], [3, 3]];
     private static readonly int[][] CdefSecTaps = [[2, 1], [2, 1]];
 
-    public static void Apply(Av1FrameDecodeResult result)
+    public static void Apply<TPixel>(Av1FrameDecodeResult<TPixel> result)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var seq = result.Sequence;
         var frame = result.Frame;
@@ -56,28 +62,35 @@ internal static class Av1Cdef
         // -- and unlike `new int[]`, ArrayPool.Rent does NOT zero that padding. A downstream consumer
         // (Av1TileComposer.CopyRegion's mismatched-tile-size clamp) can legitimately read into it for an
         // undersized/reused tile item, so it's cleared explicitly here to match `new int[]`'s guarantee.
-        var cdefPlanes = new int[3][];
+        var cdefPlanes = new TPixel[3][];
         for (int plane = 0; plane < seq.NumPlanes; plane++)
         {
             int length = result.PlaneWidths[plane] * result.PlaneHeights[plane];
-            cdefPlanes[plane] = ArrayPool<int>.Shared.Rent(length);
-            Array.Clear(cdefPlanes[plane], 0, length);
+            cdefPlanes[plane] = ArrayPool<TPixel>.Shared.Rent(length);
+            ClearPadding(cdefPlanes[plane], result, seq, frame, plane);
         }
-
-        var state = new State(result, cdefPlanes);
 
         int step4 = Av1BlockTables.Num4x4BlocksWide[Av1BlockSize.Block8x8];
         int cdefSize4 = Av1BlockTables.Num4x4BlocksWide[Av1BlockSize.Block64x64];
         int cdefMask4 = ~(cdefSize4 - 1);
 
-        for (int r = 0; r < frame.MiRows; r += step4)
+        // Each 8-luma-row strip reads only the (immutable) deblocked planes and writes only its own rows of
+        // the output planes, so strips run independently; the per-strip State carries the availability flag.
+        int strips = (frame.MiRows + step4 - 1) / step4;
+        if (strips >= ParallelMinStrips && Environment.ProcessorCount > 1)
         {
-            for (int c = 0; c < frame.MiCols; c += step4)
+            Parallel.For(0, strips, () => new State<TPixel>(result, cdefPlanes), (strip, _, state) =>
             {
-                int baseR = r & cdefMask4;
-                int baseC = c & cdefMask4;
-                int idx = result.CdefIdx[(baseR * frame.MiCols) + baseC];
-                CdefBlock(state, r, c, idx);
+                CdefStrip(result, state, cdefPlanes, strip * step4, step4, cdefMask4);
+                return state;
+            }, static _ => { });
+        }
+        else
+        {
+            var state = new State<TPixel>(result, cdefPlanes);
+            for (int strip = 0; strip < strips; strip++)
+            {
+                CdefStrip(result, state, cdefPlanes, strip * step4, step4, cdefMask4);
             }
         }
 
@@ -87,59 +100,43 @@ internal static class Av1Cdef
         // and nothing else in the pipeline retains a separate reference to it.
         for (int plane = 0; plane < seq.NumPlanes; plane++)
         {
-            ArrayPool<int>.Shared.Return(result.Planes[plane]);
+            ArrayPool<TPixel>.Shared.Return(result.Planes[plane]);
             result.Planes[plane] = cdefPlanes[plane];
         }
     }
 
-    private sealed class State(Av1FrameDecodeResult result, int[][] cdefPlanes)
+    private static void CdefStrip<TPixel>(Av1FrameDecodeResult<TPixel> result, State<TPixel> state, TPixel[][] cdefPlanes, int r, int step4, int cdefMask4)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
-        public Av1FrameDecodeResult Result { get; } = result;
+        var frame = result.Frame;
+        CopyStrip(result, cdefPlanes, result.Sequence, r, frame.MiCols);
 
-        public int[][] CdefPlanes { get; } = cdefPlanes;
-
-        public bool CdefAvailable { get; set; }
-
-        // Reusable CDEF-direction-search scratch (spec's cost[8]/partial[8][15]), cleared and reused for
-        // every 8x8 block in the frame instead of allocating fresh each call -- this is called once per
-        // non-skip block (tens of thousands per 1080p frame), so freshly allocating 10 small arrays per
-        // call was a real, measured allocation hot spot.
-        public readonly long[] Cost = new long[8];
-        public readonly long[][] Partial = CreatePartial();
-
-        private static long[][] CreatePartial()
+        for (int c = 0; c < frame.MiCols; c += step4)
         {
-            var partial = new long[8][];
-            for (int i = 0; i < 8; i++)
-            {
-                partial[i] = new long[15];
-            }
-
-            return partial;
+            int baseR = r & cdefMask4;
+            int baseC = c & cdefMask4;
+            int idx = result.CdefIdx[(baseR * frame.MiCols) + baseC];
+            CdefBlock(state, r, c, idx);
         }
     }
 
+    private sealed class State<TPixel>(Av1FrameDecodeResult<TPixel> result, TPixel[][] cdefPlanes)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
+    {
+        public Av1FrameDecodeResult<TPixel> Result { get; } = result;
+
+        public TPixel[][] CdefPlanes { get; } = cdefPlanes;
+
+        public bool CdefAvailable { get; set; }
+    }
+
     /// <summary><c>CDEF block process</c> (spec §7.15.1).</summary>
-    private static void CdefBlock(State state, int r, int c, int idx)
+    private static void CdefBlock<TPixel>(State<TPixel> state, int r, int c, int idx)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var result = state.Result;
         var seq = result.Sequence;
         var frame = result.Frame;
-
-        int startY = r * 4;
-        int endY = startY + 8;
-        int startX = c * 4;
-        int endX = startX + 8;
-
-        CopyBlock(result.Planes[0], state.CdefPlanes[0], result.PlaneWidths[0], startX, startY, endX, endY);
-
-        if (seq.NumPlanes > 1)
-        {
-            int subX = seq.SubsamplingX ? 1 : 0;
-            int subY = seq.SubsamplingY ? 1 : 0;
-            CopyBlock(result.Planes[1], state.CdefPlanes[1], result.PlaneWidths[1], startX >> subX, startY >> subY, endX >> subX, endY >> subY);
-            CopyBlock(result.Planes[2], state.CdefPlanes[2], result.PlaneWidths[2], startX >> subX, startY >> subY, endX >> subX, endY >> subY);
-        }
 
         if (idx == -1)
         {
@@ -158,7 +155,15 @@ internal static class Av1Cdef
             return;
         }
 
-        var (yDir, var) = CdefDirection(state, r, c);
+        // The direction (and variance) only steer the primary taps, so a block whose luma and chroma
+        // primary strengths are both zero never needs the search: dir stays 0 and the adjusted priStr stays 0.
+        bool needDirection = frame.Cdef.YPriStrength[idx] != 0 || (seq.NumPlanes > 1 && frame.Cdef.UvPriStrength[idx] != 0);
+        int yDir = 0;
+        int var = 0;
+        if (needDirection)
+        {
+            (yDir, var) = CdefDirection(state, r, c);
+        }
 
         int priStr = frame.Cdef.YPriStrength[idx] << coeffShift;
         int secStr = frame.Cdef.YSecStrength[idx] << coeffShift;
@@ -167,7 +172,12 @@ internal static class Av1Cdef
         priStr = var != 0 ? (((priStr * (4 + varStr)) + 8) >> 4) : 0;
         int damping = frame.Cdef.Damping + coeffShift;
 
-        CdefFilter(state, 0, r, c, priStr, secStr, damping, dir);
+        // With both strengths zero every constrained tap is 0, so the output is the unchanged center
+        // sample, which the strip copy already wrote.
+        if (priStr != 0 || secStr != 0)
+        {
+            CdefFilter(state, 0, r, c, priStr, secStr, damping, dir);
+        }
 
         if (seq.NumPlanes == 1)
         {
@@ -179,64 +189,105 @@ internal static class Av1Cdef
         dir = priStr == 0 ? 0 : CdefUvDir[seq.SubsamplingX ? 1 : 0][seq.SubsamplingY ? 1 : 0][yDir];
         damping = frame.Cdef.Damping + coeffShift - 1;
 
-        CdefFilter(state, 1, r, c, priStr, secStr, damping, dir);
-        CdefFilter(state, 2, r, c, priStr, secStr, damping, dir);
+        if (priStr != 0 || secStr != 0)
+        {
+            CdefFilter(state, 1, r, c, priStr, secStr, damping, dir);
+            CdefFilter(state, 2, r, c, priStr, secStr, damping, dir);
+        }
     }
 
-    private static void CopyBlock(int[] src, int[] dst, int stride, int startX, int startY, int endX, int endY)
+    /// <summary>
+    /// Zeroes the part of a rented output plane that <see cref="CopyStrip"/> will not overwrite: the columns
+    /// right of the copied width in each copied row, and every row below the last strip.
+    /// </summary>
+    private static void ClearPadding<TPixel>(TPixel[] plane, Av1FrameDecodeResult<TPixel> result, Av1SequenceHeader seq, Av1FrameHeader frame, int planeIndex)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
-        for (int y = startY; y < endY; y++)
+        int subX = planeIndex > 0 && seq.SubsamplingX ? 1 : 0;
+        int subY = planeIndex > 0 && seq.SubsamplingY ? 1 : 0;
+        int stride = result.PlaneWidths[planeIndex];
+        int height = result.PlaneHeights[planeIndex];
+        int copiedWidth = (((frame.MiCols + 1) & ~1) * 4) >> subX;
+
+        // CopyStrip covers rows [0, last strip end), where strips start at even mi rows and span 8 luma rows.
+        int lastStripStartMi = ((frame.MiRows - 1) / 2) * 2;
+        int stripEnd = Math.Min(height, ((lastStripStartMi * 4) + 8) >> subY);
+
+        for (int y = 0; y < stripEnd; y++)
         {
-            for (int x = startX; x < endX; x++)
+            plane.AsSpan((y * stride) + copiedWidth, stride - copiedWidth).Clear();
+        }
+
+        plane.AsSpan(stripEnd * stride, (height - stripEnd) * stride).Clear();
+    }
+
+    /// <summary>
+    /// Seeds the output planes with the deblocked samples for the 8-luma-row strip starting at mi row
+    /// <paramref name="r"/>: exactly the union of the per-8x8-block regions (columns up to MiCols rounded up to
+    /// an even count of 4-sample units) the spec's per-block copy covers, but as one contiguous copy per row.
+    /// </summary>
+    private static void CopyStrip<TPixel>(Av1FrameDecodeResult<TPixel> result, TPixel[][] cdefPlanes, Av1SequenceHeader seq, int r, int miCols)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
+    {
+        int widthLuma = ((miCols + 1) & ~1) * 4;
+        for (int plane = 0; plane < seq.NumPlanes; plane++)
+        {
+            int subX = plane > 0 && seq.SubsamplingX ? 1 : 0;
+            int subY = plane > 0 && seq.SubsamplingY ? 1 : 0;
+            int stride = result.PlaneWidths[plane];
+            int startY = (r * 4) >> subY;
+            int endY = ((r * 4) + 8) >> subY;
+            int width = widthLuma >> subX;
+            for (int y = startY; y < endY; y++)
             {
-                int idx = (y * stride) + x;
-                dst[idx] = src[idx];
+                result.Planes[plane].AsSpan(y * stride, width).CopyTo(cdefPlanes[plane].AsSpan(y * stride, width));
             }
         }
     }
 
     /// <summary><c>CDEF direction process</c> (spec §7.15.2).</summary>
-    private static (int YDir, int Var) CdefDirection(State state, int r, int c)
+    [SkipLocalsInit]
+    private static (int YDir, int Var) CdefDirection<TPixel>(State<TPixel> state, int r, int c)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var result = state.Result;
-        var cost = state.Cost;
-        var partial = state.Partial;
-        Array.Clear(cost);
-        for (int i = 0; i < 8; i++)
-        {
-            Array.Clear(partial[i]);
-        }
 
-        long bestCost = 0;
-        int yDir = 0;
+        // partial[d][k] of the spec flattened to d * 16 + k (15 used per direction). Sample sums are tiny
+        // (64 samples of magnitude <= 128), so int is exact; only the squared costs need 64 bits.
+        Span<int> partial = stackalloc int[8 * 16];
+        partial.Clear();
 
         var luma = result.Planes[0];
         int stride = result.PlaneWidths[0];
-        int bitDepth = result.Sequence.BitDepth;
+        int shift = result.Sequence.BitDepth - 8;
 
         int x0 = c * 4;
         int y0 = r * 4;
 
         for (int i = 0; i < 8; i++)
         {
+            int rowBase = ((y0 + i) * stride) + x0;
             for (int j = 0; j < 8; j++)
             {
-                int x = (luma[((y0 + i) * stride) + x0 + j] >> (bitDepth - 8)) - 128;
-                partial[0][i + j] += x;
-                partial[1][i + (j / 2)] += x;
-                partial[2][i] += x;
-                partial[3][3 + i - (j / 2)] += x;
-                partial[4][7 + i - j] += x;
-                partial[5][3 - (i / 2) + j] += x;
-                partial[6][j] += x;
-                partial[7][(i / 2) + j] += x;
+                int x = (int.CreateTruncating(luma[rowBase + j]) >> shift) - 128;
+                partial[i + j] += x;
+                partial[16 + i + (j >> 1)] += x;
+                partial[32 + i] += x;
+                partial[48 + 3 + i - (j >> 1)] += x;
+                partial[64 + 7 + i - j] += x;
+                partial[80 + 3 - (i >> 1) + j] += x;
+                partial[96 + j] += x;
+                partial[112 + (i >> 1) + j] += x;
             }
         }
 
+        Span<long> cost = stackalloc long[8];
+        cost.Clear();
+
         for (int i = 0; i < 8; i++)
         {
-            cost[2] += partial[2][i] * partial[2][i];
-            cost[6] += partial[6][i] * partial[6][i];
+            cost[2] += (long)partial[32 + i] * partial[32 + i];
+            cost[6] += (long)partial[96 + i] * partial[96 + i];
         }
 
         cost[2] *= DivTable[8];
@@ -244,28 +295,31 @@ internal static class Av1Cdef
 
         for (int i = 0; i < 7; i++)
         {
-            cost[0] += ((partial[0][i] * partial[0][i]) + (partial[0][14 - i] * partial[0][14 - i])) * DivTable[i + 1];
-            cost[4] += ((partial[4][i] * partial[4][i]) + (partial[4][14 - i] * partial[4][14 - i])) * DivTable[i + 1];
+            cost[0] += (((long)partial[i] * partial[i]) + ((long)partial[14 - i] * partial[14 - i])) * DivTable[i + 1];
+            cost[4] += (((long)partial[64 + i] * partial[64 + i]) + ((long)partial[64 + 14 - i] * partial[64 + 14 - i])) * DivTable[i + 1];
         }
 
-        cost[0] += partial[0][7] * partial[0][7] * DivTable[8];
-        cost[4] += partial[4][7] * partial[4][7] * DivTable[8];
+        cost[0] += (long)partial[7] * partial[7] * DivTable[8];
+        cost[4] += (long)partial[64 + 7] * partial[64 + 7] * DivTable[8];
 
         for (int i = 1; i < 8; i += 2)
         {
+            int pb = i * 16;
             for (int j = 0; j < 5; j++)
             {
-                cost[i] += partial[i][3 + j] * partial[i][3 + j];
+                cost[i] += (long)partial[pb + 3 + j] * partial[pb + 3 + j];
             }
 
             cost[i] *= DivTable[8];
 
             for (int j = 0; j < 3; j++)
             {
-                cost[i] += ((partial[i][j] * partial[i][j]) + (partial[i][10 - j] * partial[i][10 - j])) * DivTable[(2 * j) + 2];
+                cost[i] += (((long)partial[pb + j] * partial[pb + j]) + ((long)partial[pb + 10 - j] * partial[pb + 10 - j])) * DivTable[(2 * j) + 2];
             }
         }
 
+        long bestCost = 0;
+        int yDir = 0;
         for (int i = 0; i < 8; i++)
         {
             if (cost[i] > bestCost)
@@ -280,7 +334,8 @@ internal static class Av1Cdef
     }
 
     /// <summary><c>CDEF filter process</c> (spec §7.15.3).</summary>
-    private static void CdefFilter(State state, int plane, int r, int c, int priStr, int secStr, int damping, int dir)
+    private static void CdefFilter<TPixel>(State<TPixel> state, int plane, int r, int c, int priStr, int secStr, int damping, int dir)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var result = state.Result;
         var seq = result.Sequence;
@@ -369,7 +424,7 @@ internal static class Av1Cdef
             for (int j = 0; j < w; j++)
             {
                 int x = x0 + j;
-                int center = currPlane[(y * stride) + x];
+                int center = int.CreateTruncating(currPlane[(y * stride) + x]);
                 long sum = 0;
                 int max = center;
                 int min = center;
@@ -419,7 +474,7 @@ internal static class Av1Cdef
                 }
 
                 int result8 = center + (int)((8 + sum - (sum < 0 ? 1 : 0)) >> 4);
-                cdefPlane[(y * stride) + x] = Math.Clamp(result8, min, max);
+                cdefPlane[(y * stride) + x] = TPixel.CreateTruncating(Math.Clamp(result8, min, max));
             }
         }
     }
@@ -429,13 +484,14 @@ internal static class Av1Cdef
     /// samples) at a time.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void CdefFilterRow256(
-        int[] currPlane, int[] cdefPlane, int stride, int x0, int y,
+    private static void CdefFilterRow256<TPixel>(
+        TPixel[] currPlane, TPixel[] cdefPlane, int stride, int x0, int y,
         int priTap0, int priTap1, int secTap0, int secTap1, int priStr, int secStr, int priDampingAdj, int secDampingAdj,
         int pDy0, int pDx0, int pDy1, int pDx1, int aDy0, int aDx0, int aDy1, int aDx1, int bDy0, int bDx0, int bDy1, int bDx1)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         int rowBase = (y * stride) + x0;
-        var center = Vector256.LoadUnsafe(ref currPlane[rowBase]);
+        var center = Av1PixelVector.Load8(ref currPlane[rowBase]);
         var sum = Vector256<int>.Zero;
         var max = center;
         var min = center;
@@ -459,13 +515,14 @@ internal static class Av1Cdef
         var rounded = (Vector256.Create(8) + adjusted) >> 4;
         var resultVal = center + rounded;
         var clamped = Vector256.Min(Vector256.Max(resultVal, min), max);
-        clamped.StoreUnsafe(ref cdefPlane[rowBase]);
+        Av1PixelVector.Store8(clamped, ref cdefPlane[rowBase]);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void AccumVec256(int[] plane, int stride, int rowBase, int dy, int dx, int tap, int threshold, int dampingAdj, Vector256<int> center, ref Vector256<int> sum, ref Vector256<int> max, ref Vector256<int> min)
+    private static void AccumVec256<TPixel>(TPixel[] plane, int stride, int rowBase, int dy, int dx, int tap, int threshold, int dampingAdj, Vector256<int> center, ref Vector256<int> sum, ref Vector256<int> max, ref Vector256<int> min)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
-        var p = Vector256.LoadUnsafe(ref plane[rowBase + (dy * stride) + dx]);
+        var p = Av1PixelVector.Load8(ref plane[rowBase + (dy * stride) + dx]);
         var diff = p - center;
         var absDiff = Vector256.Abs(diff);
         // constrain(diff, threshold, damping): sign * Clip3(0, absDiff, threshold - (absDiff >> dampingAdj))
@@ -481,13 +538,14 @@ internal static class Av1Cdef
 
     /// <summary>Same as <see cref="CdefFilterRow256"/>, for the 4-wide (subsampled chroma) block width.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void CdefFilterRow128(
-        int[] currPlane, int[] cdefPlane, int stride, int x0, int y,
+    private static void CdefFilterRow128<TPixel>(
+        TPixel[] currPlane, TPixel[] cdefPlane, int stride, int x0, int y,
         int priTap0, int priTap1, int secTap0, int secTap1, int priStr, int secStr, int priDampingAdj, int secDampingAdj,
         int pDy0, int pDx0, int pDy1, int pDx1, int aDy0, int aDx0, int aDy1, int aDx1, int bDy0, int bDx0, int bDy1, int bDx1)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         int rowBase = (y * stride) + x0;
-        var center = Vector128.LoadUnsafe(ref currPlane[rowBase]);
+        var center = Av1PixelVector.Load4(ref currPlane[rowBase]);
         var sum = Vector128<int>.Zero;
         var max = center;
         var min = center;
@@ -511,13 +569,14 @@ internal static class Av1Cdef
         var rounded = (Vector128.Create(8) + adjusted) >> 4;
         var resultVal = center + rounded;
         var clamped = Vector128.Min(Vector128.Max(resultVal, min), max);
-        clamped.StoreUnsafe(ref cdefPlane[rowBase]);
+        Av1PixelVector.Store4(clamped, ref cdefPlane[rowBase]);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void AccumVec128(int[] plane, int stride, int rowBase, int dy, int dx, int tap, int threshold, int dampingAdj, Vector128<int> center, ref Vector128<int> sum, ref Vector128<int> max, ref Vector128<int> min)
+    private static void AccumVec128<TPixel>(TPixel[] plane, int stride, int rowBase, int dy, int dx, int tap, int threshold, int dampingAdj, Vector128<int> center, ref Vector128<int> sum, ref Vector128<int> max, ref Vector128<int> min)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
-        var p = Vector128.LoadUnsafe(ref plane[rowBase + (dy * stride) + dx]);
+        var p = Av1PixelVector.Load4(ref plane[rowBase + (dy * stride) + dx]);
         var diff = p - center;
         var absDiff = Vector128.Abs(diff);
         // constrain(diff, threshold, damping): sign * Clip3(0, absDiff, threshold - (absDiff >> dampingAdj))
@@ -532,9 +591,10 @@ internal static class Av1Cdef
 
     /// <summary>Reads one CDEF tap and folds it into the running sum/max/min.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Accum(int[] plane, int stride, int y, int x, int dy, int dx, int tap, int strength, int dampingAdj, int center, ref long sum, ref int max, ref int min)
+    private static void Accum<TPixel>(TPixel[] plane, int stride, int y, int x, int dy, int dx, int tap, int strength, int dampingAdj, int center, ref long sum, ref int max, ref int min)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
-        int p = plane[((y + dy) * stride) + x + dx];
+        int p = int.CreateTruncating(plane[((y + dy) * stride) + x + dx]);
         sum += tap * ConstrainFast(p - center, strength, dampingAdj);
         if (p > max)
         {
@@ -572,7 +632,8 @@ internal static class Av1Cdef
     }
 
     /// <summary><c>cdef_get_at</c> (spec §7.15.3), reading from the deblocked <c>CurrFrame</c> (not the being-written <c>CdefFrame</c>).</summary>
-    private static int CdefGetAt(State state, int plane, int x0, int y0, int i, int j, int dir, int k, int sign, int subX, int subY)
+    private static int CdefGetAt<TPixel>(State<TPixel> state, int plane, int x0, int y0, int i, int j, int dir, int k, int sign, int subX, int subY)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var result = state.Result;
         var frame = result.Frame;
@@ -586,7 +647,7 @@ internal static class Av1Cdef
         if (candidateC >= 0 && candidateC < frame.MiCols && candidateR >= 0 && candidateR < frame.MiRows)
         {
             state.CdefAvailable = true;
-            return result.Planes[plane][(y * result.PlaneWidths[plane]) + x];
+            return int.CreateTruncating(result.Planes[plane][(y * result.PlaneWidths[plane]) + x]);
         }
 
         state.CdefAvailable = false;

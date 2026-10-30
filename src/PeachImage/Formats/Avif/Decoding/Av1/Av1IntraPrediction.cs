@@ -1,3 +1,4 @@
+using System.Numerics;
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
 /// <summary>
@@ -136,10 +137,10 @@ internal static class Av1IntraPrediction
     /// across every transform block in a tile rather than allocated per call -- this runs once per
     /// transform block (tens of thousands per frame), so it was a real, measured allocation hot spot.
     /// </summary>
-    public static void BuildEdges(
+    public static void BuildEdges<TPixel>(
         Av1EdgeArray above,
         Av1EdgeArray left,
-        int[] plane,
+        TPixel[] plane,
         int planeStride,
         int x,
         int y,
@@ -152,10 +153,11 @@ internal static class Av1IntraPrediction
         int maxX,
         int maxY,
         int bitDepth)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         if (!haveAbove && haveLeft)
         {
-            int v = plane[(y * planeStride) + x - 1];
+            int v = int.CreateTruncating(plane[(y * planeStride) + x - 1]);
             for (int i = 0; i < w + h; i++)
             {
                 above[i] = v;
@@ -174,13 +176,13 @@ internal static class Av1IntraPrediction
             int aboveLimit = Math.Min(maxX, x + (haveAboveRight ? 2 * w : w) - 1);
             for (int i = 0; i < w + h; i++)
             {
-                above[i] = plane[((y - 1) * planeStride) + Math.Min(aboveLimit, x + i)];
+                above[i] = int.CreateTruncating(plane[((y - 1) * planeStride) + Math.Min(aboveLimit, x + i)]);
             }
         }
 
         if (!haveLeft && haveAbove)
         {
-            int v = plane[((y - 1) * planeStride) + x];
+            int v = int.CreateTruncating(plane[((y - 1) * planeStride) + x]);
             for (int i = 0; i < w + h; i++)
             {
                 left[i] = v;
@@ -199,22 +201,22 @@ internal static class Av1IntraPrediction
             int leftLimit = Math.Min(maxY, y + (haveBelowLeft ? 2 * h : h) - 1);
             for (int i = 0; i < w + h; i++)
             {
-                left[i] = plane[(Math.Min(leftLimit, y + i) * planeStride) + x - 1];
+                left[i] = int.CreateTruncating(plane[(Math.Min(leftLimit, y + i) * planeStride) + x - 1]);
             }
         }
 
         int corner;
         if (haveAbove && haveLeft)
         {
-            corner = plane[((y - 1) * planeStride) + x - 1];
+            corner = int.CreateTruncating(plane[((y - 1) * planeStride) + x - 1]);
         }
         else if (haveAbove)
         {
-            corner = plane[((y - 1) * planeStride) + x];
+            corner = int.CreateTruncating(plane[((y - 1) * planeStride) + x]);
         }
         else if (haveLeft)
         {
-            corner = plane[(y * planeStride) + x - 1];
+            corner = int.CreateTruncating(plane[(y * planeStride) + x - 1]);
         }
         else
         {
@@ -259,7 +261,7 @@ internal static class Av1IntraPrediction
         }
         else if (Av1IntraMode.IsDirectional(mode))
         {
-            PredictDirectional(pred, w, h, aboveRow, leftCol, mode, angleDelta, haveLeft, haveAbove, enableIntraEdgeFilter, filterTypeSmooth, maxX, maxY, x, y);
+            PredictDirectional(pred, w, h, aboveRow, leftCol, mode, angleDelta, haveLeft, haveAbove, enableIntraEdgeFilter, filterTypeSmooth, maxX, maxY, x, y, bitDepth);
         }
         else if (mode is Av1IntraMode.SmoothPred or Av1IntraMode.SmoothVPred or Av1IntraMode.SmoothHPred)
         {
@@ -465,7 +467,8 @@ internal static class Av1IntraPrediction
         int maxX,
         int maxY,
         int x,
-        int y)
+        int y,
+        int bitDepth)
     {
         const int angleStep = 3;
         int pAngle = ModeToAngle[mode] + (angleDelta * angleStep);
@@ -502,14 +505,14 @@ internal static class Av1IntraPrediction
             int numPxAbove = w + (pAngle < 90 ? h : 0);
             if (upsampleAbove == 1)
             {
-                EdgeUpsample(aboveRow, numPxAbove);
+                EdgeUpsample(aboveRow, numPxAbove, bitDepth);
             }
 
             upsampleLeft = EdgeUpsampleSelect(w, h, filterType, pAngle - 180) ? 1 : 0;
             int numPxLeft = h + (pAngle > 180 ? w : 0);
             if (upsampleLeft == 1)
             {
-                EdgeUpsample(leftCol, numPxLeft);
+                EdgeUpsample(leftCol, numPxLeft, bitDepth);
             }
         }
 
@@ -735,7 +738,7 @@ internal static class Av1IntraPrediction
     }
 
     /// <summary><c>Intra edge upsample process</c> (spec §7.11.2.11).</summary>
-    private static void EdgeUpsample(Av1EdgeArray buf, int numPx)
+    private static void EdgeUpsample(Av1EdgeArray buf, int numPx, int bitDepth)
     {
         // numPx maxes out around w+h (largest transform side sum, 128), so this is always well within a
         // safe stackalloc bound.
@@ -752,7 +755,7 @@ internal static class Av1IntraPrediction
         for (int i = 0; i < numPx; i++)
         {
             int s = -dup[i] + (9 * dup[i + 1]) + (9 * dup[i + 2]) - dup[i + 3];
-            s = Round2(s, 4);
+            s = Clip1(Round2(s, 4), bitDepth);
             buf[(2 * i) - 1] = s;
             buf[2 * i] = dup[i + 2];
         }
@@ -792,10 +795,10 @@ internal static class Av1IntraPrediction
     /// contain the DC-predicted chroma samples at <paramref name="startX"/>/<paramref name="startY"/> (per
     /// <c>predict_intra</c>'s own DC-with-<c>UV_CFL_PRED</c>-mapped-to-<c>DC_PRED</c> call preceding this).
     /// </summary>
-    public static void PredictChromaFromLuma(
-        int[] chromaPlane,
+    public static void PredictChromaFromLuma<TPixel>(
+        TPixel[] chromaPlane,
         int chromaStride,
-        int[] lumaPlane,
+        TPixel[] lumaPlane,
         int lumaStride,
         int startX,
         int startY,
@@ -809,6 +812,7 @@ internal static class Av1IntraPrediction
         int maxLumaW,
         int maxLumaH,
         int bitDepth)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         // h*w maxes out at 32*32 (the largest chroma transform size) = 4KB, a safe stackalloc bound.
         Span<int> l = stackalloc int[h * w];
@@ -828,7 +832,7 @@ internal static class Av1IntraPrediction
                 {
                     for (int dx = 0; dx <= subX; dx++)
                     {
-                        t += lumaPlane[((lumaY + dy) * lumaStride) + lumaX + dx];
+                        t += int.CreateTruncating(lumaPlane[((lumaY + dy) * lumaStride) + lumaX + dx]);
                     }
                 }
 
@@ -844,9 +848,9 @@ internal static class Av1IntraPrediction
         {
             for (int j = 0; j < w; j++)
             {
-                int dc = chromaPlane[((startY + i) * chromaStride) + startX + j];
+                int dc = int.CreateTruncating(chromaPlane[((startY + i) * chromaStride) + startX + j]);
                 int scaledLuma = Round2Signed((long)alpha * (l[(i * w) + j] - lumaAvg), 6);
-                chromaPlane[((startY + i) * chromaStride) + startX + j] = Clip1(dc + scaledLuma, bitDepth);
+                chromaPlane[((startY + i) * chromaStride) + startX + j] = TPixel.CreateTruncating(Clip1(dc + scaledLuma, bitDepth));
             }
         }
     }

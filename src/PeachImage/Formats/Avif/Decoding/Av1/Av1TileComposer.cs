@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Numerics;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -12,18 +13,33 @@ namespace PeachImage.Formats.Avif.Decoding.Av1;
 /// </summary>
 internal static class Av1TileComposer
 {
-    public sealed class CompositedFrame
+    public abstract class CompositedFrame
     {
-        public required int[][] Planes { get; init; }
-
         public required int[] Widths { get; init; }
 
         public required int[] Heights { get; init; }
 
         public required Av1SequenceHeader Sequence { get; init; }
 
-        /// <summary>How many of <see cref="Planes"/>' three slots are actually populated (1 for monochrome, 3 otherwise) -- needed by <see cref="ReturnPlanes"/> since the unused slots were never rented and must not be returned.</summary>
+        /// <summary>How many of the planes' three slots are actually populated (1 for monochrome, 3 otherwise) -- needed by <see cref="ReturnPlanes"/> since the unused slots were never rented and must not be returned.</summary>
         public required int NumPlanes { get; init; }
+
+        /// <summary>Returns the pool-rented planes once the caller is done reading them (after YUV conversion).</summary>
+        public abstract void ReturnPlanes();
+    }
+
+    public sealed class CompositedFrame<TPixel> : CompositedFrame
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
+    {
+        public required TPixel[][] Planes { get; init; }
+
+        public override void ReturnPlanes()
+        {
+            for (int plane = 0; plane < NumPlanes; plane++)
+            {
+                ArrayPool<TPixel>.Shared.Return(Planes[plane]);
+            }
+        }
     }
 
     public static CompositedFrame Composite(IReadOnlyList<byte[]> tiles, int gridRows, int gridColumns, int outWidth, int outHeight)
@@ -34,6 +50,16 @@ internal static class Av1TileComposer
             frames[i] = Av1FrameDecoder.Decode(tiles[i]);
         }
 
+        // The composited canvas uses the first tile's sample type; a tile of another bit depth (legal to
+        // decode, if odd in a grid) is converted value-for-value as it is copied in.
+        return frames[0].Sequence.BitDepth == 8
+            ? CompositeCore<byte>(frames, gridRows, gridColumns, outWidth, outHeight)
+            : CompositeCore<ushort>(frames, gridRows, gridColumns, outWidth, outHeight);
+    }
+
+    private static CompositedFrame<TPixel> CompositeCore<TPixel>(Av1FrameDecodeResult[] frames, int gridRows, int gridColumns, int outWidth, int outHeight)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
+    {
         var seq = frames[0].Sequence;
         int numPlanes = seq.MonoChrome ? 1 : 3;
 
@@ -48,7 +74,7 @@ internal static class Av1TileComposer
         // common single-tile case that's cheap to rule out upfront (copyW/copyH are already known before
         // the copy runs), skipping a multi-megabyte clear entirely when the tile's own dimensions already
         // cover the whole output.
-        var outPlanes = new int[3][];
+        var outPlanes = new TPixel[3][];
         var outWidths = new int[3];
         var outHeights = new int[3];
         bool singleTile = gridRows == 1 && gridColumns == 1;
@@ -59,7 +85,7 @@ internal static class Av1TileComposer
             outWidths[plane] = (outWidth + subX) >> subX;
             outHeights[plane] = (outHeight + subY) >> subY;
             int length = outWidths[plane] * outHeights[plane];
-            outPlanes[plane] = ArrayPool<int>.Shared.Rent(length);
+            outPlanes[plane] = ArrayPool<TPixel>.Shared.Rent(length);
 
             bool fullyCovered = singleTile
                 && frames[0].PlaneWidths[plane] >= outWidths[plane]
@@ -77,7 +103,7 @@ internal static class Av1TileComposer
             {
                 int copyW = Math.Min(outWidths[plane], single.PlaneWidths[plane]);
                 int copyH = Math.Min(outHeights[plane], single.PlaneHeights[plane]);
-                CopyRegion(single.Planes[plane], single.PlaneWidths[plane], single.PlaneHeights[plane], outPlanes[plane], outWidths[plane], outHeights[plane], 0, 0, copyW, copyH);
+                CopyRegion(single.GetPlane(plane), single.PlaneWidths[plane], single.PlaneHeights[plane], outPlanes[plane], outWidths[plane], outHeights[plane], 0, 0, copyW, copyH);
             }
         }
         else
@@ -115,7 +141,7 @@ internal static class Av1TileComposer
                             continue;
                         }
 
-                        CopyRegion(tile.Planes[plane], tile.PlaneWidths[plane], tile.PlaneHeights[plane], outPlanes[plane], outWidths[plane], outHeights[plane], destBaseX, destBaseY, copyW, copyH);
+                        CopyRegion(tile.GetPlane(plane), tile.PlaneWidths[plane], tile.PlaneHeights[plane], outPlanes[plane], outWidths[plane], outHeights[plane], destBaseX, destBaseY, copyW, copyH);
                     }
                 }
             }
@@ -126,13 +152,10 @@ internal static class Av1TileComposer
         // pipeline). Guarded per-plane by numPlanes since a monochrome tile never populated slots 1/2.
         foreach (var frame in frames)
         {
-            for (int plane = 0; plane < numPlanes; plane++)
-            {
-                ArrayPool<int>.Shared.Return(frame.Planes[plane]);
-            }
+            frame.ReturnPlanes(numPlanes);
         }
 
-        return new CompositedFrame
+        return new CompositedFrame<TPixel>
         {
             Planes = outPlanes,
             Widths = outWidths,
@@ -140,15 +163,6 @@ internal static class Av1TileComposer
             Sequence = seq,
             NumPlanes = numPlanes,
         };
-    }
-
-    /// <summary>Returns a <see cref="CompositedFrame"/>'s pool-rented <see cref="CompositedFrame.Planes"/> once the caller is done reading them (after YUV conversion).</summary>
-    public static void ReturnPlanes(CompositedFrame frame)
-    {
-        for (int plane = 0; plane < frame.NumPlanes; plane++)
-        {
-            ArrayPool<int>.Shared.Return(frame.Planes[plane]);
-        }
     }
 
     /// <summary>
@@ -161,7 +175,8 @@ internal static class Av1TileComposer
     /// to match) got every edge case right. Deliberately not <c>src.Length</c>/<c>dst.Length</c>: both
     /// arrays may be rented from <see cref="ArrayPool{T}"/> and therefore larger than their logical size.
     /// </summary>
-    private static void CopyRegion(int[] src, int srcStride, int srcHeight, int[] dst, int dstStride, int dstHeight, int destBaseX, int destBaseY, int w, int h)
+    private static void CopyRegion<TPixel>(Array src, int srcStride, int srcHeight, TPixel[] dst, int dstStride, int dstHeight, int destBaseX, int destBaseY, int w, int h)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         if (srcStride <= 0 || dstStride <= 0)
         {
@@ -178,9 +193,40 @@ internal static class Av1TileComposer
             return;
         }
 
+        if (src is TPixel[] same)
+        {
+            for (int y = 0; y < h; y++)
+            {
+                Array.Copy(same, y * srcStride, dst, ((destBaseY + y) * dstStride) + destBaseX, w);
+            }
+
+            return;
+        }
+
+        switch (src)
+        {
+            case byte[] bytes:
+                ConvertRegion(bytes, srcStride, dst, dstStride, destBaseX, destBaseY, w, h);
+                break;
+            case ushort[] words:
+                ConvertRegion(words, srcStride, dst, dstStride, destBaseX, destBaseY, w, h);
+                break;
+            default:
+                ConvertRegion((int[])src, srcStride, dst, dstStride, destBaseX, destBaseY, w, h);
+                break;
+        }
+    }
+
+    private static void ConvertRegion<TSource, TPixel>(TSource[] src, int srcStride, TPixel[] dst, int dstStride, int destBaseX, int destBaseY, int w, int h)
+        where TSource : unmanaged, IBinaryInteger<TSource>
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
+    {
         for (int y = 0; y < h; y++)
         {
-            Array.Copy(src, y * srcStride, dst, ((destBaseY + y) * dstStride) + destBaseX, w);
+            for (int x = 0; x < w; x++)
+            {
+                dst[((destBaseY + y) * dstStride) + destBaseX + x] = TPixel.CreateTruncating(src[(y * srcStride) + x]);
+            }
         }
     }
 }

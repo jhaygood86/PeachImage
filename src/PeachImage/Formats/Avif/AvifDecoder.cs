@@ -101,36 +101,25 @@ internal static class AvifDecoder
         var color = Av1TileComposer.Composite(container.ColorTiles, container.GridRows, container.GridColumns, container.Width, container.Height);
 
         Av1TileComposer.CompositedFrame? alpha = null;
-        int[]? alphaPlane = null;
-        int alphaWidth = 0;
         if (container.AlphaTiles is { } alphaTiles)
         {
             alpha = Av1TileComposer.Composite(alphaTiles, container.GridRows, container.GridColumns, container.Width, container.Height);
-            alphaPlane = alpha.Planes[0];
-            alphaWidth = alpha.Widths[0];
         }
 
         var seq = color.Sequence;
-        byte[] pixels = Av1YuvToRgbConverter.Convert(
-            color.Planes, color.Widths, seq.MonoChrome, seq.SubsamplingX, seq.SubsamplingY,
-            seq.MatrixCoefficients, seq.ColorRange, seq.BitDepth,
-            alphaPlane, alphaWidth, container.Width, container.Height);
 
-        // color.Planes/alpha.Planes (pool-rented by Av1TileComposer.Composite) have now been read for the
-        // last time -- Convert() copies every sample it needs into the freshly-allocated `pixels` buffer.
-        Av1TileComposer.ReturnPlanes(color);
-        if (alpha is not null)
-        {
-            Av1TileComposer.ReturnPlanes(alpha);
-        }
+        // Converted straight into the pool-rented buffer that backs the final Image (every byte of the
+        // image's extent is written, so the rented buffer's stale contents never surface).
+        int byteCount = Av1YuvToRgbConverter.OutputByteCount(seq.MonoChrome, seq.BitDepth, alpha is not null, container.Width, container.Height);
+        byte[] pooledPixels = ImageBufferPool.Shared.Rent(byteCount);
+        Av1YuvToRgbConverter.ConvertInto(pooledPixels, color, alpha, container.Width, container.Height);
 
-        var pixelFormat = AvifPixelFormatSelector.Choose(seq.BitDepth, seq.MonoChrome, alphaPlane is not null);
+        // color/alpha planes (pool-rented by Av1TileComposer.Composite) have now been read for the last time.
+        color.ReturnPlanes();
+        alpha?.ReturnPlanes();
 
-        // Av1YuvToRgbConverter.Convert returns an exact-size array (other callers, including tests, rely on
-        // that), so the pool-rented (possibly larger) buffer backing the final owned Image is a separate
-        // copy rather than `pixels` itself.
-        byte[] pooledPixels = ImageBufferPool.Shared.Rent(pixels.Length);
-        pixels.AsSpan().CopyTo(pooledPixels);
+        var pixelFormat = AvifPixelFormatSelector.Choose(seq.BitDepth, seq.MonoChrome, alpha is not null);
+
         var image = Image.FromBuffer(container.Width, container.Height, pixelFormat, pooledPixels, owned: true);
 
         foreach (var profile in metadata.Profiles)

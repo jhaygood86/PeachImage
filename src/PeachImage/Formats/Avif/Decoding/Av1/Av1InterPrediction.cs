@@ -1,3 +1,4 @@
+using System.Numerics;
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
 /// <summary>
@@ -47,9 +48,9 @@ internal static class Av1InterPrediction
     /// <paramref name="deltaColLuma"/> (the block's <c>Mv</c>, in 1/8th-luma-sample units), writing the
     /// result into <paramref name="pred"/> (row-major, stride <paramref name="w"/>).
     /// </summary>
-    public static void PredictIntrabc(
+    public static void PredictIntrabc<TPixel>(
         int[] pred,
-        int[] plane,
+        TPixel[] plane,
         int planeStride,
         int startX,
         int startY,
@@ -62,6 +63,7 @@ internal static class Av1InterPrediction
         int lastX,
         int lastY,
         int bitDepth)
+        where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         // Motion vector scaling process (spec §7.11.3.3), specialized: xScale = yScale = 1 << REF_SCALE_SHIFT
         // exactly (intrabc always references the current frame at its own size, no superres/scaling), which
@@ -98,7 +100,7 @@ internal static class Av1InterPrediction
                 for (int t = 0; t < 8; t++)
                 {
                     int srcCol = Math.Clamp(baseCol + t - 3, 0, lastX);
-                    s += taps[t] * plane[srcRowBase + srcCol];
+                    s += taps[t] * int.CreateTruncating(plane[srcRowBase + srcCol]);
                 }
 
                 intermediate[(r * w) + c] = Round2(s, interRound0);

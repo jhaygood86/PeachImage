@@ -46,7 +46,7 @@ public class Av1RgbToYuvConverterTests
 
         var (y, u, v, chromaWidth, chromaHeight) = Av1RgbToYuvConverter.Convert(rgb, width, height);
 
-        byte[] decoded = Av1YuvToRgbConverter.Convert(
+        byte[] decoded = Av1YuvToRgbConverter.Convert<int, byte>(
             colorPlanes: [y, u, v],
             colorWidths: [width, chromaWidth, chromaHeight],
             monoChrome: false,
@@ -107,7 +107,7 @@ public class Av1RgbToYuvConverterTests
 
         var (y, u, v, chromaWidth, chromaHeight) = Av1RgbToYuvConverter.Convert(rgb, width, height);
 
-        byte[] decoded = Av1YuvToRgbConverter.Convert(
+        byte[] decoded = Av1YuvToRgbConverter.Convert<int, byte>(
             colorPlanes: [y, u, v],
             colorWidths: [width, chromaWidth, chromaHeight],
             monoChrome: false,
