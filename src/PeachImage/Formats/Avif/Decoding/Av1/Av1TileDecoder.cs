@@ -2877,7 +2877,6 @@ internal sealed class Av1TileDecoder
             bool class2D = txClass == Av1TxClass.Class2D;
             int s0 = sigOff[0], s1 = sigOff[1], s2 = sigOff[2], s3 = sigOff[3], s4 = sigOff[4];
             int b0 = brOff[0], b1 = brOff[1], b2 = brOff[2];
-            const int BrMagCap = Av1CoeffTables.CoeffBaseRange + Av1CoeffTables.NumBaseLevels + 1;
 
             int maxRow = 0;
             int maxCol = 0;
@@ -2896,11 +2895,13 @@ internal sealed class Av1TileDecoder
                 }
                 else
                 {
-                    int mag = Math.Min((int)Unsafe.Add(ref lv, p + s0), 3)
-                        + Math.Min((int)Unsafe.Add(ref lv, p + s1), 3)
-                        + Math.Min((int)Unsafe.Add(ref lv, p + s2), 3)
-                        + Math.Min((int)Unsafe.Add(ref lv, p + s3), 3)
-                        + Math.Min((int)Unsafe.Add(ref lv, p + s4), 3);
+                    // Each grid byte holds the level in its low nibble and min(level, 3) in the high one, so
+                    // the clamped sum needs no Min.
+                    int mag = (Unsafe.Add(ref lv, p + s0) >> 4)
+                        + (Unsafe.Add(ref lv, p + s1) >> 4)
+                        + (Unsafe.Add(ref lv, p + s2) >> 4)
+                        + (Unsafe.Add(ref lv, p + s3) >> 4)
+                        + (Unsafe.Add(ref lv, p + s4) >> 4);
 
                     // Position 0 is always the last coefficient decoded (c == 0); in 2D classes its context
                     // is 0 outright rather than magnitude-derived.
@@ -2911,9 +2912,9 @@ internal sealed class Av1TileDecoder
 
                 if (level > Av1CoeffTables.NumBaseLevels)
                 {
-                    int brMag = Math.Min((int)Unsafe.Add(ref lv, p + b0), BrMagCap)
-                        + Math.Min((int)Unsafe.Add(ref lv, p + b1), BrMagCap)
-                        + Math.Min((int)Unsafe.Add(ref lv, p + b2), BrMagCap);
+                    int brMag = (Unsafe.Add(ref lv, p + b0) & 15)
+                        + (Unsafe.Add(ref lv, p + b1) & 15)
+                        + (Unsafe.Add(ref lv, p + b2) & 15);
 
                     int brCtx = Math.Min((brMag + 1) >> 1, 6) + brPosCtx[pos];
 
@@ -2930,12 +2931,10 @@ internal sealed class Av1TileDecoder
                 }
 
                 _quant[pos] = level;
-                levels[p] = (byte)level;
-                if (level != 0)
-                {
-                    maxRow = Math.Max(maxRow, row);
-                    maxCol = Math.Max(maxCol, col);
-                }
+                Unsafe.Add(ref lv, p) = (byte)(level | (Math.Min(level, 3) << 4));
+                int nz = level != 0 ? -1 : 0;
+                maxRow = Math.Max(maxRow, row & nz);
+                maxCol = Math.Max(maxCol, col & nz);
             }
 
             _nzRows = maxRow + 1;
