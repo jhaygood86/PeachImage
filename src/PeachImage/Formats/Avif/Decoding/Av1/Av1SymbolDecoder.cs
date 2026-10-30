@@ -67,21 +67,14 @@ internal sealed class Av1SymbolDecoder
         // SymbolValue >= cur, where cur = ((range >> 8) * (16384 >> 6) >> 1) + EcMinProb.
         uint range = _symbolRange;
         uint cur = ((range >> 8) << 7) + EcMinProb;
-        int symbol;
-        if (_symbolValue >= cur)
-        {
-            symbol = 0;
-            _symbolRange = range - cur;
-            _symbolValue -= cur;
-        }
-        else
-        {
-            symbol = 1;
-            _symbolRange = cur;
-        }
+        // Branchless: the outcome is a coin flip, so a branch here mispredicts about half the time.
+        uint value = _symbolValue;
+        uint zero = value >= cur ? uint.MaxValue : 0u;
+        _symbolRange = cur + ((range - cur - cur) & zero);
+        _symbolValue = value - (cur & zero);
 
         Renormalize();
-        return symbol;
+        return (int)(zero & 1) ^ 1;
     }
 
     /// <summary><c>read_literal(n)</c> (spec §8.2.5): n raw bits, MSB first, each via <see cref="ReadBool"/>.</summary>

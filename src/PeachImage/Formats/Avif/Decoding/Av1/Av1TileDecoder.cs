@@ -2940,28 +2940,21 @@ internal sealed class Av1TileDecoder
             _nzRows = maxRow + 1;
             _nzCols = maxCol + 1;
 
+            ref int quant = ref MemoryMarshal.GetArrayDataReference(_quant);
             for (int c = 0; c < eob; c++)
             {
                 int pos = scan[c];
-                int sign;
-                if (_quant[pos] != 0)
+                int q = Unsafe.Add(ref quant, pos);
+                if (q == 0)
                 {
-                    if (c == 0)
-                    {
-                        int dcSignCtx = GetDcSignContext(plane, x4, y4, w4, h4);
-                        sign = _s.ReadSymbol(_cdf.DcSign[ptype][dcSignCtx]);
-                    }
-                    else
-                    {
-                        sign = _s.ReadBool();
-                    }
-                }
-                else
-                {
-                    sign = 0;
+                    continue;
                 }
 
-                if (_quant[pos] > Av1CoeffTables.NumBaseLevels + Av1CoeffTables.CoeffBaseRange)
+                int sign = c == 0
+                    ? _s.ReadSymbol(_cdf.DcSign[ptype][GetDcSignContext(plane, x4, y4, w4, h4)])
+                    : _s.ReadBool();
+
+                if (q > Av1CoeffTables.NumBaseLevels + Av1CoeffTables.CoeffBaseRange)
                 {
                     int length = 0;
                     bool golombLengthBit;
@@ -2983,20 +2976,17 @@ internal sealed class Av1TileDecoder
                         x = (x << 1) | golombDataBit;
                     }
 
-                    _quant[pos] = x + Av1CoeffTables.CoeffBaseRange + Av1CoeffTables.NumBaseLevels;
+                    q = x + Av1CoeffTables.CoeffBaseRange + Av1CoeffTables.NumBaseLevels;
                 }
 
-                if (pos == 0 && _quant[pos] > 0)
+                if (pos == 0)
                 {
                     dcCategory = sign != 0 ? 1 : 2;
                 }
 
-                _quant[pos] &= 0xFFFFF;
-                culLevel += _quant[pos];
-                if (sign != 0)
-                {
-                    _quant[pos] = -_quant[pos];
-                }
+                q &= 0xFFFFF;
+                culLevel += q;
+                Unsafe.Add(ref quant, pos) = sign != 0 ? -q : q;
             }
 
             culLevel = Math.Min(63, culLevel);
