@@ -37,6 +37,7 @@ internal static class GifSingleFrameDecoder
         }
 
         GifGraphicControlExtension? pendingGce = null;
+        byte[]? xmp = null;
 
         while (true)
         {
@@ -47,8 +48,9 @@ internal static class GifSingleFrameDecoder
 
             if (blockType == ExtensionIntroducer)
             {
-                var (gce, _) = GifExtensionReader.Read(stream);
+                var (gce, _) = GifExtensionReader.Read(stream, out var extensionXmp);
                 pendingGce = gce ?? pendingGce;
+                xmp ??= extensionXmp;
                 continue;
             }
 
@@ -57,7 +59,13 @@ internal static class GifSingleFrameDecoder
                 throw new GifDecodingException("GIF file contains no image frames.");
             }
 
-            return DecodeFrame(stream, header, pendingGce ?? GifGraphicControlExtension.Default);
+            var image = DecodeFrame(stream, header, pendingGce ?? GifGraphicControlExtension.Default);
+            if (xmp is not null)
+            {
+                image.Metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Xmp, Data = xmp });
+            }
+
+            return image;
         }
     }
 

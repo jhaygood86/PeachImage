@@ -26,4 +26,19 @@ public class ResizeOptions
     /// channel, or transparent if it does. Ignored for every other <see cref="ResizeMode"/>.
     /// </summary>
     public (byte R, byte G, byte B, byte A)? BackgroundColor { get; init; }
+
+    /// <summary>
+    /// When <see langword="true"/>, <see cref="Image.Resize(int, int, ResizeOptions?)"/> always returns a new, independently owned image,
+    /// even when the source already fits (<see cref="ResizeMode.Max"/>) or already has the requested size (<see cref="ResizeMode.Crop"/>
+    /// and <see cref="ResizeMode.Pad"/>) and the result would otherwise be the source itself. Disposing the result and the source can then
+    /// never interfere. Defaults to <see langword="false"/>.
+    /// </summary>
+    public bool AlwaysCopy { get; init; }
+
+    /// <summary>
+    /// When <see langword="true"/>, the resized image carries the source's resolution and metadata profiles (ICC, EXIF, XMP, ...),
+    /// which <see cref="Image.Resize(int, int, ResizeOptions?)"/> otherwise drops. EXIF is carried unchanged, so apply the image's
+    /// orientation first (see <see cref="Image.ApplyOrientationInPlace(ImageOrientation)"/>), which resets it. Defaults to <see langword="false"/>.
+    /// </summary>
+    public bool CopyMetadata { get; init; }
 }

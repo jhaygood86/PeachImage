@@ -14,6 +14,8 @@ namespace PeachImage.Formats.Jpeg.Decoding;
 /// </summary>
 internal static class FrameDecoder
 {
+    private static ReadOnlySpan<byte> XmpSignature => "http://ns.adobe.com/xap/1.0/\0"u8;
+
     private static readonly byte[] ExifSignature = "Exif\0\0"u8.ToArray();
     private static readonly byte[] IccSignature = "ICC_PROFILE\0"u8.ToArray();
 
@@ -226,8 +228,20 @@ internal static class FrameDecoder
                     break;
 
                 case JpegMarker.App1:
-                    metadata.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Exif, Data = ReadSegment(markerReader) });
+                {
+                    var payload = ReadSegment(markerReader);
+                    if (payload.AsSpan().StartsWith(XmpSignature))
+                    {
+                        // An XMP packet shares APP1 with EXIF; the profile holds just the packet, as WebP and JPEG XL report it.
+                        metadata.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Xmp, Data = payload[XmpSignature.Length..] });
+                    }
+                    else
+                    {
+                        metadata.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Exif, Data = payload });
+                    }
+
                     break;
+                }
 
                 case JpegMarker.App2:
                 {
@@ -241,6 +255,18 @@ internal static class FrameDecoder
                     else
                     {
                         metadata.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Unknown, Data = payload });
+                    }
+
+                    break;
+                }
+
+                case JpegMarker.App13:
+                {
+                    // Only Photoshop image-resource blocks (which carry IPTC) are kept; any other APP13 payload is skipped as before.
+                    var payload = ReadSegment(markerReader);
+                    if (payload.AsSpan().StartsWith("Photoshop 3.0\0"u8))
+                    {
+                        metadata.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Iptc, Data = payload });
                     }
 
                     break;

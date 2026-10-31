@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Metadata;
 using System.Buffers;
 using PeachImage.Formats.Jpeg.ColorConversion;
 using PeachImage.Formats.Jpeg.Dct;
@@ -93,7 +94,7 @@ internal static class FrameEncoder
                 quantizedComponents[i] = QuantizeComponent(padded, plan.BlocksWide, plan.BlocksHigh, plan.Index == 0 ? luminanceQuant : chrominanceQuant!, rentedShorts);
             }
 
-            WriteBitstream(stream, options, width, height, grayscale, components, quantizedComponents, luminanceQuant, chrominanceQuant, mcusAcross, mcusDown);
+            WriteBitstream(stream, options, width, height, grayscale, components, quantizedComponents, luminanceQuant, chrominanceQuant, mcusAcross, mcusDown, EncodableMetadata.Icc(image, options), EncodableMetadata.Exif(image, options), EncodableMetadata.Xmp(image, options));
         }
         finally
         {
@@ -247,6 +248,60 @@ internal static class FrameEncoder
         return coefficients;
     }
 
+    // An EXIF block lives in one APP1 segment ("Exif\0\0" + TIFF data), so one that cannot fit in 65533 bytes is not written.
+    private static void WriteExif(Stream stream, byte[] exif)
+    {
+        const int Header = 6;
+        if (exif.Length + Header > 65533)
+        {
+            return;
+        }
+
+        var payload = new byte[Header + exif.Length];
+        "Exif\0\0"u8.CopyTo(payload);
+        exif.CopyTo(payload, Header);
+        JpegMarkerWriter.WriteSegment(stream, JpegMarker.App1, payload);
+    }
+
+    // The packet goes in its own APP1 segment after "http://ns.adobe.com/xap/1.0/\0"; one too large for a segment (extended XMP is not written) is left out.
+    private static void WriteXmp(Stream stream, byte[] xmp)
+    {
+        ReadOnlySpan<byte> header = "http://ns.adobe.com/xap/1.0/\0"u8;
+        if (header.Length + xmp.Length > 65533)
+        {
+            return;
+        }
+
+        var payload = new byte[header.Length + xmp.Length];
+        header.CopyTo(payload);
+        xmp.CopyTo(payload, header.Length);
+        JpegMarkerWriter.WriteSegment(stream, JpegMarker.App1, payload);
+    }
+
+    // ICC.1 B.4: "ICC_PROFILE\0", chunk number (1-based), chunk count, then a slice of the profile; a segment holds 65533 bytes at most.
+    private static void WriteIccProfile(Stream stream, byte[] profile)
+    {
+        const int Header = 14;
+        const int MaxChunkData = 65533 - Header;
+        int chunks = (profile.Length + MaxChunkData - 1) / MaxChunkData;
+        if (chunks > 255)
+        {
+            throw new JpegEncodingException($"The ICC profile ({profile.Length} bytes) is too large to embed in a JPEG file.");
+        }
+
+        for (int i = 0; i < chunks; i++)
+        {
+            int offset = i * MaxChunkData;
+            int length = Math.Min(MaxChunkData, profile.Length - offset);
+            var payload = new byte[Header + length];
+            "ICC_PROFILE\0"u8.CopyTo(payload);
+            payload[12] = (byte)(i + 1);
+            payload[13] = (byte)chunks;
+            profile.AsSpan(offset, length).CopyTo(payload.AsSpan(Header));
+            JpegMarkerWriter.WriteSegment(stream, JpegMarker.App2, payload);
+        }
+    }
+
     private static void WriteBitstream(
         Stream stream,
         JpegEncoderOptions options,
@@ -258,7 +313,10 @@ internal static class FrameEncoder
         ushort[] luminanceQuant,
         ushort[]? chrominanceQuant,
         int mcusAcross,
-        int mcusDown)
+        int mcusDown,
+        byte[]? iccProfile,
+        byte[]? exif,
+        byte[]? xmp)
     {
         JpegMarkerWriter.WriteMarkerOnly(stream, JpegMarker.Soi);
 
@@ -274,6 +332,21 @@ internal static class FrameEncoder
         jfif[12] = 0;
         jfif[13] = 0;
         JpegMarkerWriter.WriteSegment(stream, JpegMarker.App0, jfif);
+
+        if (exif is not null)
+        {
+            WriteExif(stream, exif);
+        }
+
+        if (xmp is not null)
+        {
+            WriteXmp(stream, xmp);
+        }
+
+        if (iccProfile is not null)
+        {
+            WriteIccProfile(stream, iccProfile);
+        }
 
         WriteQuantTable(stream, 0, luminanceQuant);
         if (!grayscale)

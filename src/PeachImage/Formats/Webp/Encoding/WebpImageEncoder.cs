@@ -18,9 +18,19 @@ internal static class WebpImageEncoder
         byte[]? icc = null;
         byte[]? exif = null;
         byte[]? xmp = null;
-        if (options.IncludeMetadata)
+        if (options.IncludeMetadata || options.WritesIccProfile)
         {
             (icc, exif, xmp) = WebpMetadataWriter.CollectProfiles(image.Metadata);
+            if (!options.WritesIccProfile)
+            {
+                icc = null;
+            }
+
+            if (!options.IncludeMetadata)
+            {
+                exif = null;
+                xmp = null;
+            }
         }
 
         WriteContainer(stream, image.Width, image.Height, frame.HasAlpha, frame.FourCc, frame.Payload, icc, exif, xmp);

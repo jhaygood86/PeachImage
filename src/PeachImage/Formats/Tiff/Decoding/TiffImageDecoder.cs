@@ -21,6 +21,7 @@ internal static class TiffImageDecoder
         var image = Image.Create(descriptor.Width, descriptor.Height, descriptor.PixelFormat);
         DecodeStrips(reader, descriptor, palette, image);
         ReadIccProfile(ifd, image);
+        ReadXmpPacket(ifd, image);
         return image;
     }
 
@@ -30,6 +31,15 @@ internal static class TiffImageDecoder
         if (profileBytes is not null)
         {
             image.Metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Icc, Data = profileBytes });
+        }
+    }
+
+    private static void ReadXmpPacket(TiffIfd ifd, Image image)
+    {
+        byte[]? packet = ifd.TryGetBytes(TiffTags.Xmp);
+        if (packet is not null)
+        {
+            image.Metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Xmp, Data = packet });
         }
     }
 

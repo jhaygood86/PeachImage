@@ -27,4 +27,6 @@ internal static class TiffTags
     public const ushort ExtraSamples = 338;
     public const ushort SampleFormat = 339;
     public const ushort IccProfile = 34675;
+
+    public const ushort Xmp = 700;
 }

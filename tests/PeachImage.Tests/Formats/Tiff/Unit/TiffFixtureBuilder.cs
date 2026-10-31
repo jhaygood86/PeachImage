@@ -47,6 +47,9 @@ internal sealed class TiffFixtureBuilder
     /// <summary>Raw bytes to write under tag 34675 (ICC Profile), or <see langword="null"/> to omit it.</summary>
     public byte[]? IccProfile { get; init; }
 
+    /// <summary>Raw bytes to write under tag 700 (XMP), or <see langword="null"/> to omit it.</summary>
+    public byte[]? XmpPacket { get; init; }
+
     public bool LittleEndian { get; init; } = true;
 
     /// <summary>When set, writes the Orientation tag (274) with this raw value.</summary>
@@ -170,6 +173,13 @@ internal sealed class TiffFixtureBuilder
         if (SampleFormat is { } sampleFormat)
         {
             AddShort(339, sampleFormat);
+        }
+
+        if (XmpPacket is { } xmpPacket)
+        {
+            entries.Add(xmpPacket.Length <= 4
+                ? (700, TypeUndefined, (uint)xmpPacket.Length, xmpPacket, null)
+                : (700, TypeUndefined, (uint)xmpPacket.Length, [], xmpPacket));
         }
 
         if (IccProfile is { } iccProfile)

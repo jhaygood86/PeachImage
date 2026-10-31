@@ -10,7 +10,7 @@ namespace PeachImage.Formats.Png.Decoding;
 /// <summary>Top-level PNG decode orchestrator: metadata chunks, a streaming (no-buffering) pixel decode, then trailing chunks.</summary>
 internal static class PngImageDecoder
 {
-    public static Image Decode(Stream stream, PngDecoderOptions? options, Action<Image>? previewAvailable = null, PixelFormat? targetPixelFormat = null)
+    public static Image Decode(Stream stream, PngDecoderOptions? options, Action<Image>? previewAvailable = null, PixelFormat? targetPixelFormat = null, bool skipMetadata = false)
     {
         PngChunkReader.ReadSignature(stream);
         var header = PngHeaderReader.ReadIhdr(stream);
@@ -29,7 +29,7 @@ internal static class PngImageDecoder
                 throw new PngDecodingException("PNG file has no IDAT chunk.");
             }
 
-            ProcessMetadataChunk(stream, chunkHeader, header, metadata, ref palette, ref grayOrRgbTrnsKey, ref gammaHundredThousandths, ref sawSrgb);
+            ProcessMetadataChunk(stream, chunkHeader, header, metadata, ref palette, ref grayOrRgbTrnsKey, ref gammaHundredThousandths, ref sawSrgb, skipMetadata);
             chunkHeader = PngChunkReader.ReadHeader(stream);
         }
 
@@ -91,7 +91,7 @@ internal static class PngImageDecoder
                 throw new PngDecodingException("PNG file has non-consecutive IDAT chunks.");
             }
 
-            ProcessMetadataChunk(stream, nextHeader, header, metadata, ref palette, ref grayOrRgbTrnsKey, ref gammaHundredThousandths, ref sawSrgb);
+            ProcessMetadataChunk(stream, nextHeader, header, metadata, ref palette, ref grayOrRgbTrnsKey, ref gammaHundredThousandths, ref sawSrgb, skipMetadata);
             nextHeader = PngChunkReader.ReadHeader(stream);
         }
 
@@ -266,7 +266,7 @@ internal static class PngImageDecoder
     }
 
     /// <summary>Processes an already-read chunk header that is known not to be IDAT/IEND: PLTE, tRNS, or a recognized/unrecognized ancillary chunk.</summary>
-    private static void ProcessMetadataChunk(Stream stream, PngChunkHeader chunkHeader, PngHeader header, ImageMetadata metadata, ref PngPalette? palette, ref ushort[]? grayOrRgbTrnsKey, ref uint? gammaHundredThousandths, ref bool sawSrgb)
+    private static void ProcessMetadataChunk(Stream stream, PngChunkHeader chunkHeader, PngHeader header, ImageMetadata metadata, ref PngPalette? palette, ref ushort[]? grayOrRgbTrnsKey, ref uint? gammaHundredThousandths, ref bool sawSrgb, bool skipMetadata)
     {
         if (chunkHeader.Type == PngChunkType.Plte)
         {
@@ -307,7 +307,12 @@ internal static class PngImageDecoder
         }
 
         byte[] ancillaryData = PngChunkReader.ReadDataAndValidateCrc(stream, chunkHeader);
-        PngAncillaryChunkReader.Apply(chunkHeader.Type, ancillaryData, header, metadata);
+        // With SkipMetadata only the gamma chunks are interpreted (they change the decoded samples when a screen gamma is set);
+        // iCCP is never inflated and text/EXIF/XMP chunks are never parsed.
+        if (!skipMetadata || chunkHeader.Type == PngChunkType.Gama || chunkHeader.Type == PngChunkType.Srgb)
+        {
+            PngAncillaryChunkReader.Apply(chunkHeader.Type, ancillaryData, header, metadata);
+        }
 
         if (chunkHeader.Type == PngChunkType.Gama && ancillaryData.Length == 4)
         {

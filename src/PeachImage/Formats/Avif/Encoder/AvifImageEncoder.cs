@@ -1,6 +1,7 @@
 using PeachImage.Formats.Avif.Container;
 using PeachImage.Formats.Avif.Encoder.Av1;
 using PeachImage.Formats.Avif.Internal;
+using PeachImage.Formats.Shared.Metadata;
 
 namespace PeachImage.Formats.Avif.Encoder;
 
@@ -31,7 +32,9 @@ internal static class AvifImageEncoder
             ? null
             : Av1FrameEncoder.Encode(alpha, image.Width, image.Height, monoChrome: true, options.Quality, options.Lossless, options.Effort, tileRowsLog2: options.TileRowsLog2, maxDegreeOfParallelism: options.MaxDegreeOfParallelism);
 
-        AvifContainerWriter.Write(stream, encoded, alphaEncoded);
+        byte[]? exif = EncodableMetadata.Exif(image, options);
+        var orientation = exif is null ? ImageOrientation.Normal : ExifOrientationReader.ReadTiff(exif);
+        AvifContainerWriter.Write(stream, encoded, alphaEncoded, EncodableMetadata.Icc(image, options), exif, orientation, EncodableMetadata.Xmp(image, options));
     }
 
     /// <summary>

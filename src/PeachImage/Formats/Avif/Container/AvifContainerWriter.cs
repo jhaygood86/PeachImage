@@ -11,31 +11,38 @@ namespace PeachImage.Formats.Avif.Container;
 /// rather than streaming with backpatching (see its remarks). Includes an <c>hdlr</c> box even though
 /// <see cref="AvifMetaBoxParser"/> tolerates its absence -- real-world decoders and browsers are not so
 /// lenient, and this repo's own reader is the wrong bar for interop correctness on the write side.
-/// Metadata (ICC/EXIF/XMP) re-emission is deferred in v1: no <c>colr</c> or metadata item is written even
-/// if the source image carries profiles. Alpha is always straight (non-premultiplied), matching the
+/// An ICC profile is written as a <c>colr</c> (<c>prof</c>) property and EXIF as an <c>Exif</c> item described
+/// by the color item through an <c>iref cdsc</c> entry, and XMP as a <c>mime</c> (<c>application/rdf+xml</c>) item likewise. Alpha is always straight (non-premultiplied), matching the
 /// decoder's own assumption -- no <c>prem</c> signaling exists anywhere in this codebase.
 /// </summary>
 internal static class AvifContainerWriter
 {
     private const uint ColorItemId = 1;
     private const uint AlphaItemId = 2;
+    private const uint ExifItemId = 3;
+    private const uint XmpItemId = 4;
 
-    public static void Write(Stream stream, Av1EncodedFrame frame, Av1EncodedFrame? alphaFrame = null)
+    public static void Write(Stream stream, Av1EncodedFrame frame, Av1EncodedFrame? alphaFrame = null, byte[]? iccProfile = null, byte[]? exif = null, ImageOrientation orientation = ImageOrientation.Normal, byte[]? xmp = null)
     {
+        // An Exif item is a 4-byte exif_tiff_header_offset (0: the TIFF header follows directly) and then the TIFF-structured block.
+        byte[]? exifItem = exif is null ? null : [0, 0, 0, 0, .. exif];
+
         byte[] ftyp = BuildFtyp();
-        byte[] meta = BuildMeta(frame, alphaFrame, colorOffset: 0, alphaOffset: 0);
+        byte[] meta = BuildMeta(frame, alphaFrame, iccProfile, exifItem, xmp, orientation, colorOffset: 0, alphaOffset: 0, exifOffset: 0, xmpOffset: 0);
 
         // iloc's extent-offset fields are fixed-size (4-byte) slots regardless of their value, so meta's
         // total length is already final -- rebuild once more with the real mdat offsets now that they're known.
         int mdatPayloadOffset = ftyp.Length + meta.Length + 8;
         int colorOffset = mdatPayloadOffset;
         int alphaOffset = mdatPayloadOffset + frame.ObuBytes.Length;
-        meta = BuildMeta(frame, alphaFrame, colorOffset, alphaOffset);
+        int exifOffset = alphaOffset + (alphaFrame?.ObuBytes.Length ?? 0);
+        int xmpOffset = exifOffset + (exifItem?.Length ?? 0);
+        meta = BuildMeta(frame, alphaFrame, iccProfile, exifItem, xmp, orientation, colorOffset, alphaOffset, exifOffset, xmpOffset);
 
         stream.Write(ftyp);
         stream.Write(meta);
 
-        int mdatPayloadLength = frame.ObuBytes.Length + (alphaFrame?.ObuBytes.Length ?? 0);
+        int mdatPayloadLength = frame.ObuBytes.Length + (alphaFrame?.ObuBytes.Length ?? 0) + (exifItem?.Length ?? 0) + (xmp?.Length ?? 0);
         byte[] mdatHeader = new byte[8];
         AvifBoxWriter.WriteUInt32(mdatHeader, 0, (uint)(8 + mdatPayloadLength));
         AvifBoxWriter.WriteFourCc(mdatHeader, 4, "mdat");
@@ -44,6 +51,16 @@ internal static class AvifContainerWriter
         if (alphaFrame is not null)
         {
             stream.Write(alphaFrame.ObuBytes);
+        }
+
+        if (exifItem is not null)
+        {
+            stream.Write(exifItem);
+        }
+
+        if (xmp is not null)
+        {
+            stream.Write(xmp);
         }
     }
 
@@ -58,20 +75,37 @@ internal static class AvifContainerWriter
         return AvifBoxWriter.Box("ftyp", payload);
     }
 
-    private static byte[] BuildMeta(Av1EncodedFrame frame, Av1EncodedFrame? alphaFrame, int colorOffset, int alphaOffset)
+    private static byte[] BuildMeta(Av1EncodedFrame frame, Av1EncodedFrame? alphaFrame, byte[]? iccProfile, byte[]? exifItem, byte[]? xmp, ImageOrientation orientation, int colorOffset, int alphaOffset, int exifOffset, int xmpOffset)
     {
         byte[] hdlr = BuildHdlr();
         byte[] pitm = BuildPitm();
-        byte[] iinf = BuildIinf(alphaFrame is not null);
-        byte[] iloc = BuildIloc(colorOffset, frame.ObuBytes.Length, alphaFrame is null ? null : alphaOffset, alphaFrame?.ObuBytes.Length);
-        byte[] iprp = BuildIprp(frame, alphaFrame);
+        byte[] iinf = BuildIinf(alphaFrame is not null, exifItem is not null, xmp is not null);
 
-        if (alphaFrame is null)
+        var extents = new List<(uint ItemId, int Offset, int Length)> { (ColorItemId, colorOffset, frame.ObuBytes.Length) };
+        if (alphaFrame is not null)
+        {
+            extents.Add((AlphaItemId, alphaOffset, alphaFrame.ObuBytes.Length));
+        }
+
+        if (exifItem is not null)
+        {
+            extents.Add((ExifItemId, exifOffset, exifItem.Length));
+        }
+
+        if (xmp is not null)
+        {
+            extents.Add((XmpItemId, xmpOffset, xmp.Length));
+        }
+
+        byte[] iloc = BuildIloc(extents);
+        byte[] iprp = BuildIprp(frame, alphaFrame, iccProfile, orientation);
+
+        if (alphaFrame is null && exifItem is null && xmp is null)
         {
             return AvifBoxWriter.FullBox("meta", version: 0, flags: 0, AvifBoxWriter.Concat([hdlr, pitm, iinf, iloc, iprp]));
         }
 
-        byte[] iref = BuildIref();
+        byte[] iref = BuildIref(alphaFrame is not null, exifItem is not null, xmp is not null);
         return AvifBoxWriter.FullBox("meta", version: 0, flags: 0, AvifBoxWriter.Concat([hdlr, pitm, iinf, iloc, iprp, iref]));
     }
 
@@ -91,45 +125,62 @@ internal static class AvifContainerWriter
         return AvifBoxWriter.FullBox("pitm", version: 0, flags: 0, payload);
     }
 
-    private static byte[] BuildIinf(bool hasAlpha)
+    private static byte[] BuildIinf(bool hasAlpha, bool hasExif, bool hasXmp)
     {
-        byte[][] infeEntries = hasAlpha ? [BuildInfe(ColorItemId), BuildInfe(AlphaItemId)] : [BuildInfe(ColorItemId)];
-        byte[] entries = AvifBoxWriter.Concat(infeEntries);
+        var infeEntries = new List<byte[]> { BuildInfe(ColorItemId, "av01") };
+        if (hasAlpha)
+        {
+            infeEntries.Add(BuildInfe(AlphaItemId, "av01"));
+        }
+
+        if (hasExif)
+        {
+            infeEntries.Add(BuildInfe(ExifItemId, "Exif"));
+        }
+
+        if (hasXmp)
+        {
+            infeEntries.Add(BuildInfe(XmpItemId, "mime", "application/rdf+xml"));
+        }
+
+        byte[] entries = AvifBoxWriter.Concat([.. infeEntries]);
         var payload = new byte[2 + entries.Length];
-        AvifBoxWriter.WriteUInt16(payload, 0, (ushort)infeEntries.Length); // entry_count
+        AvifBoxWriter.WriteUInt16(payload, 0, (ushort)infeEntries.Count); // entry_count
         Array.Copy(entries, 0, payload, 2, entries.Length);
         return AvifBoxWriter.FullBox("iinf", version: 0, flags: 0, payload);
     }
 
-    private static byte[] BuildInfe(uint itemId)
+    private static byte[] BuildInfe(uint itemId, string itemType, string? contentType = null)
     {
-        // item_id(2) + item_protection_index(2) + item_type(4) + item_name cstring (empty -> 1 zero byte).
-        var payload = new byte[2 + 2 + 4 + 1];
+        // item_id(2) + item_protection_index(2) + item_type(4) + item_name cstring (empty -> 1 zero byte),
+        // then, for a 'mime' item, its content_type cstring.
+        var payload = new byte[2 + 2 + 4 + 1 + (contentType is null ? 0 : contentType.Length + 1)];
+        if (contentType is not null)
+        {
+            System.Text.Encoding.ASCII.GetBytes(contentType, 0, contentType.Length, payload, 9);
+        }
+
         AvifBoxWriter.WriteUInt16(payload, 0, (ushort)itemId);
         AvifBoxWriter.WriteUInt16(payload, 2, 0); // item_protection_index
-        AvifBoxWriter.WriteFourCc(payload, 4, "av01");
+        AvifBoxWriter.WriteFourCc(payload, 4, itemType);
 
         // infe version 2 so AvifItemInfoBox.Parse's modern branch (with an explicit item_type field) applies.
         return AvifBoxWriter.FullBox("infe", version: 2, flags: 0, payload);
     }
 
-    private static byte[] BuildIloc(int colorOffset, int colorLength, int? alphaOffset, int? alphaLength)
+    private static byte[] BuildIloc(List<(uint ItemId, int Offset, int Length)> extents)
     {
-        bool hasAlpha = alphaOffset is not null;
-        int itemCount = hasAlpha ? 2 : 1;
-
         // offsetSize=4, lengthSize=4, baseOffsetSize=0, indexSize=0 (reserved, unused at version 0).
-        var payload = new byte[1 + 1 + 2 + (itemCount * (2 + 2 + 2 + 4 + 4))];
+        var payload = new byte[1 + 1 + 2 + (extents.Count * (2 + 2 + 2 + 4 + 4))];
         int i = 0;
         payload[i++] = 0x44; // (offsetSize=4 << 4) | lengthSize=4
         payload[i++] = 0x00; // (baseOffsetSize=0 << 4) | indexSize=0
-        AvifBoxWriter.WriteUInt16(payload, i, (ushort)itemCount); // item_count
+        AvifBoxWriter.WriteUInt16(payload, i, (ushort)extents.Count); // item_count
         i += 2;
 
-        WriteIlocItem(payload, ref i, ColorItemId, colorOffset, colorLength);
-        if (hasAlpha)
+        foreach (var (itemId, offset, length) in extents)
         {
-            WriteIlocItem(payload, ref i, AlphaItemId, alphaOffset!.Value, alphaLength!.Value);
+            WriteIlocItem(payload, ref i, itemId, offset, length);
         }
 
         return AvifBoxWriter.FullBox("iloc", version: 0, flags: 0, payload);
@@ -150,45 +201,99 @@ internal static class AvifContainerWriter
         i += 4;
     }
 
-    private static byte[] BuildIprp(Av1EncodedFrame frame, Av1EncodedFrame? alphaFrame)
+    private static byte[] BuildIprp(Av1EncodedFrame frame, Av1EncodedFrame? alphaFrame, byte[]? iccProfile, ImageOrientation orientation)
     {
-        byte[] ispe = BuildIspe(frame.Width, frame.Height);
-        byte[] av1C = BuildAv1Config(frame.MonoChrome, frame.Chroma444, frame.SeqLevelIdx);
-        byte[] pixi = BuildPixi(frame.MonoChrome);
-
-        if (alphaFrame is null)
+        // ipco properties are numbered from 1 in declaration order; the top bit of an association marks it essential.
+        var properties = new List<byte[]>
         {
-            byte[] ipco = AvifBoxWriter.Box("ipco", ispe, av1C, pixi);
-            byte[] ipma = BuildIpma([(ColorItemId, [0x80 | 1, 0x80 | 2, 3])]);
-            return AvifBoxWriter.Box("iprp", ipco, ipma);
+            BuildIspe(frame.Width, frame.Height),
+            BuildAv1Config(frame.MonoChrome, frame.Chroma444, frame.SeqLevelIdx),
+            BuildPixi(frame.MonoChrome),
+        };
+        var colorAssociations = new List<byte> { 0x80 | 1, 0x80 | 2, 3 };
+        var entries = new List<(uint ItemId, byte[] Associations)>();
+
+        byte[]? alphaAssociations = null;
+        if (alphaFrame is not null)
+        {
+            // Alpha carries no ispe of its own -- AvifItemAssembler.ResolveDimensions falls back to (0,0) for the
+            // alpha item and always takes the assembled image's width/height from the color item, so an alpha
+            // ispe would be redundant (this mirrors this repo's own decoder tolerance, not a spec requirement
+            // this encoder needs to lean on for interop -- real decoders are expected to do the same fallback).
+            properties.Add(BuildAv1Config(monoChrome: true, chroma444: false, alphaFrame.SeqLevelIdx));
+            properties.Add(BuildPixi(monoChrome: true));
+            properties.Add(AvifAuxCBox.Build());
+            alphaAssociations = [0x80 | 4, 5, 6];
         }
 
-        // Alpha carries no ispe of its own -- AvifItemAssembler.ResolveDimensions falls back to (0,0) for the
-        // alpha item and always takes the assembled image's width/height from the color item, so an alpha
-        // ispe would be redundant (this mirrors this repo's own decoder tolerance, not a spec requirement
-        // this encoder needs to lean on for interop -- real decoders are expected to do the same fallback).
-        byte[] alphaAv1C = BuildAv1Config(monoChrome: true, chroma444: false, alphaFrame.SeqLevelIdx);
-        byte[] alphaPixi = BuildPixi(monoChrome: true);
-        byte[] auxC = AvifAuxCBox.Build();
-        byte[] ipcoWithAlpha = AvifBoxWriter.Box("ipco", ispe, av1C, pixi, alphaAv1C, alphaPixi, auxC);
-        byte[] ipmaWithAlpha = BuildIpma(
-        [
-            (ColorItemId, [0x80 | 1, 0x80 | 2, 3]),
-            (AlphaItemId, [0x80 | 4, 5, 6]),
-        ]);
-        return AvifBoxWriter.Box("iprp", ipcoWithAlpha, ipmaWithAlpha);
+        if (iccProfile is not null)
+        {
+            properties.Add(AvifBoxWriter.Box("colr", [.. "prof"u8.ToArray(), .. iccProfile]));
+            colorAssociations.Add((byte)properties.Count);
+        }
+
+        // MIAF has irot/imir override any Exif orientation, so the Exif orientation is mirrored into them (rotation first, then mirror).
+        foreach (var (isMirror, value) in ToTransforms(orientation))
+        {
+            properties.Add(AvifBoxWriter.Box(isMirror ? "imir" : "irot", [(byte)value]));
+            colorAssociations.Add((byte)(0x80 | properties.Count));
+        }
+
+        entries.Add((ColorItemId, [.. colorAssociations]));
+        if (alphaAssociations is not null)
+        {
+            entries.Add((AlphaItemId, alphaAssociations));
+        }
+
+        byte[] ipco = AvifBoxWriter.Box("ipco", properties.ToArray());
+        return AvifBoxWriter.Box("iprp", ipco, BuildIpma(entries));
     }
 
-    /// <summary>Writes the one <c>iref</c> entry this encoder ever produces: an <c>auxl</c> reference from the color item to the alpha item, exactly the direction <see cref="AvifItemAssembler.Assemble"/> parses.</summary>
-    private static byte[] BuildIref()
+    /// <summary>The <c>irot</c>/<c>imir</c> sequence whose fold (see <see cref="AvifTransformProperties.ToOrientation"/>) is <paramref name="orientation"/>.</summary>
+    private static (bool IsMirror, int Value)[] ToTransforms(ImageOrientation orientation) => orientation switch
     {
-        var auxlPayload = new byte[2 + 2 + 2]; // from_item_ID(2) + reference_count(2) + to_item_ID(2)
-        AvifBoxWriter.WriteUInt16(auxlPayload, 0, (ushort)ColorItemId);
-        AvifBoxWriter.WriteUInt16(auxlPayload, 2, 1); // reference_count
-        AvifBoxWriter.WriteUInt16(auxlPayload, 4, (ushort)AlphaItemId);
-        byte[] auxl = AvifBoxWriter.Box("auxl", auxlPayload);
+        ImageOrientation.MirrorHorizontal => [(true, 0)],
+        ImageOrientation.Rotate180 => [(false, 2)],
+        ImageOrientation.MirrorVertical => [(true, 1)],
+        ImageOrientation.Transpose => [(false, 1), (true, 1)],
+        ImageOrientation.Rotate90 => [(false, 3)],
+        ImageOrientation.Transverse => [(false, 1), (true, 0)],
+        ImageOrientation.Rotate270 => [(false, 1)],
+        _ => [],
+    };
 
-        return AvifBoxWriter.FullBox("iref", version: 0, flags: 0, auxl);
+    /// <summary>
+    /// Writes this encoder's <c>iref</c> entries: an <c>auxl</c> reference from the color item to the alpha item (exactly the
+    /// direction <see cref="AvifItemAssembler.Assemble"/> parses) and a <c>cdsc</c> reference from the EXIF item to the color item.
+    /// </summary>
+    private static byte[] BuildIref(bool hasAlpha, bool hasExif, bool hasXmp)
+    {
+        var references = new List<byte[]>();
+        if (hasAlpha)
+        {
+            references.Add(BuildReference("auxl", ColorItemId, AlphaItemId));
+        }
+
+        if (hasExif)
+        {
+            references.Add(BuildReference("cdsc", ExifItemId, ColorItemId));
+        }
+
+        if (hasXmp)
+        {
+            references.Add(BuildReference("cdsc", XmpItemId, ColorItemId));
+        }
+
+        return AvifBoxWriter.FullBox("iref", version: 0, flags: 0, AvifBoxWriter.Concat([.. references]));
+    }
+
+    private static byte[] BuildReference(string type, uint fromItem, uint toItem)
+    {
+        var payload = new byte[2 + 2 + 2]; // from_item_ID(2) + reference_count(2) + to_item_ID(2)
+        AvifBoxWriter.WriteUInt16(payload, 0, (ushort)fromItem);
+        AvifBoxWriter.WriteUInt16(payload, 2, 1); // reference_count
+        AvifBoxWriter.WriteUInt16(payload, 4, (ushort)toItem);
+        return AvifBoxWriter.Box(type, payload);
     }
 
     private static byte[] BuildIspe(int width, int height)
@@ -250,7 +355,7 @@ internal static class AvifContainerWriter
     /// "essential" bit convention; this repo's own decoder ignores the flag either way, but real decoders may
     /// enforce it for unrecognized essential properties).
     /// </summary>
-    private static byte[] BuildIpma(IReadOnlyList<(uint ItemId, byte[] Associations)> entries)
+    private static byte[] BuildIpma(List<(uint ItemId, byte[] Associations)> entries)
     {
         int payloadLength = 4;
         foreach (var entry in entries)

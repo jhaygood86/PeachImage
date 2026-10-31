@@ -45,6 +45,14 @@ internal static class PngAncillaryChunkReader
         {
             TryReadIccp(data, metadata);
         }
+        else if (type == PngChunkType.Exif)
+        {
+            // The chunk holds a bare TIFF-structured EXIF block (no "Exif\0\0" prefix); consumers of the Exif profile accept either form.
+            if (data.Length > 0)
+            {
+                metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Exif, Data = data });
+            }
+        }
         else if (type == PngChunkType.Phys)
         {
             TryReadPhys(data, metadata);
@@ -202,6 +210,13 @@ internal static class PngAncillaryChunkReader
         else
         {
             text = System.Text.Encoding.UTF8.GetString(textBytes);
+        }
+
+        if (keyword == "XML:com.adobe.xmp")
+        {
+            // Adobe's XMP-in-PNG convention: the packet is the iTXt text itself. Surfaced as an Xmp profile, not as a text entry.
+            metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Xmp, Data = System.Text.Encoding.UTF8.GetBytes(text) });
+            return;
         }
 
         AddTextEntry(metadata, keyword, languageTag, translatedKeyword, text);

@@ -9,8 +9,12 @@ internal static class GifExtensionReader
     private const byte ApplicationLabel = 0xFF;
 
     /// <summary>Reads and dispatches one extension block (the 0x21 introducer has already been consumed). Returns an updated pending Graphic Control Extension and loop count, if this block provided one.</summary>
-    public static (GifGraphicControlExtension? Gce, int? LoopCount) Read(Stream stream)
+    public static (GifGraphicControlExtension? Gce, int? LoopCount) Read(Stream stream) => Read(stream, out _);
+
+    /// <summary>As <see cref="Read(Stream)"/>, also returning the XMP packet when the block is an <c>XMP DataXMP</c> application extension.</summary>
+    public static (GifGraphicControlExtension? Gce, int? LoopCount) Read(Stream stream, out byte[]? xmp)
     {
+        xmp = null;
         byte label = GifStreamHelpers.ReadByteOrThrow(stream);
 
         switch (label)
@@ -18,7 +22,7 @@ internal static class GifExtensionReader
             case GraphicControlLabel:
                 return (ReadGraphicControlExtension(stream), null);
             case ApplicationLabel:
-                return (null, ReadApplicationExtension(stream));
+                return (null, ReadApplicationExtension(stream, out xmp));
             default:
                 // Comment (0xFE), Plain Text (0x01), and any other/unknown extension: not needed for
                 // decoding a visual frame — skip its sub-blocks. Plain Text also carries a fixed 12-byte
@@ -68,36 +72,88 @@ internal static class GifExtensionReader
         }
     }
 
-    private static int? ReadApplicationExtension(Stream stream)
+    private static int? ReadApplicationExtension(Stream stream, out byte[]? xmp)
     {
-        var (data, length) = GifSubBlocks.ReadAll(stream);
+        xmp = null;
+
+        // The first sub-block is the 11-byte identifier + authentication code (an 8-byte application name and a 3-byte code).
+        byte first = GifStreamHelpers.ReadByteOrThrow(stream);
+        if (first == 0)
+        {
+            return null;
+        }
+
+        byte[] head = new byte[first];
+        GifStreamHelpers.ReadExactlyOrThrow(stream, head);
+
+        if (head.AsSpan().SequenceEqual("XMP DataXMP"u8))
+        {
+            xmp = ReadXmpPacket(stream);
+            return null;
+        }
+
+        var (rest, restLength) = GifSubBlocks.ReadAll(stream);
         try
         {
-            // Application Extension layout: 8-byte Application Identifier + 3-byte Authentication Code (both
-            // folded into the leading sub-blocks by ReadAll), followed by application data sub-blocks (also
-            // folded in). NETSCAPE2.0's single application data sub-block is: byte 0 = 1 (sub-block ID),
-            // bytes 1-2 = loop count (LE, 0 = infinite).
-            if (length < 11)
+            // NETSCAPE2.0's single application data sub-block is: byte 0 = 1 (sub-block ID), bytes 1-2 = loop count (LE, 0 = infinite).
+            if (first != 11 || restLength < 3 || rest[0] != 1 || !head.AsSpan(0, 8).SequenceEqual("NETSCAPE"u8))
             {
                 return null;
             }
 
-            string applicationId = System.Text.Encoding.ASCII.GetString(data, 0, 8);
-            if (applicationId != "NETSCAPE")
-            {
-                return null;
-            }
-
-            if (length < 14 || data[11] != 1)
-            {
-                return null;
-            }
-
-            return data[12] | (data[13] << 8);
+            return rest[1] | (rest[2] << 8);
         }
         finally
         {
-            GifBufferPool.Shared.Return(data);
+            GifBufferPool.Shared.Return(rest);
         }
+    }
+
+    /// <summary>
+    /// Reads an XMP application extension's data. The packet is stored raw, not as size-prefixed sub-blocks: the extension ends with a
+    /// 257-byte "magic trailer" (<c>0x01, 0xFF, 0xFE ... 0x01, 0x00</c>, then the block terminator) built so that a reader walking it as
+    /// ordinary sub-blocks lands exactly on the terminator. So the bytes are collected as such a reader sees them, size bytes included,
+    /// and the trailer is cut off the end to leave the packet.
+    /// </summary>
+    internal static byte[] ReadXmpPacket(Stream stream)
+    {
+        using var raw = new MemoryStream();
+        Span<byte> chunk = stackalloc byte[byte.MaxValue];
+        while (GifStreamHelpers.TryReadByte(stream, out byte size) && size != 0)
+        {
+            if (raw.Length + 1 + size > GifDecodingLimits.MaxExtensionBytes)
+            {
+                throw new GifDecodingException("GIF XMP extension exceeds the maximum allowed size.");
+            }
+
+            raw.WriteByte(size);
+            var slice = chunk[..size];
+            GifStreamHelpers.ReadExactlyOrThrow(stream, slice);
+            raw.Write(slice);
+        }
+
+        byte[] bytes = raw.ToArray();
+        return HasMagicTrailer(bytes) ? bytes[..^MagicTrailerLength] : bytes;
+    }
+
+    /// <summary>The length of the XMP magic trailer without its final block terminator.</summary>
+    internal const int MagicTrailerLength = 257;
+
+    private static bool HasMagicTrailer(byte[] bytes)
+    {
+        if (bytes.Length < MagicTrailerLength || bytes[^MagicTrailerLength] != 0x01)
+        {
+            return false;
+        }
+
+        for (int i = 1; i < MagicTrailerLength; i++)
+        {
+            if (bytes[bytes.Length - MagicTrailerLength + i] != (byte)(256 - i))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }
