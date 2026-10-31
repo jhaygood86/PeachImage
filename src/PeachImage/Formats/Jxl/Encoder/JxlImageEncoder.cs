@@ -30,7 +30,7 @@ internal static class JxlImageEncoder
         }
 
         byte[]? icc = null;
-        if (options.IncludeMetadata)
+        if (options.WritesIccProfile)
         {
             foreach (var profile in image.Metadata.Profiles)
             {

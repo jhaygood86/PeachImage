@@ -340,6 +340,87 @@ using var jpegReady = hdr.ConvertTo(PixelFormat.Rgb24);
 jpegReady.Save("photo.jpg");
 ```
 
+### Safe ingestion of untrusted uploads
+
+Everything here is opt-in: every option defaults to today's behaviour.
+
+**Restrict the formats that may be decoded.** `DecoderOptions.AllowedFormats` is a set of format names (`"jpeg"`, `"png"`, `"gif"`,
+`"webp"`, ...; compared ignoring case). The check runs right after the format is recognised from its signature, so an image in any
+other format throws `UnsupportedFormatException` before a decoder for it runs, from both `Image.Load` and `Image.Identify`. Data that
+matches no format still throws `UnknownImageFormatException`.
+
+**First frame only.** `Image.Load` decodes just the first frame of an animated GIF or WebP, fully composited, and leaves
+`Image.IsAnimated` set; the other frames are never decoded. Use `AnimatedImage.Load` to get every frame.
+
+**Know where a photo was taken.** `Image.Identify` (no pixel decode) and `Image.Load` report whether the metadata names a place:
+
+```csharp
+var info = Image.Identify(stream);
+if (info.HasLocation)             // GPS in EXIF or XMP, or City / Sub-location / Province-State in IPTC
+{
+    ExifLocation? gps = info.ExifLocation;   // raw GPSLatitude/Longitude (+ Ref) and GPSDestLatitude/Longitude
+}
+```
+
+`HasLocation` is also on `image.Metadata`. It reads EXIF from JPEG `APP1`, PNG `eXIf`, WebP `EXIF`, TIFF, AVIF and JPEG XL; XMP (a case-sensitive
+scan of the packet for `GPSLatitude`/`GPSLongitude`, at most the first 1 MiB) from JPEG, PNG `iTXt`, WebP, TIFF, GIF, AVIF and JPEG XL; and IPTC
+(Photoshop `APP13`/`8BIM 0x0404`, TIFF tag 33723) for tags 2:90, 2:92 and 2:95. The readers never trust declared offsets or counts:
+every access is bounds-checked, the IFD chain and entry count are capped, and nothing is allocated from a declared size. Other
+formats (BMP, JPEG 2000, ...) report `false`. A non-seekable stream is buffered in memory so the file can be read twice. A TIFF is read up to its first 64 MiB.
+
+**Skip metadata.** `DecoderOptions.SkipMetadata = true` returns no profiles at all (EXIF, XMP, IPTC, ICC, text) and `HasLocation` is
+`false`; the PNG decoder does not even inflate or parse the ancillary chunks. Without it, an ICC profile is returned as the file's raw
+bytes and its tags are only parsed when you call `GetIccColorProfile()`.
+
+**Decode limits.** Every decoder already checks the declared size against its own built-in ceiling (268,435,456 pixels, 16384 on
+a side for AVIF and WebP) before allocating. On top of that:
+
+- `DecoderOptions.MaxPixels` refuses an image whose header declares more pixels, before any pixel memory exists.
+- `DecoderOptions.MaxExpansionRatio` refuses an image that would decode to more than that many bytes per byte of file (so a few
+  hundred bytes of PNG, GIF or WebP cannot decode into gigabytes). Both throw `ImageTooLargeException`.
+
+**The "public copy" recipe.** Load, turn upright, resize, and re-encode without EXIF, XMP or IPTC but with the colour profile:
+
+```csharp
+var allowed = new DecoderOptions { AllowedFormats = new HashSet<string> { "jpeg", "png", "gif", "webp" } };
+var info = Image.Identify(stream, allowed);                         // refuse oversize / not-an-image here
+using var image = Image.Load(bytes, allowed);                       // first frame only
+image.ApplyOrientationInPlace(info.Orientation);                    // pixels upright; the EXIF tag is reset to 1
+using var small = image.Resize(w, h, new ResizeOptions
+{
+    Mode = ResizeMode.Max,      // bounding box, never upscaled
+    CopyMetadata = true,        // Resize drops metadata (even ICC) unless asked to carry it
+    AlwaysCopy = true,          // never the same instance as `image`, so the two dispose independently
+});
+small.Save(output, "jpeg", new JpegEncoderOptions
+{
+    Quality = 82,
+    Subsampling = JpegChromaSubsampling.Yuv420,
+    IncludeMetadata = false,        // no EXIF / XMP / IPTC / text
+    IncludeIccProfile = true,       // ...but keep the ICC profile
+});
+```
+
+`ApplyOrientationInPlace` only works in place when the result has the same size (always for flips and 180 degrees, otherwise a square
+image); for any other orientation use `ApplyOrientation(orientation)`, which returns a new image. Both reset the orientation tag in the
+EXIF they carry, so the picture is not turned twice. `IncludeIccProfile` works the same way for PNG, WebP, AVIF and JPEG XL. Left unset, it follows
+`IncludeMetadata`. With the defaults, JPEG, PNG, WebP, AVIF and JPEG XL encodes write the image's EXIF, XMP and ICC profile; GIF, BMP and animated WebP
+have no slot for them.
+
+#### Migrating from ImageSharp
+
+| ImageSharp | PeachImage |
+| --- | --- |
+| `Image.Identify(stream)` | `Image.Identify(stream)` returns `ImageInfo` (`Width`, `Height`, `FormatName`, `Orientation`, `HasLocation`) |
+| `Image.Load(bytes, new DecoderOptions { ... })` | `Image.Load(bytes, new DecoderOptions { AllowedFormats, SkipMetadata, MaxPixels, MaxExpansionRatio })` |
+| `DecoderOptions.MaxFrames = 1` | the default for `Image.Load`; use `AnimatedImage.Load` for more |
+| `DecoderOptions.SkipMetadata` | `DecoderOptions.SkipMetadata` |
+| `image.Mutate(x => x.AutoOrient())` | `image.ApplyOrientationInPlace(info.Orientation)` or `image.ApplyOrientation(info.Orientation)` |
+| `x.Resize(new ResizeOptions { Mode = ResizeMode.Max, Size = ... })` | `image.Resize(w, h, new ResizeOptions { Mode = ResizeMode.Max, AlwaysCopy = true })` |
+| `image.SaveAsJpeg(s, new JpegEncoder { Quality = 82, ColorType = YCbCrRatio420 })` | `image.Save(s, "jpeg", new JpegEncoderOptions { Quality = 82, Subsampling = JpegChromaSubsampling.Yuv420 })` |
+| `image.Metadata.ExifProfile = null; XmpProfile = null; IptcProfile = null` | `new JpegEncoderOptions { IncludeMetadata = false, IncludeIccProfile = true }` |
+| `exif.GetValue(ExifTag.GPSLatitude)` | `info.ExifLocation` / `image.Metadata.ExifLocation`, or just `HasLocation` |
+
 ## Building & testing
 
 ```bash

@@ -58,7 +58,7 @@ internal static class PngDecoder
         ArgumentNullException.ThrowIfNull(stream);
 
         var pngOptions = options as PngDecoderOptions;
-        var image = PngImageDecoder.Decode(stream, pngOptions, options?.PreviewAvailable, options?.TargetPixelFormat);
+        var image = PngImageDecoder.Decode(stream, pngOptions, options?.PreviewAvailable, options?.TargetPixelFormat, options?.SkipMetadata == true);
         bool hasAlpha = image.PixelFormat.HasAlpha();
         var result = PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
         if (!ReferenceEquals(result, image))

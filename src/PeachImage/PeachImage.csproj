@@ -4,7 +4,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsPackable>true</IsPackable>
     <PackageId>PeachImage</PackageId>
-    <Version>0.6.2</Version>
+    <Version>0.7.0</Version>
     <PackageReleaseNotes>See https://github.com/jhaygood86/PeachImage/releases for release notes.</PackageReleaseNotes>
     <RootNamespace>PeachImage</RootNamespace>
     <AssemblyName>PeachImage</AssemblyName>

@@ -4,6 +4,7 @@ using System.IO.Compression;
 using System.Runtime.InteropServices;
 using PeachImage.Formats.Png;
 using PeachImage.Formats.Png.Internal;
+using PeachImage.Formats.Shared.Metadata;
 
 namespace PeachImage.Formats.Png.Encoding;
 
@@ -41,9 +42,9 @@ internal static class PngImageEncoder
         PngChunkWriter.WriteSignature(stream);
         PngHeaderWriter.WriteIhdr(stream, image.Width, image.Height, colorType, bitDepth, options.Interlace);
 
-        if (options.IncludeMetadata)
+        if (options.IncludeMetadata || options.WritesIccProfile)
         {
-            PngAncillaryChunkWriter.WriteColorProfileChunks(stream, image.Metadata);
+            PngAncillaryChunkWriter.WriteColorProfileChunks(stream, image.Metadata, options.WritesIccProfile, options.IncludeMetadata);
         }
 
         if (indexedPlan is { } indexed)
@@ -66,6 +67,18 @@ internal static class PngImageEncoder
         if (options.IncludeMetadata)
         {
             PngAncillaryChunkWriter.WriteRemainingChunks(stream, image.Metadata);
+        }
+
+        if (EncodableMetadata.Exif(image, options) is { } exif)
+        {
+            PngChunkWriter.WriteChunk(stream, PngChunkType.Exif, exif);
+        }
+
+        if (EncodableMetadata.Xmp(image, options) is { } xmp)
+        {
+            // Adobe's XMP-in-PNG convention: an uncompressed iTXt chunk keyed "XML:com.adobe.xmp" holding the packet.
+            byte[] keyword = "XML:com.adobe.xmp\0\0\0\0\0"u8.ToArray(); // keyword, NUL, compression flag, method, empty language tag + NUL, empty translated keyword + NUL
+            PngChunkWriter.WriteChunk(stream, PngChunkType.Itxt, [.. keyword, .. xmp]);
         }
 
         ReadOnlySpan<Adam7Pass> passes = options.Interlace ? Adam7.Passes : [new Adam7Pass(0, 0, 1, 1)];

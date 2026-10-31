@@ -12,25 +12,25 @@ namespace PeachImage.Formats.Png.Encoding;
 internal static class PngAncillaryChunkWriter
 {
     /// <summary>Chunks that must precede PLTE (and IDAT): color-management data the palette itself depends on.</summary>
-    public static void WriteColorProfileChunks(Stream stream, ImageMetadata metadata)
+    public static void WriteColorProfileChunks(Stream stream, ImageMetadata metadata, bool includeIcc, bool includeOthers)
     {
         foreach (var profile in metadata.Profiles)
         {
             switch (profile.Kind)
             {
-                case MetadataProfileKind.Icc:
+                case MetadataProfileKind.Icc when includeIcc:
                     WriteIccp(stream, profile.Data);
                     break;
 
-                case MetadataProfileKind.Gamma when profile.Data.Length == 4:
+                case MetadataProfileKind.Gamma when includeOthers && profile.Data.Length == 4:
                     PngChunkWriter.WriteChunk(stream, PngChunkType.Gama, profile.Data);
                     break;
 
-                case MetadataProfileKind.Chromaticity when profile.Data.Length == 32:
+                case MetadataProfileKind.Chromaticity when includeOthers && profile.Data.Length == 32:
                     PngChunkWriter.WriteChunk(stream, PngChunkType.Chrm, profile.Data);
                     break;
 
-                case MetadataProfileKind.Srgb when profile.Data.Length == 1:
+                case MetadataProfileKind.Srgb when includeOthers && profile.Data.Length == 1:
                     PngChunkWriter.WriteChunk(stream, PngChunkType.Srgb, profile.Data);
                     break;
             }

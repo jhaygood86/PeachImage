@@ -38,4 +38,10 @@ public enum MetadataProfileKind
 
     /// <summary>A profile whose kind was not recognized by the decoder.</summary>
     Unknown,
+
+    /// <summary>
+    /// IPTC-IIM data inside a Photoshop image-resource block: a JPEG <c>APP13</c> segment's payload, including its leading
+    /// <c>Photoshop 3.0</c> signature. Captured on decode only; no encoder writes it.
+    /// </summary>
+    Iptc,
 }

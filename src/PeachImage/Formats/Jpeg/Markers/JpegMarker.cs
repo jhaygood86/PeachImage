@@ -93,6 +93,9 @@ internal enum JpegMarker : byte
     /// <summary>Application-specific segment 2 (commonly an embedded ICC profile).</summary>
     App2 = 0xE2,
 
+    /// <summary>Application-specific segment 13 (commonly Photoshop image resources, which carry IPTC).</summary>
+    App13 = 0xED,
+
     /// <summary>Application-specific segment 14 (commonly the Adobe marker).</summary>
     App14 = 0xEE,
 

@@ -191,16 +191,23 @@ public sealed class Image : IDisposable
     {
         var copy = Create(Width, Height, PixelFormat);
         GetPixelSpan().CopyTo(copy.GetPixelSpan());
-        copy.Metadata.HorizontalResolution = Metadata.HorizontalResolution;
-        copy.Metadata.VerticalResolution = Metadata.VerticalResolution;
-        foreach (var profile in Metadata.Profiles)
-        {
-            copy.Metadata.Profiles.Add(profile);
-        }
-
+        CopyMetadataTo(copy);
         copy.HasAlpha = HasAlpha;
         copy.IsAnimated = IsAnimated;
         return copy;
+    }
+
+    // Resolution, profiles and the location found when the file was loaded: everything ImageMetadata holds.
+    private void CopyMetadataTo(Image target)
+    {
+        target.Metadata.HorizontalResolution = Metadata.HorizontalResolution;
+        target.Metadata.VerticalResolution = Metadata.VerticalResolution;
+        foreach (var profile in Metadata.Profiles)
+        {
+            target.Metadata.Profiles.Add(profile);
+        }
+
+        target.Metadata.ScannedLocation = Metadata.ScannedLocation;
     }
 
     /// <summary>
@@ -237,6 +244,8 @@ public sealed class Image : IDisposable
         {
             result.Metadata.Profiles.Add(WithUprightOrientation(profile));
         }
+
+        result.Metadata.ScannedLocation = Metadata.ScannedLocation;
 
         result.HasAlpha = HasAlpha;
         result.IsAnimated = IsAnimated;
@@ -299,7 +308,11 @@ public sealed class Image : IDisposable
     /// <see cref="ImageOrientation.Rotate180"/> and <see cref="ImageOrientation.MirrorVertical"/>, and for the other four only on a
     /// square image.
     /// </summary>
-    /// <remarks>Metadata is not changed (neither the resolution of a square image nor an EXIF orientation tag), so a caller that keeps the image's EXIF profile should reset its orientation tag itself; <see cref="ApplyOrientation(ImageOrientation)"/> does that for you.</remarks>
+    /// <remarks>
+    /// The resolution of a square image is not changed. An EXIF profile in <see cref="Metadata"/> is replaced by a copy whose orientation tag
+    /// is reset to 1 (the original profile's bytes are never mutated), so saving the image with its metadata does not turn the already-upright
+    /// pixels a second time. Orientation recorded elsewhere, such as in XMP, is not rewritten.
+    /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="orientation"/> is not a defined orientation.</exception>
     /// <exception cref="InvalidOperationException">The orientation swaps width and height and this image is not square: use <see cref="ApplyOrientation(ImageOrientation)"/> or <see cref="ApplyOrientation(ImageOrientation, Image)"/>.</exception>
     public void ApplyOrientationInPlace(ImageOrientation orientation)
@@ -307,6 +320,19 @@ public sealed class Image : IDisposable
         ThrowIfUndefined(orientation);
         ThrowIfUnusable();
         ImageOrientationApplier.ApplyInPlace(orientation, GetPixelSpan(), Width, Height, PixelFormat.GetBytesPerPixel());
+        if (orientation == ImageOrientation.Normal)
+        {
+            return;
+        }
+
+        for (int i = 0; i < Metadata.Profiles.Count; i++)
+        {
+            var upright = WithUprightOrientation(Metadata.Profiles[i]);
+            if (!ReferenceEquals(upright, Metadata.Profiles[i]))
+            {
+                Metadata.Profiles[i] = upright;
+            }
+        }
     }
 
     private static void ThrowIfUndefined(ImageOrientation orientation)
@@ -367,13 +393,7 @@ public sealed class Image : IDisposable
         }
 
         var result = ImagePixelConverter.Convert(this, targetFormat);
-        result.Metadata.HorizontalResolution = Metadata.HorizontalResolution;
-        result.Metadata.VerticalResolution = Metadata.VerticalResolution;
-        foreach (var profile in Metadata.Profiles)
-        {
-            result.Metadata.Profiles.Add(profile);
-        }
-
+        CopyMetadataTo(result);
         result.HasAlpha = HasAlpha;
         result.IsAnimated = IsAnimated;
         return result;
@@ -406,13 +426,7 @@ public sealed class Image : IDisposable
         var result = Create(Width, Height, PixelFormat.Rgba32);
         iccProfile.ConvertToSrgb(GetPixelSpan(), result.GetPixelSpan(), Width * Height);
 
-        result.Metadata.HorizontalResolution = Metadata.HorizontalResolution;
-        result.Metadata.VerticalResolution = Metadata.VerticalResolution;
-        foreach (var profile in Metadata.Profiles)
-        {
-            result.Metadata.Profiles.Add(profile);
-        }
-
+        CopyMetadataTo(result);
         result.HasAlpha = false;
         return result;
     }
@@ -437,7 +451,37 @@ public sealed class Image : IDisposable
             throw new UnknownImageFormatException("The image format could not be determined from the stream contents.");
         }
 
-        return codec.Decode(preparedStream, options);
+        ThrowIfFormatNotAllowed(codec, options);
+
+        bool skipMetadata = options?.SkipMetadata == true;
+        bool scanLocation = !skipMetadata && ContainerLocationScanner.Supports(codec.FormatName);
+        bool checkLimits = options is { MaxPixels: not null } or { MaxExpansionRatio: not null };
+        var location = default(LocationInfo);
+        if (scanLocation || checkLimits)
+        {
+            preparedStream = EnsureSeekable(preparedStream);
+            if (checkLimits)
+            {
+                EnforceDeclaredLimits(codec, preparedStream, options!);
+            }
+
+            if (scanLocation)
+            {
+                location = ContainerLocationScanner.Scan(preparedStream, codec.FormatName);
+            }
+        }
+
+        var image = codec.Decode(preparedStream, options);
+        if (skipMetadata)
+        {
+            image.Metadata.Profiles.Clear();
+        }
+        else
+        {
+            image.Metadata.ScannedLocation = location;
+        }
+
+        return image;
     }
 
     /// <summary>Attempts to load an image from <paramref name="stream"/>, returning <see langword="false"/> instead of throwing on failure.</summary>
@@ -494,7 +538,82 @@ public sealed class Image : IDisposable
             throw new UnknownImageFormatException("The image format could not be determined from the stream contents.");
         }
 
-        return codec.Identify(preparedStream, options);
+        ThrowIfFormatNotAllowed(codec, options);
+
+        if (options?.SkipMetadata == true || !ContainerLocationScanner.Supports(codec.FormatName))
+        {
+            return codec.Identify(preparedStream, options);
+        }
+
+        preparedStream = EnsureSeekable(preparedStream);
+        var location = ContainerLocationScanner.Scan(preparedStream, codec.FormatName);
+        return codec.Identify(preparedStream, options) with { HasLocation = location.HasLocation, ExifLocation = location.Exif };
+    }
+
+    private static void ThrowIfFormatNotAllowed(IImageCodec codec, DecoderOptions? options)
+    {
+        if (options?.AllowedFormats is { } allowed && !allowed.Contains(codec.FormatName) && !ContainsIgnoreCase(allowed, codec.FormatName))
+        {
+            throw new UnsupportedFormatException(codec.FormatName);
+        }
+    }
+
+    private static bool ContainsIgnoreCase(IReadOnlySet<string> set, string value)
+    {
+        foreach (string item in set)
+        {
+            if (string.Equals(item, value, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // The location scan and the declared-size limits need to read the stream and then decode it from the same place.
+    private static Stream EnsureSeekable(Stream stream)
+    {
+        if (stream.CanSeek)
+        {
+            return stream;
+        }
+
+        var buffered = new MemoryStream();
+        stream.CopyTo(buffered);
+        buffered.Position = 0;
+        return buffered;
+    }
+
+    // Compares what the header declares with the caller's limits, before any pixel memory is allocated.
+    private static void EnforceDeclaredLimits(IImageCodec codec, Stream stream, DecoderOptions options)
+    {
+        long start = stream.Position;
+        long fileLength = stream.Length - start;
+        ImageInfo info;
+        try
+        {
+            info = codec.Identify(stream, options);
+        }
+        finally
+        {
+            stream.Position = start;
+        }
+
+        long pixels = (long)info.Width * info.Height;
+        if (options.MaxPixels is { } maxPixels && pixels > maxPixels)
+        {
+            throw new ImageTooLargeException($"The image declares {info.Width}x{info.Height} ({pixels} pixels), more than the {maxPixels} allowed by {nameof(DecoderOptions.MaxPixels)}.", info.FormatName);
+        }
+
+        if (options.MaxExpansionRatio is { } maxRatio)
+        {
+            double decodedBytes = (double)pixels * info.PixelFormat.GetBytesPerPixel();
+            if (decodedBytes > Math.Max(fileLength, 1) * maxRatio)
+            {
+                throw new ImageTooLargeException($"The image would decode to {decodedBytes:N0} bytes from {fileLength:N0} bytes of file, more than the {maxRatio}x allowed by {nameof(DecoderOptions.MaxExpansionRatio)}.", info.FormatName);
+            }
+        }
     }
 
     /// <summary>Capability and identity metadata for every format PeachImage has a built-in codec for.</summary>
@@ -531,12 +650,49 @@ public sealed class Image : IDisposable
     /// resized result to have independent lifetimes regardless of which path is taken, dispose only after
     /// you're done with both, or check <see cref="object.ReferenceEquals(object?, object?)"/> first.
     /// </summary>
+    /// <remarks>
+    /// Set <see cref="ResizeOptions.AlwaysCopy"/> to get a new, independently owned image even on that fast path, so the result and the
+    /// source can be disposed without regard to each other. The resized image carries no metadata (not even an ICC profile) unless
+    /// <see cref="ResizeOptions.CopyMetadata"/> is set.
+    /// </remarks>
     public Image Resize(int width, int height, ResizeOptions? options = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(width, 0);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(height, 0);
 
         options ??= new ResizeOptions();
+        var result = ResizeCore(width, height, options);
+        if (ReferenceEquals(result, this))
+        {
+            // The fast path returned this image, which already has its own metadata.
+            if (!options.AlwaysCopy)
+            {
+                return result;
+            }
+
+            var copy = Clone();
+            if (!options.CopyMetadata)
+            {
+                // Same contract as a resize that really resamples: no metadata unless asked for.
+                copy.Metadata.Profiles.Clear();
+                copy.Metadata.HorizontalResolution = null;
+                copy.Metadata.VerticalResolution = null;
+                copy.Metadata.ScannedLocation = default;
+            }
+
+            return copy;
+        }
+
+        if (options.CopyMetadata)
+        {
+            CopyMetadataTo(result);
+        }
+
+        return result;
+    }
+
+    private Image ResizeCore(int width, int height, ResizeOptions options)
+    {
         if (options.Mode == ResizeMode.Max)
         {
             (width, height) = ResizeToFitCalculator.ComputeFitDimensions(Width, Height, width, height);

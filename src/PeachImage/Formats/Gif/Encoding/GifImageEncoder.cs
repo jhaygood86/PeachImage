@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Metadata;
 using PeachImage.Formats.Shared.Quantization;
 
 namespace PeachImage.Formats.Gif.Encoding;
@@ -10,7 +11,7 @@ internal static class GifImageEncoder
 
     public static void EncodeStatic(Image image, Stream stream, GifEncoderOptions options)
     {
-        EncodeFrames(stream, [(image, TimeSpan.Zero, GifDisposalMethod.None)], loopCount: null, options);
+        EncodeFrames(stream, [(image, TimeSpan.Zero, GifDisposalMethod.None)], loopCount: null, options, EncodableMetadata.Xmp(image, options));
     }
 
     public static void EncodeAnimation(AnimatedImage image, Stream stream, GifEncoderOptions options)
@@ -39,7 +40,7 @@ internal static class GifImageEncoder
         _ => GifDisposalMethod.None,
     };
 
-    private static void EncodeFrames(Stream stream, List<(Image Image, TimeSpan Duration, GifDisposalMethod Disposal)> frames, int? loopCount, GifEncoderOptions options)
+    private static void EncodeFrames(Stream stream, List<(Image Image, TimeSpan Duration, GifDisposalMethod Disposal)> frames, int? loopCount, GifEncoderOptions options, byte[]? xmp = null)
     {
         if (frames.Count == 0)
         {
@@ -104,6 +105,11 @@ internal static class GifImageEncoder
             WriteNetscapeLoopExtension(stream, loops);
         }
 
+        if (xmp is not null)
+        {
+            WriteXmpExtension(stream, xmp);
+        }
+
         // Built once and reused across every pixel of every frame — the k-d tree's O(n log n) build cost is
         // amortized against however many pixels this encode ends up mapping through it.
         var paletteTree = new PaletteKdTree(colorTable);
@@ -140,6 +146,24 @@ internal static class GifImageEncoder
         stream.WriteByte(1);
         WriteUInt16(stream, (ushort)Math.Clamp(loopCount, 0, ushort.MaxValue));
         stream.WriteByte(0);
+    }
+
+    // "XMP DataXMP" application extension: the packet raw, then the 258-byte magic trailer (0x01, 0xFF, 0xFE ... 0x01, 0x00, and the block
+    // terminator 0x00) that lets readers unaware of XMP skip the whole thing as ordinary sub-blocks.
+    private static void WriteXmpExtension(Stream stream, byte[] xmp)
+    {
+        stream.WriteByte(0x21);
+        stream.WriteByte(0xFF);
+        stream.WriteByte(11);
+        stream.Write("XMP DataXMP"u8);
+        stream.Write(xmp);
+        stream.WriteByte(0x01);
+        for (int value = 0xFF; value >= 0; value--)
+        {
+            stream.WriteByte((byte)value);
+        }
+
+        stream.WriteByte(0x00);
     }
 
     private static void WriteUInt16(Stream stream, ushort value)

@@ -58,6 +58,12 @@ namespace PeachImage;
 /// <see cref="ImageOrientation.Normal"/> when there is none. It is informational: decoders never apply it, so
 /// <paramref name="Width"/>, <paramref name="Height"/> and the decoded pixels are always as stored.
 /// </param>
+/// <param name="HasLocation">
+/// Whether the file's metadata says where it was taken: GPS tags in EXIF or XMP, or a place named in IPTC. Only
+/// <c>jpeg</c>, <c>png</c>, <c>webp</c>, <c>tiff</c>, <c>gif</c>, <c>avif</c> and <c>jxl</c> sources are examined
+/// (<see langword="false"/> for every other format), and nothing is examined when <see cref="DecoderOptions.SkipMetadata"/> is set. See <see cref="ImageMetadata.HasLocation"/>.
+/// </param>
+/// <param name="ExifLocation">The raw EXIF GPS values, when the EXIF names any. See <see cref="PeachImage.ExifLocation"/>.</param>
 public readonly record struct ImageInfo(
     int Width,
     int Height,
@@ -69,4 +75,6 @@ public readonly record struct ImageInfo(
     bool IsYcck = false,
     bool IsLosslessEncoding = false,
     bool HasPreview = false,
-    ImageOrientation Orientation = ImageOrientation.Normal);
+    ImageOrientation Orientation = ImageOrientation.Normal,
+    bool HasLocation = false,
+    ExifLocation? ExifLocation = null);
