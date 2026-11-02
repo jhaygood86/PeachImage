@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Parallelism;
 using System.Diagnostics.CodeAnalysis;
 using PeachImage.Formats.Jxl.Jpeg;
 
@@ -36,21 +37,39 @@ public static class JxlJpegReconstruction
     /// <returns>The bytes of the original JPEG file.</returns>
     /// <exception cref="JxlUnsupportedFeatureException">The file has no JPEG reconstruction data.</exception>
     /// <exception cref="JxlFormatException">The file is not valid JPEG XL, or its reconstruction data is damaged.</exception>
-    public static byte[] ReconstructJpeg(Stream stream)
+    public static byte[] ReconstructJpeg(Stream stream) => ReconstructJpeg(stream, -1);
+
+    /// <summary>Reconstructs the original JPEG file from the JPEG XL file in <paramref name="stream"/>, bounding the threads the call may use.</summary>
+    /// <param name="stream">A readable stream positioned at the start of the file. It is read to its end.</param>
+    /// <param name="maxDegreeOfParallelism">The most threads this call may use: -1 leaves it to the library (up to <see cref="Environment.ProcessorCount"/>), 1 runs on the calling thread. Per call, not global. Does not change the output.</param>
+    /// <param name="taskScheduler">An optional scheduler for the parallel work, to share one limit across concurrent calls. <see langword="null"/> uses the thread pool.</param>
+    /// <returns>The bytes of the original JPEG file.</returns>
+    /// <exception cref="JxlUnsupportedFeatureException">The file has no JPEG reconstruction data.</exception>
+    /// <exception cref="JxlFormatException">The file is not valid JPEG XL, or its reconstruction data is damaged.</exception>
+    public static byte[] ReconstructJpeg(Stream stream, int maxDegreeOfParallelism, TaskScheduler? taskScheduler = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
-        return JxlJpegReconstructor.Reconstruct(JxlDecoder.ReadAll(stream));
+        return JxlJpegReconstructor.Reconstruct(JxlDecoder.ReadAll(stream), new ParallelSettings(maxDegreeOfParallelism, taskScheduler));
     }
 
     /// <summary>Reconstructs the original JPEG file from the JPEG XL file in <paramref name="source"/> and writes it to <paramref name="destination"/>.</summary>
     /// <exception cref="JxlUnsupportedFeatureException">The file has no JPEG reconstruction data.</exception>
     /// <exception cref="JxlFormatException">The file is not valid JPEG XL, or its reconstruction data is damaged.</exception>
-    public static void ReconstructJpeg(Stream source, Stream destination)
+    public static void ReconstructJpeg(Stream source, Stream destination) => ReconstructJpeg(source, destination, -1);
+
+    /// <summary>Reconstructs the original JPEG file from the JPEG XL file in <paramref name="source"/> and writes it to <paramref name="destination"/>, bounding the threads the call may use.</summary>
+    /// <param name="source">A readable stream positioned at the start of the file. It is read to its end.</param>
+    /// <param name="destination">The stream the result is written to.</param>
+    /// <param name="maxDegreeOfParallelism">The most threads this call may use: -1 leaves it to the library (up to <see cref="Environment.ProcessorCount"/>), 1 runs on the calling thread. Per call, not global. Does not change the output.</param>
+    /// <param name="taskScheduler">An optional scheduler for the parallel work, to share one limit across concurrent calls. <see langword="null"/> uses the thread pool.</param>
+    /// <exception cref="JxlUnsupportedFeatureException">The file has no JPEG reconstruction data.</exception>
+    /// <exception cref="JxlFormatException">The file is not valid JPEG XL, or its reconstruction data is damaged.</exception>
+    public static void ReconstructJpeg(Stream source, Stream destination, int maxDegreeOfParallelism, TaskScheduler? taskScheduler = null)
     {
         ArgumentNullException.ThrowIfNull(destination);
 
-        destination.Write(ReconstructJpeg(source));
+        destination.Write(ReconstructJpeg(source, maxDegreeOfParallelism, taskScheduler));
     }
 
     /// <summary>
@@ -58,7 +77,16 @@ public static class JxlJpegReconstruction
     /// Returns <see langword="false"/> (without throwing) for files that are not JPEG XL or were not made from a JPEG.
     /// </summary>
     /// <exception cref="JxlFormatException">The file claims to hold a JPEG but its data is damaged.</exception>
-    public static bool TryReconstructJpeg(Stream stream, [NotNullWhen(true)] out byte[]? jpeg)
+    public static bool TryReconstructJpeg(Stream stream, [NotNullWhen(true)] out byte[]? jpeg) =>
+        TryReconstructJpeg(stream, -1, null, out jpeg);
+
+    /// <summary>Like <see cref="TryReconstructJpeg(Stream, out byte[])"/>, bounding the threads the call may use.</summary>
+    /// <param name="stream">A readable stream positioned at the start of the file. It is read to its end.</param>
+    /// <param name="jpeg">The original JPEG file, when this returns <see langword="true"/>.</param>
+    /// <param name="maxDegreeOfParallelism">The most threads this call may use: -1 leaves it to the library (up to <see cref="Environment.ProcessorCount"/>), 1 runs on the calling thread. Per call, not global. Does not change the output.</param>
+    /// <param name="taskScheduler">An optional scheduler for the parallel work, to share one limit across concurrent calls. <see langword="null"/> uses the thread pool.</param>
+    /// <exception cref="JxlFormatException">The file claims to hold a JPEG but its data is damaged.</exception>
+    public static bool TryReconstructJpeg(Stream stream, int maxDegreeOfParallelism, TaskScheduler? taskScheduler, [NotNullWhen(true)] out byte[]? jpeg)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
@@ -76,7 +104,7 @@ public static class JxlJpegReconstruction
             return false;
         }
 
-        jpeg = JxlJpegReconstructor.Reconstruct(file);
+        jpeg = JxlJpegReconstructor.Reconstruct(file, new ParallelSettings(maxDegreeOfParallelism, taskScheduler));
         return true;
     }
 }

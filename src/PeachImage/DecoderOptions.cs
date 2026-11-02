@@ -142,9 +142,11 @@ public class DecoderOptions
 
     /// <summary>
     /// Decodes at a reduced size: 1 (the default, full size), 2, 4 or 8 for 1/2, 1/4 or 1/8 of the width and height, rounded up
-    /// (<c>ceil(size / N)</c>). JPEG, JPEG 2000 and JPEG XL reduce natively, which saves most of the decode work and memory (JPEG scales in
-    /// the DCT domain, so a 24 megapixel photo at 1/8 never builds a full-size image); every other format decodes at full size and is then
-    /// averaged down, so the result size is the same but nothing is saved. <see cref="TargetSize"/>, when set, chooses the denominator instead.
+    /// (<c>ceil(size / N)</c>). Three formats reduce natively and save most of the decode work and memory: JPEG scales in the DCT domain (so a
+    /// 24 megapixel photo at 1/8 never builds a full-size image), JPEG 2000 drops resolution levels (its wavelet low-pass differs from a box
+    /// average, so expect larger differences from a resize), and JPEG XL decodes 1/8 from the DC image of a plain VarDCT still (1/2 and 1/4,
+    /// and modular, lossless, alpha, animated and other feature-heavy files, decode at full size). Every other format decodes at full size and is
+    /// then averaged down, so the result size is the same but nothing is saved. <see cref="TargetSize"/>, when set, chooses the denominator instead.
     /// </summary>
     /// <remarks>
     /// <see cref="MaxPixels"/> and <see cref="MaxExpansionRatio"/> are checked against the size the header declares, not the reduced size.
