@@ -1,4 +1,5 @@
 using System.Buffers;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jpeg2000.Decoding;
 
@@ -168,7 +169,7 @@ internal sealed class J2kImagePlan
     }
 
     /// <summary>Builds the image: a row-wise pass that upsamples, expands palettes, rescales depths and interleaves.</summary>
-    public Image Build(J2kSiz siz, int reduce, ushort[][] planes, int[] planeWidths, int[] planeHeights, int[] planeOriginX, int[] planeOriginY, int width, int height, int gridOriginX, int gridOriginY)
+    public Image Build(J2kSiz siz, int reduce, ushort[][] planes, int[] planeWidths, int[] planeHeights, int[] planeOriginX, int[] planeOriginY, int width, int height, int gridOriginX, int gridOriginY, ParallelSettings parallel = default)
     {
         var image = Image.Create(width, height, Format);
         int channelCount = _color.Length + (_hasAlpha ? 1 : 0);
@@ -189,7 +190,6 @@ internal sealed class J2kImagePlan
             tables[k] = BuildScaleTable(all[k].Depth, outDepth, Palette, all[k]);
         }
 
-        var options = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
         int rowsPerChunk = 16;
         int chunks = (height + rowsPerChunk - 1) / rowsPerChunk;
         void Body(int chunk)
@@ -223,9 +223,9 @@ internal sealed class J2kImagePlan
             }
         }
 
-        if (chunks > 1 && (long)width * height >= 65536)
+        if (chunks > 1 && (long)width * height >= 65536 && !parallel.IsSequential)
         {
-            Parallel.For(0, chunks, options, Body);
+            Parallel.For(0, chunks, parallel.ToParallelOptions(), Body);
         }
         else
         {

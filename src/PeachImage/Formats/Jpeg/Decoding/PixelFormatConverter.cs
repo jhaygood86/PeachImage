@@ -6,7 +6,7 @@ namespace PeachImage.Formats.Jpeg.Decoding;
 internal static class PixelFormatConverter
 {
     /// <summary>Converts <paramref name="image"/> to <paramref name="target"/> if needed.</summary>
-    public static Image ConvertIfNeeded(Image image, PixelFormat? target)
+    public static Image ConvertIfNeeded(Image image, PixelFormat? target, IccColorProfile? fallbackCmykProfile = null)
     {
         if (target is not { } targetFormat || targetFormat == image.PixelFormat)
         {
@@ -25,7 +25,7 @@ internal static class PixelFormatConverter
             // `image.PixelFormat` is always standard (non-inverted) CMYK here regardless of source encoding --
             // FrameReconstructor already undoes Adobe's inverted-CMYK convention and YCCK's transform before
             // producing PixelFormat.Cmyk32, so this one conversion point covers all three uniformly.
-            (PixelFormat.Cmyk32, PixelFormat.Rgba32) => ConvertCmykToRgba32(image),
+            (PixelFormat.Cmyk32, PixelFormat.Rgba32) => ConvertCmykToRgba32(image, fallbackCmykProfile),
 
             _ => throw new JpegDecodingException($"Cannot convert decoded {image.PixelFormat} pixels to requested format {targetFormat}."),
         };
@@ -48,7 +48,7 @@ internal static class PixelFormatConverter
     /// (<see cref="PixelFormatConversionKernels.ConvertCmyk32ToRgba32"/>) otherwise -- never throws on a
     /// missing, corrupt, or unsupported profile.
     /// </summary>
-    private static Image ConvertCmykToRgba32(Image image)
+    private static Image ConvertCmykToRgba32(Image image, IccColorProfile? fallbackCmykProfile)
     {
         var dest = Image.Create(image.Width, image.Height, PixelFormat.Rgba32);
         int pixelCount = image.Width * image.Height;
@@ -61,6 +61,12 @@ internal static class PixelFormatConverter
             {
                 return dest;
             }
+        }
+
+        if (fallbackCmykProfile is { ChannelCount: 4 })
+        {
+            fallbackCmykProfile.ConvertToSrgb(source, destination, pixelCount);
+            return dest;
         }
 
         PixelFormatConversionKernels.ConvertCmyk32ToRgba32(source, destination, pixelCount);

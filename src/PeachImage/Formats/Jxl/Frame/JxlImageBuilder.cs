@@ -13,7 +13,7 @@ namespace PeachImage.Formats.Jxl.Frame;
 /// </summary>
 internal static class JxlImageBuilder
 {
-    public static Image Build(JxlDecodedFrame frame, JxlCodestreamHeaders headers, PixelFormat? target)
+    public static Image Build(JxlDecodedFrame frame, JxlCodestreamHeaders headers, PixelFormat? target, ParallelSettings parallel = default)
     {
         var metadata = headers.Metadata;
         if (JxlPixelFormatSelector.IsCmyk(metadata))
@@ -23,7 +23,7 @@ internal static class JxlImageBuilder
                 throw new JxlUnsupportedFeatureException("A CMYK JPEG XL image can only be decoded to the CMYK pixel format (use Image.ConvertToSrgb for colour management).");
             }
 
-            return BuildCmyk(frame, headers);
+            return BuildCmyk(frame, headers, parallel);
         }
 
         var format = target ?? JxlPixelFormatSelector.Select(metadata);
@@ -137,7 +137,7 @@ internal static class JxlImageBuilder
                     WriteRowFloat(MemoryMarshal.Cast<byte, float>(row), r0, r1, r2, ra, layout, colorConverter, alphaConverter);
                     break;
             }
-        });
+        }, settings: parallel);
 
         image.HasAlpha = alpha is not null;
         return image;
@@ -145,7 +145,7 @@ internal static class JxlImageBuilder
 
     // CMYK: cyan, magenta and yellow are the colour channels and key is the black extra channel; the ICC profile (attached by the
     // caller) gives the values their meaning.
-    private static Image BuildCmyk(JxlDecodedFrame frame, JxlCodestreamHeaders headers)
+    private static Image BuildCmyk(JxlDecodedFrame frame, JxlCodestreamHeaders headers, ParallelSettings parallel)
     {
         var metadata = headers.Metadata;
         var floatPlanes = frame.ColorPlanes;
@@ -201,7 +201,7 @@ internal static class JxlImageBuilder
 
                 row[o + 3] = Ink(blackConverter.ToByte(rk[x]));
             }
-        });
+        }, settings: parallel);
 
         image.HasAlpha = false;
         return image;

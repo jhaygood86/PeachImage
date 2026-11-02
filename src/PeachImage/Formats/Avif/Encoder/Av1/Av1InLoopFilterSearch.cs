@@ -1,4 +1,5 @@
 using PeachImage.Formats.Avif.Decoding.Av1;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
@@ -41,7 +42,7 @@ internal static class Av1InLoopFilterSearch
         int[] reconY, int[]? reconU, int[]? reconV,
         int[] sourceY, int[]? sourceU, int[]? sourceV,
         int width, int height, int chromaWidth, int chromaHeight,
-        bool monoChrome, int baseQIdx)
+        bool monoChrome, int baseQIdx, ParallelSettings parallel = default)
     {
         int miCols = 2 * ((width + 7) >> 3);
         int miRows = 2 * ((height + 7) >> 3);
@@ -62,7 +63,7 @@ internal static class Av1InLoopFilterSearch
         // winner is the lowest SSE (earliest candidate on a tie), exactly what the old sequential loop picked.
         var gate = new object();
         int bestIndex = int.MaxValue;
-        Parallel.For(0, CandidateLevels.Length, index =>
+        void Trial(int index)
         {
             int level = CandidateLevels[index];
             if (level == 0)
@@ -78,7 +79,7 @@ internal static class Av1InLoopFilterSearch
 
             var frame = BuildFrameHeaderForLevel(width, height, monoChrome, baseQIdx, level);
             var result = BuildDecodeResult(seq, frame, trialY, trialU, trialV, miCols, miRows, width, height, chromaWidth, chromaHeight);
-            Av1DeblockingFilter.Apply(result);
+            Av1DeblockingFilter.Apply(result, parallel);
 
             long sse = Av1SquaredError.Compute(trialY, sourceY) + Av1SquaredError.Compute(trialU, sourceU) + Av1SquaredError.Compute(trialV, sourceV);
             lock (gate)
@@ -93,7 +94,19 @@ internal static class Av1InLoopFilterSearch
                     bestFilteredV = trialV;
                 }
             }
-        });
+        }
+
+        if (parallel.IsSequential)
+        {
+            for (int index = 0; index < CandidateLevels.Length; index++)
+            {
+                Trial(index);
+            }
+        }
+        else
+        {
+            Parallel.For(0, CandidateLevels.Length, parallel.ToParallelOptions(), Trial);
+        }
 
         if (bestFilteredY is not null)
         {

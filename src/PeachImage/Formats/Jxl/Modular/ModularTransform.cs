@@ -131,12 +131,12 @@ internal sealed class ModularTransform
     }
 
     /// <summary>Reconstructs the original channels from the decoded, transformed ones.</summary>
-    public void Inverse(ModularImage image, WeightedPredictorHeader wpHeader)
+    public void Inverse(ModularImage image, WeightedPredictorHeader wpHeader, ParallelSettings parallel = default)
     {
         switch (Id)
         {
             case ModularTransformId.Rct:
-                InverseRct(image, (int)BeginChannel, (int)RctType);
+                InverseRct(image, (int)BeginChannel, (int)RctType, parallel);
                 break;
             case ModularTransformId.Squeeze:
                 InverseSqueeze(image, Squeezes);
@@ -175,7 +175,7 @@ internal sealed class ModularTransform
 
     // ---- RCT ----
 
-    private static void InverseRct(ModularImage image, int begin, int rctType)
+    private static void InverseRct(ModularImage image, int begin, int rctType, ParallelSettings parallel)
     {
         CheckEqualChannels(image, begin, begin + 2);
         if (rctType == 0)
@@ -210,7 +210,7 @@ internal sealed class ModularTransform
         var oc0 = channels[out0];
         var oc1 = channels[out1];
         var oc2 = channels[out2];
-        RowParallel.For(height, y => InverseRctRow(ch0.Row(y), ch1.Row(y), ch2.Row(y), oc0.Row(y), oc1.Row(y), oc2.Row(y), custom));
+        RowParallel.For(height, y => InverseRctRow(ch0.Row(y), ch1.Row(y), ch2.Row(y), oc0.Row(y), oc1.Row(y), oc2.Row(y), custom), settings: parallel);
     }
 
     // One row of the inverse RCT; the output rows may alias the input rows (position for position).

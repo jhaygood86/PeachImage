@@ -54,22 +54,22 @@ internal static class JxlSampleConversion
     }
 
     /// <summary>Converts a whole channel to a compact float plane, rows in parallel.</summary>
-    public static void ToFloatPlane(int[] source, float[] destination, int width, int height, float scale)
+    public static void ToFloatPlane(int[] source, float[] destination, int width, int height, float scale, ParallelSettings parallel = default)
     {
-        RowParallel.For(height, y => ToFloat(source.AsSpan(y * width, width), destination.AsSpan(y * width, width), scale));
+        RowParallel.For(height, y => ToFloat(source.AsSpan(y * width, width), destination.AsSpan(y * width, width), scale), settings: parallel);
     }
 
     /// <summary>Converts <paramref name="height"/> rows of a float plane (rows <paramref name="sourceStride"/> apart) into a compact integer channel.</summary>
-    public static void ToIntChannel(float[] source, int sourceStride, int[] destination, int width, int height, float max)
+    public static void ToIntChannel(float[] source, int sourceStride, int[] destination, int width, int height, float max, ParallelSettings parallel = default)
     {
-        RowParallel.For(height, y => ToInt(source.AsSpan(y * sourceStride, width), destination.AsSpan(y * width, width), max));
+        RowParallel.For(height, y => ToInt(source.AsSpan(y * sourceStride, width), destination.AsSpan(y * width, width), max), settings: parallel);
     }
 
     /// <summary>
     /// Converts a whole channel of the given bit depth to a float plane: integer samples are normalized to [0, 1], custom-float
     /// samples are decoded to their actual values.
     /// </summary>
-    public static void ToFloatPlane(int[] source, float[] destination, int width, int height, JxlBitDepth depth)
+    public static void ToFloatPlane(int[] source, float[] destination, int width, int height, JxlBitDepth depth, ParallelSettings parallel = default)
     {
         if (!depth.IsFloat)
         {
@@ -86,11 +86,11 @@ internal static class JxlSampleConversion
             {
                 dst[x] = JxlCustomFloat.Decode(src[x], bits, exponentBits);
             }
-        });
+        }, settings: parallel);
     }
 
-    /// <summary>The inverse of <see cref="ToFloatPlane(int[], float[], int, int, JxlBitDepth)"/>: rows of a float plane become a compact channel.</summary>
-    public static void ToIntChannel(float[] source, int sourceStride, int[] destination, int width, int height, JxlBitDepth depth)
+    /// <summary>The inverse of <see cref="ToFloatPlane(int[], float[], int, int, JxlBitDepth, ParallelSettings)"/>: rows of a float plane become a compact channel.</summary>
+    public static void ToIntChannel(float[] source, int sourceStride, int[] destination, int width, int height, JxlBitDepth depth, ParallelSettings parallel = default)
     {
         if (!depth.IsFloat)
         {
@@ -107,6 +107,6 @@ internal static class JxlSampleConversion
             {
                 dst[x] = JxlCustomFloat.Encode(src[x], bits, exponentBits);
             }
-        });
+        }, settings: parallel);
     }
 }

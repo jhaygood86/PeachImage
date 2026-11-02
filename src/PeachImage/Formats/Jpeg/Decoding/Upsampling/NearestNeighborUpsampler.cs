@@ -8,7 +8,8 @@ internal sealed class NearestNeighborUpsampler : IChromaUpsampler
     public void Upsample(
         byte[] source, int sourceWidth, int sourceHeight,
         byte[] destination, int destinationWidth, int destinationHeight,
-        int horizontalRatio, int verticalRatio)
+        int horizontalRatio, int verticalRatio,
+        ParallelSettings parallel = default)
     {
         if (horizontalRatio == 1 && verticalRatio == 1)
         {
@@ -16,7 +17,7 @@ internal sealed class NearestNeighborUpsampler : IChromaUpsampler
             {
                 int srcY = Math.Min(y, sourceHeight - 1);
                 source.AsSpan(srcY * sourceWidth, sourceWidth).CopyTo(destination.AsSpan(y * destinationWidth, sourceWidth));
-            });
+            }, parallel);
 
             return;
         }
@@ -32,6 +33,6 @@ internal sealed class NearestNeighborUpsampler : IChromaUpsampler
                 int srcX = Math.Min(x / horizontalRatio, sourceWidth - 1);
                 dstRow[x] = srcRow[srcX];
             }
-        });
+        }, parallel);
     }
 }

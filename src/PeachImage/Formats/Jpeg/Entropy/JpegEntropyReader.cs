@@ -146,6 +146,12 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
         }
     }
 
+    // Zero bytes supplied after the stream itself ended (not after a marker). A well-formed scan needs at most a handful to finish its
+    // last symbol; many more means the data was cut short, so decoding stops instead of filling the claimed canvas with zero blocks.
+    private const int MaxPaddedBytesAfterEndOfStream = 64;
+    private bool _endOfStream;
+    private int _paddedBytesAfterEndOfStream;
+
     private void EnsureBits(int count)
     {
         // Fast path: when the next eight bytes are buffered and contain no 0xFF, top the buffer up straight
@@ -198,6 +204,11 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
                 AtMarkerBoundary = true;
             }
 
+            if (_endOfStream && ++_paddedBytesAfterEndOfStream > MaxPaddedBytesAfterEndOfStream)
+            {
+                throw new JpegDecodingException("Unexpected end of stream in entropy-coded data.");
+            }
+
             _buffer |= (ulong)b << (56 - _bitCount);
             _bitCount += 8;
         }
@@ -207,6 +218,7 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
     {
         if (!source.TryReadByte(out byte b))
         {
+            _endOfStream = true;
             value = 0;
             return false;
         }
@@ -219,6 +231,7 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
 
         if (!source.TryReadByte(out byte next))
         {
+            _endOfStream = true;
             value = 0;
             return false;
         }
@@ -227,6 +240,7 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
         {
             if (!source.TryReadByte(out next))
             {
+                _endOfStream = true;
                 value = 0;
                 return false;
             }

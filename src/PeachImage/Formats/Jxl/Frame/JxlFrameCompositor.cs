@@ -1,6 +1,7 @@
 using PeachImage.Formats.Jxl.Features;
 using PeachImage.Formats.Jxl.Headers;
 using PeachImage.Formats.Jxl.Modular;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jxl.Frame;
 
@@ -39,7 +40,7 @@ internal static class JxlFrameCompositor
     /// Returns the frame to show for <paramref name="frame"/>. Either <paramref name="frame"/> itself, or (when it had to be
     /// blended) a new full-canvas frame, in which case <paramref name="frame"/> is disposed.
     /// </summary>
-    public static JxlDecodedFrame Compose(JxlDecodedFrame frame, JxlCodestreamHeaders headers, JxlDecoderState state)
+    public static JxlDecodedFrame Compose(JxlDecodedFrame frame, JxlCodestreamHeaders headers, JxlDecoderState state, ParallelSettings parallel = default)
     {
         var header = frame.Header;
         bool blend = NeedsBlending(header);
@@ -50,7 +51,7 @@ internal static class JxlFrameCompositor
         }
 
         var metadata = headers.Metadata;
-        float[][] planes = ToFloatPlanes(frame, metadata, out int frameWidth, out int frameHeight);
+        float[][] planes = ToFloatPlanes(frame, metadata, out int frameWidth, out int frameHeight, parallel);
         int canvasWidth = frameWidth;
         int canvasHeight = frameHeight;
         if (blend)
@@ -70,13 +71,13 @@ internal static class JxlFrameCompositor
             return frame;
         }
 
-        var result = BuildCanvasFrame(frame, metadata, planes, canvasWidth, canvasHeight);
+        var result = BuildCanvasFrame(frame, metadata, planes, canvasWidth, canvasHeight, parallel);
         frame.Dispose();
         return result;
     }
 
     // Colour planes then extra channels as compact float planes of the frame's size (display-encoded colour).
-    private static float[][] ToFloatPlanes(JxlDecodedFrame frame, JxlImageMetadata metadata, out int width, out int height)
+    private static float[][] ToFloatPlanes(JxlDecodedFrame frame, JxlImageMetadata metadata, out int width, out int height, ParallelSettings parallel)
     {
         width = frame.Header.Dimensions.XSizeUpsampled;
         height = frame.Header.Dimensions.YSizeUpsampled;
@@ -104,7 +105,7 @@ internal static class JxlFrameCompositor
                 }
 
                 planes[c] = new float[width * height];
-                JxlSampleConversion.ToFloatPlane(channel.Array, planes[c], width, height, metadata.BitDepth);
+                JxlSampleConversion.ToFloatPlane(channel.Array, planes[c], width, height, metadata.BitDepth, parallel);
             }
 
             for (int c = frame.ColorChannelCount; c < 3; c++)
@@ -123,7 +124,7 @@ internal static class JxlFrameCompositor
             }
 
             var plane = new float[width * height];
-            JxlSampleConversion.ToFloatPlane(channel.Array, plane, width, height, depth);
+            JxlSampleConversion.ToFloatPlane(channel.Array, plane, width, height, depth, parallel);
 
             planes[3 + i] = plane;
         }
@@ -218,7 +219,7 @@ internal static class JxlFrameCompositor
         info.Clamp);
 
     // A decoded frame whose colour is the float canvas and whose extra channels are re-quantized integer channels.
-    private static JxlDecodedFrame BuildCanvasFrame(JxlDecodedFrame source, JxlImageMetadata metadata, float[][] planes, int width, int height)
+    private static JxlDecodedFrame BuildCanvasFrame(JxlDecodedFrame source, JxlImageMetadata metadata, float[][] planes, int width, int height, ParallelSettings parallel)
     {
         var image = new ModularImage(width, height, checked((int)metadata.BitDepth.BitsPerSample));
         try
@@ -227,7 +228,7 @@ internal static class JxlFrameCompositor
             {
                 var channel = new ModularChannel(width, height);
                 image.Channels.Add(channel);
-                JxlSampleConversion.ToIntChannel(planes[3 + i], width, channel.Array, width, height, metadata.ExtraChannels[i].BitDepth);
+                JxlSampleConversion.ToIntChannel(planes[3 + i], width, channel.Array, width, height, metadata.ExtraChannels[i].BitDepth, parallel);
             }
 
             return new JxlDecodedFrame(source.Header, image, 0)

@@ -2,6 +2,8 @@ using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Threading.Tasks;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -38,7 +40,7 @@ internal static class Av1LoopRestoration
     /// <summary>Frames with fewer regions than this are restored on the calling thread.</summary>
     private const int ParallelMinRegions = 4;
 
-    public static void Apply<TPixel>(Av1FrameDecodeResult<TPixel> result, TPixel[][] deblockedPlanes)
+    public static void Apply<TPixel>(Av1FrameDecodeResult<TPixel> result, TPixel[][] deblockedPlanes, ParallelSettings parallel = default)
         where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var frame = result.Frame;
@@ -61,9 +63,9 @@ internal static class Av1LoopRestoration
         var regions = BuildRegions(result);
         var context = new Context<TPixel>(result, deblockedPlanes, lrPlanes);
 
-        if (regions.Count >= ParallelMinRegions && Environment.ProcessorCount > 1)
+        if (regions.Count >= ParallelMinRegions && parallel.EffectiveDegree > 1 && !parallel.IsSequential)
         {
-            Parallel.For(0, regions.Count, () => new Scratch(), (index, _, scratch) =>
+            Parallel.For(0, regions.Count, parallel.ToParallelOptions(), () => new Scratch(), (index, _, scratch) =>
             {
                 RestoreRegion(context, regions[index], scratch);
                 return scratch;

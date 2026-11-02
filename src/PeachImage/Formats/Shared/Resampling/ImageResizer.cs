@@ -22,7 +22,7 @@ internal static class ImageResizer
     /// </summary>
     internal const int FloatsPerPixel = 4;
 
-    public static Image Resize(Image source, int width, int height, ResamplingFilter filter)
+    public static Image Resize(Image source, int width, int height, ResamplingFilter filter, ParallelSettings parallel = default)
     {
         if (filter == ResamplingFilter.NearestNeighbor)
         {
@@ -32,7 +32,7 @@ internal static class ImageResizer
         var kernel = ResamplingKernelFactory.Create(filter);
         var horizontalWeights = new ResamplingWeightMap(source.Width, width, kernel);
         var verticalWeights = new ResamplingWeightMap(source.Height, height, kernel);
-        return ResizeWithWeights(source, width, height, horizontalWeights, verticalWeights);
+        return ResizeWithWeights(source, width, height, horizontalWeights, verticalWeights, parallel);
     }
 
     /// <summary>
@@ -46,7 +46,7 @@ internal static class ImageResizer
     /// <see cref="AnimatedImage"/>, which by construction share its canvas size). Not used for
     /// <see cref="ResamplingFilter.NearestNeighbor"/>, which has no weight map — see <see cref="Resize"/>.
     /// </summary>
-    public static Image ResizeWithWeights(Image source, int width, int height, ResamplingWeightMap horizontalWeights, ResamplingWeightMap verticalWeights)
+    public static Image ResizeWithWeights(Image source, int width, int height, ResamplingWeightMap horizontalWeights, ResamplingWeightMap verticalWeights, ParallelSettings parallel = default)
     {
         bool hasAlpha = source.PixelFormat.HasAlpha();
         int channelCount = source.PixelFormat.GetChannelCount();
@@ -75,21 +75,21 @@ internal static class ImageResizer
             // raw rented array (rather than an exact-length slice) is safe — see IResamplingConvolver's
             // remarks for why these are plain arrays (not Span<float>) in the first place: it's what lets
             // each convolver parallelize its per-row loop, since a Span can't be captured by that closure.
-            ToFloatBuffer(source, is16Bit, isFloat, hasAlpha, sourceBuffer);
+            ToFloatBuffer(source, is16Bit, isFloat, hasAlpha, sourceBuffer, parallel);
 
             var convolver = ResamplingConvolverSelector.Instance;
             if (horizontalFirst)
             {
-                convolver.ConvolveHorizontal(sourceBuffer, source.Width, source.Height, intermediate, horizontalWeights);
-                convolver.ConvolveVertical(intermediate, width, source.Height, resized, verticalWeights);
+                convolver.ConvolveHorizontal(sourceBuffer, source.Width, source.Height, intermediate, horizontalWeights, parallel);
+                convolver.ConvolveVertical(intermediate, width, source.Height, resized, verticalWeights, parallel);
             }
             else
             {
-                convolver.ConvolveVertical(sourceBuffer, source.Width, source.Height, intermediate, verticalWeights);
-                convolver.ConvolveHorizontal(intermediate, source.Width, height, resized, horizontalWeights);
+                convolver.ConvolveVertical(sourceBuffer, source.Width, source.Height, intermediate, verticalWeights, parallel);
+                convolver.ConvolveHorizontal(intermediate, source.Width, height, resized, horizontalWeights, parallel);
             }
 
-            return FromFloatBuffer(resized, width, height, source.PixelFormat, channelCount, is16Bit, isFloat, hasAlpha);
+            return FromFloatBuffer(resized, width, height, source.PixelFormat, channelCount, is16Bit, isFloat, hasAlpha, parallel);
         }
         finally
         {
@@ -147,7 +147,7 @@ internal static class ImageResizer
     /// (not <see cref="Image.GetPixelSpan"/>) specifically so both can be captured by that closure — see
     /// <see cref="IResamplingConvolver"/>'s remarks for why <see cref="Span{T}"/> can't be.
     /// </remarks>
-    private static void ToFloatBuffer(Image source, bool is16Bit, bool isFloat, bool hasAlpha, float[] buffer)
+    private static void ToFloatBuffer(Image source, bool is16Bit, bool isFloat, bool hasAlpha, float[] buffer, ParallelSettings parallel)
     {
         var pixelMemory = source.PixelMemory;
         int bytesPerPixel = source.PixelFormat.GetBytesPerPixel();
@@ -186,7 +186,7 @@ internal static class ImageResizer
                     WritePixel(rowBuffer, bufferOffset, pixelBytes, channelCount, hasAlpha, fullScale: 255f);
                 }
             }
-        });
+        }, parallel);
     }
 
     private static void WritePixel(Span<float> buffer, int offset, ReadOnlySpan<byte> samples, int channelCount, bool hasAlpha, float fullScale)
@@ -244,7 +244,7 @@ internal static class ImageResizer
     /// passes, and for the same reason takes <paramref name="buffer"/> as a plain array and writes through
     /// <see cref="Image.PixelMemory"/> rather than <see cref="Image.GetPixelSpan"/>.
     /// </summary>
-    private static Image FromFloatBuffer(float[] buffer, int width, int height, PixelFormat format, int channelCount, bool is16Bit, bool isFloat, bool hasAlpha)
+    private static Image FromFloatBuffer(float[] buffer, int width, int height, PixelFormat format, int channelCount, bool is16Bit, bool isFloat, bool hasAlpha, ParallelSettings parallel)
     {
         var destination = Image.Create(width, height, format);
         var pixelMemory = destination.PixelMemory;
@@ -302,7 +302,7 @@ internal static class ImageResizer
                     }
                 }
             }
-        });
+        }, parallel);
 
         return destination;
     }

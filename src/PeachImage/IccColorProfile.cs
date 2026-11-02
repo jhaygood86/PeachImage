@@ -6,7 +6,7 @@ namespace PeachImage;
 /// <summary>
 /// A parsed ICC color profile, exposing PeachImage's optimized, colorimetric device→sRGB conversion to
 /// library consumers directly — the same engine JPEG decode already uses automatically for a CMYK source with
-/// an embedded profile (see <see cref="ImageMetadata.GetIccColorProfile"/> and <see cref="Image.ConvertToSrgb"/>
+/// an embedded profile (see <see cref="ImageMetadata.GetIccColorProfile"/> and <see cref="Image.ConvertToSrgb()"/>
 /// for the common case of converting an already-decoded <see cref="Image"/>). Supports Gray, RGB, and CMYK
 /// device color spaces — whatever the profile itself declares via <see cref="DataColorSpace"/>.
 /// </summary>

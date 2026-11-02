@@ -7,6 +7,7 @@ using PeachImage.Formats.Jxl.Frame;
 using PeachImage.Formats.Jxl.Headers;
 using PeachImage.Formats.Jxl.Modular;
 using PeachImage.Formats.Jxl.VarDct;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jxl.Encoder.VarDct;
 
@@ -52,7 +53,7 @@ internal static class JxlVarDctFrameEncoder
     private const int NumQuantTables = 17;
     private const int NumMetaChannels = 4;
 
-    public static byte[] Encode(JxlVarDctFrameInput input, JxlVarDctSettings settings)
+    public static byte[] Encode(JxlVarDctFrameInput input, JxlVarDctSettings settings, ParallelSettings parallel = default)
     {
         int width = input.Width;
         int height = input.Height;
@@ -70,20 +71,20 @@ internal static class JxlVarDctFrameEncoder
         var matrices = new DequantMatrices();
         float[] dcMultipliers = [inverseQuantDc * matrices.DcQuant[0], inverseQuantDc * matrices.DcQuant[1], inverseQuantDc * matrices.DcQuant[2]];
 
-        float[][] planes = JxlForwardXyb.Convert(input.Channels, input.ColorChannels, width, height, input.BitsPerSample, input.IsFloat, blocksX * 8, blocksY * 8);
+        float[][] planes = JxlForwardXyb.Convert(input.Channels, input.ColorChannels, width, height, input.BitsPerSample, input.IsFloat, blocksX * 8, blocksY * 8, parallel);
         if (settings.Gaborish)
         {
-            JxlGaborish.Sharpen(planes, blocksX * 8, width, height, blocksY * 8);
+            JxlGaborish.Sharpen(planes, blocksX * 8, width, height, blocksY * 8, parallel);
         }
 
         var state = new JxlVarDctFrameState(dims, planes, settings, matrices, invGlobalScale, dcMultipliers);
-        JxlVarDctAnalysis.Run(state);
+        JxlVarDctAnalysis.Run(state, parallel);
 
         // The tree: the quantized-DC and metadata streams share leaves by channel; extra channels get their own.
         var tree = BuildTree(dims, numExtra > 0);
 
         var acTokens = new JxlTokenList[dims.NumGroups];
-        JxlParallel.For(dims.NumGroups, g => acTokens[g] = JxlVarDctGroupEncoder.Encode(state, g));
+        JxlParallel.For(dims.NumGroups, g => acTokens[g] = JxlVarDctGroupEncoder.Encode(state, g), parallel);
 
         // DC group and AC-metadata token streams.
         var dcTokens = new JxlTokenList[dims.NumDcGroups];
@@ -178,7 +179,7 @@ internal static class JxlVarDctFrameEncoder
                     }
 
                     extraGroupTokens[g] = tokens;
-                });
+                }, parallel);
             }
         }
 
@@ -263,7 +264,7 @@ internal static class JxlVarDctFrameEncoder
                 }
 
                 sections[groupBase + g] = writer.ToArray();
-            });
+            }, parallel);
         }
 
         var frame = new JxlBitWriter();

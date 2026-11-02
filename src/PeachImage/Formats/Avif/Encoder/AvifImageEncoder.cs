@@ -22,7 +22,7 @@ internal static class AvifImageEncoder
 
         (byte[] pixels, bool monoChrome, byte[]? alpha) = GatherPixels(image);
 
-        var encoded = Av1FrameEncoder.Encode(pixels, image.Width, image.Height, monoChrome, options.Quality, options.Lossless, options.Effort, tileRowsLog2: options.TileRowsLog2, maxDegreeOfParallelism: options.MaxDegreeOfParallelism);
+        var encoded = Av1FrameEncoder.Encode(pixels, image.Width, image.Height, monoChrome, options.Quality, options.Lossless, options.Effort, tileRowsLog2: options.TileRowsLog2, maxDegreeOfParallelism: options.MaxDegreeOfParallelism, scheduler: options.TaskScheduler);
 
         // Alpha is encoded as its own independent monochrome AV1 image -- Av1FrameEncoder's existing
         // monoChrome path already produces exactly that, so no encoder-internal alpha support is needed,
@@ -30,7 +30,7 @@ internal static class AvifImageEncoder
         // lossless whenever the color plane is, so a Lossless request never silently loses transparency.
         Av1EncodedFrame? alphaEncoded = alpha is null
             ? null
-            : Av1FrameEncoder.Encode(alpha, image.Width, image.Height, monoChrome: true, options.Quality, options.Lossless, options.Effort, tileRowsLog2: options.TileRowsLog2, maxDegreeOfParallelism: options.MaxDegreeOfParallelism);
+            : Av1FrameEncoder.Encode(alpha, image.Width, image.Height, monoChrome: true, options.Quality, options.Lossless, options.Effort, tileRowsLog2: options.TileRowsLog2, maxDegreeOfParallelism: options.MaxDegreeOfParallelism, scheduler: options.TaskScheduler);
 
         byte[]? exif = EncodableMetadata.Exif(image, options);
         var orientation = exif is null ? ImageOrientation.Normal : ExifOrientationReader.ReadTiff(exif);

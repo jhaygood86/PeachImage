@@ -1,3 +1,5 @@
+using PeachImage.Formats.Shared.Parallelism;
+using PeachImage.Formats.Shared.Scaling;
 using PeachImage.Formats.Avif;
 using PeachImage.Formats.Ccitt;
 using PeachImage.Formats.Bmp;
@@ -369,12 +371,25 @@ public sealed class Image : IDisposable
     /// nearest value and clamp to the format range (float values below 0 or above 1 saturate). Colour to gray uses the
     /// BT.601 luma weights; a target without alpha discards the alpha channel (colour is not composited onto a background);
     /// a source without alpha gets opaque alpha. Resolution and embedded profiles carry over to the result.
-    /// <see cref="PixelFormat.Cmyk32"/> and <see cref="PixelFormat.Ycck32"/> are not supported in either direction --
-    /// use <see cref="ConvertToSrgb"/> for CMYK.
+    /// <see cref="PixelFormat.Cmyk32"/> and <see cref="PixelFormat.Ycck32"/> convert to <see cref="PixelFormat.Rgb24"/>, <see cref="PixelFormat.Rgba32"/>
+    /// and <see cref="PixelFormat.Gray8"/> only, with no colour profile: <c>R = 255 x (1 - C) x (1 - K)</c> (likewise G and B, channels
+    /// scaled to 0..1, 0 meaning no ink), an approximation of how the inks look. YCCK (from <c>DecodeRawYcck</c>) is turned into CMYK first,
+    /// and the JPEG decoder returns standard CMYK, de-inverting Adobe files, when <c>DecodeRawYcck</c> is off. Nothing converts into CMYK or YCCK.
+    /// Use <see cref="ConvertToSrgb()"/> to honour an embedded ICC profile.
     /// </remarks>
-    /// <exception cref="NotSupportedException">This image format or <paramref name="targetFormat"/> is CMYK or YCCK.</exception>
+    /// <exception cref="NotSupportedException">This image format or <paramref name="targetFormat"/> is not supported (see the remarks for CMYK and YCCK).</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="targetFormat"/> is not a defined pixel format.</exception>
-    public Image ConvertTo(PixelFormat targetFormat)
+    public Image ConvertTo(PixelFormat targetFormat) => ConvertTo(targetFormat, -1);
+
+    /// <summary>
+    /// Converts to <paramref name="targetFormat"/> with a bound on the threads the conversion may use.
+    /// </summary>
+    /// <param name="targetFormat">The pixel format to convert to.</param>
+    /// <param name="maxDegreeOfParallelism">The most threads this call may use: -1 leaves it to the library (up to <see cref="Environment.ProcessorCount"/>), 1 converts on the calling thread. Per call, not global.</param>
+    /// <param name="taskScheduler">An optional scheduler for the parallel work, to share one limit across concurrent calls. <see langword="null"/> uses the thread pool.</param>
+    /// <exception cref="NotSupportedException">This image format or <paramref name="targetFormat"/> is YCCK.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="targetFormat"/> is not a defined pixel format.</exception>
+    public Image ConvertTo(PixelFormat targetFormat, int maxDegreeOfParallelism, TaskScheduler? taskScheduler = null)
     {
         if (!Enum.IsDefined(targetFormat))
         {
@@ -387,12 +402,12 @@ public sealed class Image : IDisposable
             return this;
         }
 
-        if (!ImagePixelConverter.IsConvertible(PixelFormat) || !ImagePixelConverter.IsConvertible(targetFormat))
+        if (!ImagePixelConverter.CanConvert(PixelFormat, targetFormat))
         {
-            throw new NotSupportedException($"Converting {PixelFormat} to {targetFormat} is not supported. Use ConvertToSrgb for CMYK images.");
+            throw new NotSupportedException($"Converting {PixelFormat} to {targetFormat} is not supported. CMYK and YCCK convert to Rgb24, Rgba32 and Gray8 only (see ConvertToSrgb for profile-aware conversion).");
         }
 
-        var result = ImagePixelConverter.Convert(this, targetFormat);
+        var result = ImagePixelConverter.Convert(this, targetFormat, new ParallelSettings(maxDegreeOfParallelism, taskScheduler));
         CopyMetadataTo(result);
         result.HasAlpha = HasAlpha;
         result.IsAnimated = IsAnimated;
@@ -410,22 +425,57 @@ public sealed class Image : IDisposable
     /// throwing or allocating a needless copy, the same "may return <c>this</c>" contract <see cref="Resize"/>
     /// documents (see its own remarks for the disposal implications of that).
     /// </summary>
-    public Image ConvertToSrgb()
+    public Image ConvertToSrgb() => ConvertToSrgb(null);
+
+    /// <summary>
+    /// Like <see cref="ConvertToSrgb()"/>, with a fallback for CMYK images that carry no usable ICC profile: the
+    /// <paramref name="fallbackCmykProfile"/> when given, otherwise the profile-less formula <c>R = 255 x (1 - C) x (1 - K)</c>
+    /// (likewise G and B). That formula is an approximation, not a colour-managed conversion. A raw
+    /// <see cref="PixelFormat.Ycck32"/> image (from <c>DecodeRawYcck</c>) is converted to CMYK first and then follows the same path; without
+    /// <c>DecodeRawYcck</c> the JPEG decoder already returns standard <see cref="PixelFormat.Cmyk32"/>. Gray and RGB images without a
+    /// profile are returned unchanged.
+    /// </summary>
+    /// <param name="fallbackCmykProfile">A CMYK profile to use when the image has none of its own, or <see langword="null"/> for the naive formula.</param>
+    public Image ConvertToSrgb(IccColorProfile? fallbackCmykProfile)
     {
-        if (PixelFormat is not (PixelFormat.Gray8 or PixelFormat.Rgb24 or PixelFormat.Cmyk32))
+        if (PixelFormat is not (PixelFormat.Gray8 or PixelFormat.Rgb24 or PixelFormat.Cmyk32 or PixelFormat.Ycck32))
         {
             return this;
+        }
+
+        ThrowIfUnusable();
+        if (PixelFormat == PixelFormat.Ycck32)
+        {
+            // Raw YCCK carries no ICC-meaningful device values until the YCbCr part is undone.
+            return ConvertInkToSrgbWithoutProfile();
         }
 
         var iccProfile = Metadata.GetIccColorProfile();
         if (iccProfile is null || iccProfile.ChannelCount != PixelFormat.GetChannelCount())
         {
-            return this;
+            if (PixelFormat != PixelFormat.Cmyk32)
+            {
+                return this;
+            }
+
+            iccProfile = fallbackCmykProfile is { ChannelCount: 4 } ? fallbackCmykProfile : null;
+            if (iccProfile is null)
+            {
+                return ConvertInkToSrgbWithoutProfile();
+            }
         }
 
         var result = Create(Width, Height, PixelFormat.Rgba32);
         iccProfile.ConvertToSrgb(GetPixelSpan(), result.GetPixelSpan(), Width * Height);
 
+        CopyMetadataTo(result);
+        result.HasAlpha = false;
+        return result;
+    }
+
+    private Image ConvertInkToSrgbWithoutProfile()
+    {
+        var result = ImagePixelConverter.InkToRgba32(this);
         CopyMetadataTo(result);
         result.HasAlpha = false;
         return result;
@@ -455,7 +505,7 @@ public sealed class Image : IDisposable
 
         bool skipMetadata = options?.SkipMetadata == true;
         bool scanLocation = !skipMetadata && ContainerLocationScanner.Supports(codec.FormatName);
-        bool checkLimits = options is { MaxPixels: not null } or { MaxExpansionRatio: not null };
+        bool checkLimits = options is { MaxPixels: not null } or { HasExpansionRatioLimit: true };
         var location = default(LocationInfo);
         if (scanLocation || checkLimits)
         {
@@ -471,7 +521,39 @@ public sealed class Image : IDisposable
             }
         }
 
-        var image = codec.Decode(preparedStream, options);
+        // Scaling and orientation both need the declared size and orientation, which the header gives without decoding.
+        bool scaling = DecodeScale.IsRequested(options);
+        bool upright = options?.ApplyOrientation == true;
+        var decodeOptions = options;
+        ImageInfo? header = null;
+        int scale = 1;
+        if (scaling || upright)
+        {
+            preparedStream = EnsureSeekable(preparedStream);
+            header = IdentifyAndRewind(codec, preparedStream, options);
+            scale = DecodeScale.Resolve(options, header.Value.Width, header.Value.Height, header.Value.Orientation);
+            if (scale > 1)
+            {
+                decodeOptions = options!.WithResolvedScaleDenominator(scale);
+            }
+        }
+
+        var image = codec.Decode(preparedStream, decodeOptions);
+        if (scale > 1)
+        {
+            // Formats without a native reduction come back at full size: average them down so every format yields the same size.
+            (int scaledWidth, int scaledHeight) = DecodeScale.ScaledSize(header!.Value.Width, header.Value.Height, scale);
+            if (image.Width != scaledWidth || image.Height != scaledHeight)
+            {
+                image = ReplaceWith(image, BoxDownscaler.Reduce(image, scale));
+            }
+        }
+
+        if (upright && header!.Value.Orientation != ImageOrientation.Normal)
+        {
+            image = ReplaceWith(image, image.ApplyOrientation(header.Value.Orientation));
+        }
+
         if (skipMetadata)
         {
             image.Metadata.Profiles.Clear();
@@ -572,7 +654,7 @@ public sealed class Image : IDisposable
     }
 
     // The location scan and the declared-size limits need to read the stream and then decode it from the same place.
-    private static Stream EnsureSeekable(Stream stream)
+    internal static Stream EnsureSeekable(Stream stream)
     {
         if (stream.CanSeek)
         {
@@ -585,8 +667,32 @@ public sealed class Image : IDisposable
         return buffered;
     }
 
+    private static ImageInfo IdentifyAndRewind(IImageCodec codec, Stream stream, DecoderOptions? options)
+    {
+        long start = stream.Position;
+        try
+        {
+            return codec.Identify(stream, options);
+        }
+        finally
+        {
+            stream.Position = start;
+        }
+    }
+
+    // Disposes the image a processing step replaced (unless the step returned it unchanged).
+    private static Image ReplaceWith(Image original, Image replacement)
+    {
+        if (!ReferenceEquals(original, replacement))
+        {
+            original.Dispose();
+        }
+
+        return replacement;
+    }
+
     // Compares what the header declares with the caller's limits, before any pixel memory is allocated.
-    private static void EnforceDeclaredLimits(IImageCodec codec, Stream stream, DecoderOptions options)
+    internal static void EnforceDeclaredLimits(IImageCodec codec, Stream stream, DecoderOptions options)
     {
         long start = stream.Position;
         long fileLength = stream.Length - start;
@@ -606,7 +712,7 @@ public sealed class Image : IDisposable
             throw new ImageTooLargeException($"The image declares {info.Width}x{info.Height} ({pixels} pixels), more than the {maxPixels} allowed by {nameof(DecoderOptions.MaxPixels)}.", info.FormatName);
         }
 
-        if (options.MaxExpansionRatio is { } maxRatio)
+        if (options.ResolveMaxExpansionRatio(info.FormatName) is { } maxRatio)
         {
             double decodedBytes = (double)pixels * info.PixelFormat.GetBytesPerPixel();
             if (decodedBytes > Math.Max(fileLength, 1) * maxRatio)
@@ -709,7 +815,7 @@ public sealed class Image : IDisposable
             }
 
             var plan = ResizeFramingPlanner.Plan(Width, Height, width, height, options.Mode, options.Anchor);
-            var intermediate = ImageResizer.Resize(this, plan.IntermediateWidth, plan.IntermediateHeight, options.Filter);
+            var intermediate = ImageResizer.Resize(this, plan.IntermediateWidth, plan.IntermediateHeight, options.Filter, ParallelSettings.From(options));
 
             bool needsFraming = plan.OffsetX != 0 || plan.OffsetY != 0
                 || plan.IntermediateWidth != width || plan.IntermediateHeight != height;
@@ -730,7 +836,7 @@ public sealed class Image : IDisposable
             }
         }
 
-        return ImageResizer.Resize(this, width, height, options.Filter);
+        return ImageResizer.Resize(this, width, height, options.Filter, ParallelSettings.From(options));
     }
 
     /// <summary>Encodes this image and writes it to <paramref name="path"/>, inferring the format from the file extension.</summary>

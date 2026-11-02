@@ -38,7 +38,7 @@ public class Rgba32ConversionCompletenessTests
     [Theory]
     [MemberData(nameof(JpegNativeFormats))]
     public void Jpeg_EveryNativeFormat_ConvertsToRgba32InOneHop(PixelFormat source) =>
-        AssertConvertsToRgba32(source, JpegConverter.ConvertIfNeeded);
+        AssertConvertsToRgba32(source, (image, target) => JpegConverter.ConvertIfNeeded(image, target));
 
     [Theory]
     [MemberData(nameof(PngNativeFormats))]

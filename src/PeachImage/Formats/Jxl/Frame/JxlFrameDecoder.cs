@@ -4,6 +4,7 @@ using PeachImage.Formats.Jxl.Headers;
 using PeachImage.Formats.Jxl.Jpeg;
 using PeachImage.Formats.Jxl.Modular;
 using PeachImage.Formats.Jxl.VarDct;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jxl.Frame;
 
@@ -79,7 +80,7 @@ internal static class JxlFrameDecoder
     private const int NumQuantTables = 17;
 
     /// <summary>Decodes the frame starting at <paramref name="offset"/> in <paramref name="codestream"/>.</summary>
-    public static JxlDecodedFrame Decode(byte[] codestream, int offset, JxlCodestreamHeaders headers, JxlDecoderState state, bool isPreview = false, JxlJpegData? jpegTarget = null)
+    public static JxlDecodedFrame Decode(byte[] codestream, int offset, JxlCodestreamHeaders headers, JxlDecoderState state, bool isPreview = false, JxlJpegData? jpegTarget = null, ParallelSettings parallel = default)
     {
         var metadata = headers.Metadata;
         var reader = new JxlBitReader(codestream.AsSpan(offset));
@@ -134,7 +135,7 @@ internal static class JxlFrameDecoder
 
         var image = new ModularImage(dims.XSize, dims.YSize, bitDepth);
         var matrices = vardct ? null : new DequantMatrices();
-        var vd = vardct ? new VarDctFrame(frame, headers) : null;
+        var vd = vardct ? new VarDctFrame(frame, headers, parallel) : null;
         matrices ??= vd!.Matrices;
         if (vd is not null && (frame.Flags & JxlFrameFlags.UseDcFrame) != 0)
         {
@@ -201,7 +202,8 @@ internal static class JxlFrameDecoder
                     maxShift: 1000,
                     streamId: (uint)(1 + dims.NumDcGroups + g),
                     groupDim,
-                    globalModel);
+                    globalModel,
+                    parallel);
                 vd?.DecodeAcMetadata(ref br, g, bitDepth);
                 if (singleSection)
                 {
@@ -232,7 +234,7 @@ internal static class JxlFrameDecoder
             if (!singleSection)
             {
                 vd?.PrepareParallelDecode();
-                JxlParallel.For(dims.NumGroups, g => DecodeIndependentAcGroup(g, codestream, sectionStart, sectionLength, frame, acGlobalIndex, vd, image, groupDim, globalModel));
+                JxlParallel.For(dims.NumGroups, g => DecodeIndependentAcGroup(g, codestream, sectionStart, sectionLength, frame, acGlobalIndex, vd, image, groupDim, globalModel, parallel), parallel);
             }
             else
             {
@@ -268,14 +270,15 @@ internal static class JxlFrameDecoder
                             maxShift,
                             streamId: (uint)(1 + (3 * dims.NumDcGroups) + NumQuantTables + (dims.NumGroups * pass) + g),
                             groupDim,
-                            globalModel);
+                            globalModel,
+                            parallel);
                         singleReader = br;
                     }
                 }
             }
 
             // Undo the transforms that span the whole frame.
-            image.UndoTransforms(globalHeader!.WeightedHeader);
+            image.UndoTransforms(globalHeader!.WeightedHeader, parallel);
             int expected = (vardct ? 0 : colorChannels) + extraChannels;
             if (image.Channels.Count != expected)
             {
@@ -291,15 +294,15 @@ internal static class JxlFrameDecoder
 
             if (vardct)
             {
-                return BuildXybFrame(frame, headers, state, features, image, vd!, byteLength);
+                return BuildXybFrame(frame, headers, state, features, image, vd!, byteLength, parallel);
             }
 
             if (frame.ColorTransform == JxlColorTransform.Xyb)
             {
-                return BuildXybFrameFromModular(frame, headers, state, features, image, matrices, colorChannels, byteLength);
+                return BuildXybFrameFromModular(frame, headers, state, features, image, matrices, colorChannels, byteLength, parallel);
             }
 
-            if (FinishIntegerFrame(frame, headers, state, features, image, colorChannels) is { } kept)
+            if (FinishIntegerFrame(frame, headers, state, features, image, colorChannels, parallel) is { } kept)
             {
                 // The colour went through the float pipeline (filters, features, upsampling, YCbCr): it stays in float, as in the
                 // reference decoder, instead of being rounded back to integer samples before the output conversion.
@@ -327,7 +330,8 @@ internal static class JxlFrameDecoder
         VarDctFrame? vd,
         ModularImage image,
         int groupDim,
-        ModularContextModel? globalModel)
+        ModularContextModel? globalModel,
+        ParallelSettings parallel)
     {
         var dims = frame.Dimensions;
         var streams = new PassStream[frame.NumPasses];
@@ -357,18 +361,19 @@ internal static class JxlFrameDecoder
                 maxShift,
                 streamId: (uint)(1 + (3 * dims.NumDcGroups) + NumQuantTables + (dims.NumGroups * pass) + g),
                 groupDim,
-                globalModel);
+                globalModel,
+                parallel);
         }
     }
 
-    private static JxlDecodedFrame BuildXybFrame(JxlFrameHeader frame, JxlCodestreamHeaders headers, JxlDecoderState state, JxlFrameFeatures features, ModularImage extras, VarDctFrame vd, int byteLength)
+    private static JxlDecodedFrame BuildXybFrame(JxlFrameHeader frame, JxlCodestreamHeaders headers, JxlDecoderState state, JxlFrameFeatures features, ModularImage extras, VarDctFrame vd, int byteLength, ParallelSettings parallel)
     {
         var metadata = headers.Metadata;
         var output = frame.ColorTransform == JxlColorTransform.Xyb ? SelectXybOutput(metadata) : metadata.ColorEncoding;
         bool gray = metadata.ColorEncoding.ColorSpace == JxlColorSpace.Gray;
         var dims = frame.Dimensions;
         float[][] planes = vd.FilterToXyb();
-        var result = FinishXyb(frame, headers, state, features, extras, planes, dims.XSizePadded, dims.XSize, dims.YSize, vd.Correlation.YToXRatio(0), vd.Correlation.YToBRatio(0), output, gray, firstExtra: 0, planesPooled: true);
+        var result = FinishXyb(frame, headers, state, features, extras, planes, dims.XSizePadded, dims.XSize, dims.YSize, vd.Correlation.YToXRatio(0), vd.Correlation.YToBRatio(0), output, gray, firstExtra: 0, planesPooled: true, parallel: parallel);
         return new JxlDecodedFrame(frame, extras, 0)
         {
             ColorPlanes = result.Planes,
@@ -405,7 +410,8 @@ internal static class JxlFrameDecoder
         int height,
         float yToX,
         float yToB,
-        bool planesPooled)
+        bool planesPooled,
+        ParallelSettings parallel)
     {
         var transform = headers.TransformData;
         int ups = frame.Upsampling;
@@ -430,7 +436,7 @@ internal static class JxlFrameDecoder
             }
         }
 
-        features.ApplyBeforeUpsampling(headers.Metadata, state, planes, stride, width, height, extras, yToX, yToB);
+        features.ApplyBeforeUpsampling(headers.Metadata, state, planes, stride, width, height, extras, yToX, yToB, parallel);
 
         if (ups != 1)
         {
@@ -441,7 +447,7 @@ internal static class JxlFrameDecoder
             for (int c = 0; c < 3; c++)
             {
                 upsampled[c] = System.Buffers.ArrayPool<float>.Shared.Rent(newStride * (height << shift));
-                JxlUpsampling.Upsample(planes[c], stride, width, height, shift, kernels, newStride, destination: upsampled[c]);
+                JxlUpsampling.Upsample(planes[c], stride, width, height, shift, kernels, newStride, destination: upsampled[c], parallel: parallel);
             }
 
             if (lateExtraUpsampling)
@@ -467,7 +473,7 @@ internal static class JxlFrameDecoder
             height = frame.Dimensions.YSizeUpsampled;
         }
 
-        features.ApplyNoise(frame, state, planes, stride, width, height, yToX, yToB);
+        features.ApplyNoise(frame, state, planes, stride, width, height, yToX, yToB, parallel);
         return new FinishedPlanes(planes, stride, width, height, planesPooled);
     }
 
@@ -487,11 +493,12 @@ internal static class JxlFrameDecoder
         JxlColorEncoding output,
         bool gray,
         int firstExtra,
-        bool planesPooled = false)
+        bool planesPooled = false,
+        ParallelSettings parallel = default)
     {
         var metadata = headers.Metadata;
-        var extras = new FrameExtraChannels(extrasImage, firstExtra, metadata.ExtraChannels, stride);
-        var finished = RunFeaturePipeline(frame, headers, state, features, extras, planes, stride, width, height, yToX, yToB, planesPooled);
+        var extras = new FrameExtraChannels(extrasImage, firstExtra, metadata.ExtraChannels, stride, parallel);
+        var finished = RunFeaturePipeline(frame, headers, state, features, extras, planes, stride, width, height, yToX, yToB, planesPooled, parallel);
         planes = finished.Planes;
         stride = finished.Stride;
         width = finished.Width;
@@ -513,7 +520,7 @@ internal static class JxlFrameDecoder
         if (frame.ColorTransform == JxlColorTransform.YCbCr)
         {
             // JPEG-style colour: the planes already hold display-encoded values, only the luma/chroma representation changes.
-            ColorKernels.YCbCrToRgb(planes, stride, width, height);
+            ColorKernels.YCbCrToRgb(planes, stride, width, height, parallel);
         }
         else if (frame.ColorTransform == JxlColorTransform.None)
         {
@@ -522,22 +529,22 @@ internal static class JxlFrameDecoder
         else
         {
             float[]? gamutMatrix = !output.WantIcc && !gray && !JxlColorSpaceMath.IsSrgbGamut(output) ? JxlColorSpaceMath.SrgbToEncoding(output) : null;
-            ColorKernels.XybToLinearRgb(planes, stride, width, height, headers.TransformData, metadata.ToneMapping.IntensityTarget, gray, srgbToEncoding: gamutMatrix);
+            ColorKernels.XybToLinearRgb(planes, stride, width, height, headers.TransformData, metadata.ToneMapping.IntensityTarget, gray, srgbToEncoding: gamutMatrix, parallel: parallel);
             if (output.WantIcc)
             {
                 var profile = JxlIccOutput.OpenProfile(headers.IccProfile ?? throw new JxlDecodingException("The ICC profile is missing."), gray);
                 if (gray)
                 {
-                    JxlIccOutput.FromLinearGray(profile, planes, stride, width, height);
+                    JxlIccOutput.FromLinearGray(profile, planes, stride, width, height, parallel);
                 }
                 else
                 {
-                    JxlIccOutput.FromLinearSrgb(profile, planes, stride, width, height);
+                    JxlIccOutput.FromLinearSrgb(profile, planes, stride, width, height, parallel);
                 }
             }
             else
             {
-                ColorKernels.LinearToTransfer(planes, stride, width, height, output, intensityTarget: metadata.ToneMapping.IntensityTarget);
+                ColorKernels.LinearToTransfer(planes, stride, width, height, output, intensityTarget: metadata.ToneMapping.IntensityTarget, parallel: parallel);
             }
         }
 
@@ -546,7 +553,7 @@ internal static class JxlFrameDecoder
     }
 
     // Integer (non-XYB) Modular frames only go through float planes when a feature, upsampling or reference saving needs them.
-    private static FinishedPlanes? FinishIntegerFrame(JxlFrameHeader frame, JxlCodestreamHeaders headers, JxlDecoderState state, JxlFrameFeatures features, ModularImage image, int colorChannels)
+    private static FinishedPlanes? FinishIntegerFrame(JxlFrameHeader frame, JxlCodestreamHeaders headers, JxlDecoderState state, JxlFrameFeatures features, ModularImage image, int colorChannels, ParallelSettings parallel)
     {
         bool needsExtraUpsampling = false;
         for (int i = 0; i < headers.Metadata.ExtraChannels.Count; i++)
@@ -575,7 +582,7 @@ internal static class JxlFrameDecoder
         var planes = new float[3][];
         for (int c = 0; c < colorChannels; c++)
         {
-            planes[c] = JxlYCbCrModular.ToPlane(image.Channels[c], depth, stride, rows, width, height);
+            planes[c] = JxlYCbCrModular.ToPlane(image.Channels[c], depth, stride, rows, width, height, parallel);
         }
 
         if (colorChannels == 1)
@@ -593,11 +600,11 @@ internal static class JxlFrameDecoder
             // Gaborish and the edge-preserving filter run on the float samples (with a constant strength: there is no quantization field).
             int blocksX = (width + 7) / 8;
             float[]? sigma = lf.EpfIterations > 0 ? FramePostProcessing.ConstantSigma(lf, blocksX, (height + 7) / 8) : null;
-            RestorationFilters.Apply(planes, stride, width, height, lf, sigma, blocksX);
+            RestorationFilters.Apply(planes, stride, width, height, lf, sigma, blocksX, parallel: parallel);
         }
 
-        var extras = new FrameExtraChannels(image, colorChannels, metadata.ExtraChannels, stride);
-        var finished = RunFeaturePipeline(frame, headers, state, features, extras, planes, stride, width, height, 0f, 1f, planesPooled: true);
+        var extras = new FrameExtraChannels(image, colorChannels, metadata.ExtraChannels, stride, parallel);
+        var finished = RunFeaturePipeline(frame, headers, state, features, extras, planes, stride, width, height, 0f, 1f, planesPooled: true, parallel: parallel);
         if (savesBeforeTransform)
         {
             state.References[(int)frame.SaveAsReference] = JxlFrameFeatures.CopyFrame(finished.Planes, finished.Stride, finished.Width, finished.Height, extras, inXyb: true);
@@ -605,7 +612,7 @@ internal static class JxlFrameDecoder
 
         if (ycc)
         {
-            ColorKernels.YCbCrToRgb(finished.Planes, finished.Stride, finished.Width, finished.Height);
+            ColorKernels.YCbCrToRgb(finished.Planes, finished.Stride, finished.Width, finished.Height, parallel);
         }
 
         if (depth.IsFloat || depth.BitsPerSample <= 16)
@@ -632,7 +639,7 @@ internal static class JxlFrameDecoder
                 channel = replacement;
             }
 
-            JxlSampleConversion.ToIntChannel(finished.Planes[c], finished.Stride, channel.Array, finished.Width, finished.Height, depth);
+            JxlSampleConversion.ToIntChannel(finished.Planes[c], finished.Stride, channel.Array, finished.Width, finished.Height, depth, parallel);
         }
 
         extras.Commit(finished.Width, finished.Height);
@@ -648,7 +655,7 @@ internal static class JxlFrameDecoder
     }
 
     // Lossy Modular: integer channels (Y, X, B-Y order) are scaled by the DC factors into XYB floats, then follow the same post-processing.
-    private static JxlDecodedFrame BuildXybFrameFromModular(JxlFrameHeader frame, JxlCodestreamHeaders headers, JxlDecoderState state, JxlFrameFeatures features, ModularImage image, DequantMatrices matrices, int colorChannels, int byteLength)
+    private static JxlDecodedFrame BuildXybFrameFromModular(JxlFrameHeader frame, JxlCodestreamHeaders headers, JxlDecoderState state, JxlFrameFeatures features, ModularImage image, DequantMatrices matrices, int colorChannels, int byteLength, ParallelSettings parallel)
     {
         var metadata = headers.Metadata;
         var output = SelectXybOutput(metadata);
@@ -683,7 +690,7 @@ internal static class JxlFrameDecoder
         int blocksX = (width + 7) / 8;
         int blocksY = (height + 7) / 8;
         float[]? sigma = lf.EpfIterations > 0 ? FramePostProcessing.ConstantSigma(lf, blocksX, blocksY) : null;
-        RestorationFilters.Apply(planes, width, width, height, lf, sigma, blocksX);
+        RestorationFilters.Apply(planes, width, width, height, lf, sigma, blocksX, parallel: parallel);
 
         bool gray = metadata.ColorEncoding.ColorSpace == JxlColorSpace.Gray;
 
@@ -694,7 +701,7 @@ internal static class JxlFrameDecoder
         }
 
         image.Channels.RemoveRange(0, colorChannels);
-        var finished = FinishXyb(frame, headers, state, features, image, planes, width, width, height, 0f, 1f, output, gray, firstExtra: 0, planesPooled: true);
+        var finished = FinishXyb(frame, headers, state, features, image, planes, width, width, height, 0f, 1f, output, gray, firstExtra: 0, planesPooled: true, parallel: parallel);
         return new JxlDecodedFrame(frame, image, 0) { ColorPlanes = finished.Planes, ColorPlaneStride = finished.Stride, ColorPlanesPooled = finished.Pooled, ByteLength = byteLength };
     }
 
@@ -788,7 +795,8 @@ internal static class JxlFrameDecoder
         int maxShift,
         uint streamId,
         int groupDim,
-        ModularContextModel? globalModel)
+        ModularContextModel? globalModel,
+        ParallelSettings parallel)
     {
         // Start at the first non-meta channel that is larger than a group: smaller ones were in the global stream.
         int c = full.MetaChannelCount;
@@ -839,7 +847,8 @@ internal static class JxlFrameDecoder
                 maxChannelSize: 0xFFFFFF,
                 groupDim: 0x1FFFFFFF,
                 globalModel,
-                undoTransforms: true);
+                undoTransforms: true,
+                parallel: parallel);
 
             for (int i = 0; i < rects.Count; i++)
             {

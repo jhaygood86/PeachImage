@@ -1,4 +1,6 @@
 using PeachImage.Formats.Jpeg.Decoding;
+using PeachImage.Formats.Shared.Parallelism;
+using PeachImage.Formats.Shared.Scaling;
 
 namespace PeachImage.Formats.Jpeg;
 
@@ -69,7 +71,8 @@ internal static class JpegDecoder
     /// <summary>Reconstructs <paramref name="frame"/> into an image in the requested pixel format, with its metadata attached. Leaves the frame's coefficient buffers untouched.</summary>
     private static Image BuildImage(DecodedFrame frame, DecoderOptions? options, JpegDecoderOptions? jpegOptions)
     {
-        var image = FrameReconstructor.Reconstruct(frame, jpegOptions);
+        int scale = DecodeScale.Resolve(options, frame.FrameHeader.Width, frame.FrameHeader.Height, ImageOrientation.Normal);
+        var image = FrameReconstructor.Reconstruct(frame, jpegOptions, ParallelSettings.From(options), scale);
         image.Metadata.HorizontalResolution = null;
         image.Metadata.VerticalResolution = null;
         foreach (var profile in frame.Metadata)
@@ -78,7 +81,7 @@ internal static class JpegDecoder
         }
 
         bool hasAlpha = image.PixelFormat.HasAlpha();
-        var result = PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat);
+        var result = PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat, options?.FallbackCmykProfile);
         if (!ReferenceEquals(result, image))
         {
             image.Dispose();

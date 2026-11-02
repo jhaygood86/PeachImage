@@ -1,4 +1,5 @@
 using System.Buffers;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jxl.Modular;
 
@@ -111,12 +112,12 @@ internal sealed class ModularImage : IDisposable
     }
 
     /// <summary>Undoes all transforms, last applied first.</summary>
-    public void UndoTransforms(WeightedPredictorHeader wpHeader)
+    public void UndoTransforms(WeightedPredictorHeader wpHeader, ParallelSettings parallel = default)
     {
         while (Transforms.Count > 0)
         {
             var transform = Transforms[^1];
-            transform.Inverse(this, wpHeader);
+            transform.Inverse(this, wpHeader, parallel);
             Transforms.RemoveAt(Transforms.Count - 1);
         }
     }

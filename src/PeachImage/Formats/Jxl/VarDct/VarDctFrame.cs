@@ -4,6 +4,7 @@ using PeachImage.Formats.Jxl.Entropy;
 using PeachImage.Formats.Jxl.Frame;
 using PeachImage.Formats.Jxl.Headers;
 using PeachImage.Formats.Jxl.Modular;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jxl.VarDct;
 
@@ -71,9 +72,11 @@ internal sealed partial class VarDctFrame : IQuantTableReader
 
     private ModularContextModel? _globalModel;
     private float[][]? _planes;
+    private readonly ParallelSettings _parallel;
 
-    public VarDctFrame(JxlFrameHeader frame, JxlCodestreamHeaders headers)
+    public VarDctFrame(JxlFrameHeader frame, JxlCodestreamHeaders headers, ParallelSettings parallel = default)
     {
+        _parallel = parallel;
         _frame = frame;
         _headers = headers;
         _dims = frame.Dimensions;
@@ -179,7 +182,7 @@ internal sealed partial class VarDctFrame : IQuantTableReader
             image.Channels.Add(new ModularChannel(w >> _hShift[c], h >> _vShift[c]));
         }
 
-        ModularStreamDecoder.Decode(ref br, image, (uint)(1 + group), 0xFFFFFF, 0x1FFFFFFF, _globalModel, undoTransforms: true);
+        ModularStreamDecoder.Decode(ref br, image, (uint)(1 + group), 0xFFFFFF, 0x1FFFFFFF, _globalModel, undoTransforms: true, parallel: _parallel);
 
         // A recompressed JPEG keeps its DC as plain quantized integers (only the extra-precision bits scale them).
         var factors = _jpeg is not null ? [1f, 1f, 1f] : MulDc;
@@ -300,7 +303,7 @@ internal sealed partial class VarDctFrame : IQuantTableReader
         image.Channels.Add(new ModularChannel(tileW, tileH, 3, 3));
         image.Channels.Add(new ModularChannel(count, 2, 0, 0));
         image.Channels.Add(new ModularChannel(w, h));
-        ModularStreamDecoder.Decode(ref br, image, (uint)(1 + (2 * _dims.NumDcGroups) + group), 0xFFFFFF, 0x1FFFFFFF, _globalModel, undoTransforms: true);
+        ModularStreamDecoder.Decode(ref br, image, (uint)(1 + (2 * _dims.NumDcGroups) + group), 0xFFFFFF, 0x1FFFFFFF, _globalModel, undoTransforms: true, parallel: _parallel);
 
         for (int ty = 0; ty < tileH; ty++)
         {
@@ -560,7 +563,8 @@ internal sealed partial class VarDctFrame : IQuantTableReader
             0xFFFFFF,
             0x1FFFFFFF,
             _globalModel,
-            undoTransforms: true);
+            undoTransforms: true,
+            parallel: _parallel);
 
         var table = new int[3 * width * height];
         for (int c = 0; c < 3; c++)
@@ -963,7 +967,7 @@ internal sealed partial class VarDctFrame : IQuantTableReader
                 int realWidth = (_dims.XSize + (1 << _hShift[c]) - 1) >> _hShift[c];
                 int realHeight = (_dims.YSize + (1 << _vShift[c]) - 1) >> _vShift[c];
                 float[] reduced = planes[c];
-                planes[c] = ChromaUpsampling.Upsample(reduced, _dims.XSizePadded >> _hShift[c], realWidth, realHeight, _hShift[c], _vShift[c], _dims.XSizePadded, _dims.YSizePadded);
+                planes[c] = ChromaUpsampling.Upsample(reduced, _dims.XSizePadded >> _hShift[c], realWidth, realHeight, _hShift[c], _vShift[c], _dims.XSizePadded, _dims.YSizePadded, _parallel);
                 System.Buffers.ArrayPool<float>.Shared.Return(reduced);
             }
         }
@@ -976,7 +980,7 @@ internal sealed partial class VarDctFrame : IQuantTableReader
         float[]? sigma = lf.EpfIterations > 0
             ? FramePostProcessing.SigmaFromQuantField(lf, Quantizer.ScaleFloat, _blocksX, _blocksY, _rawQuant, _acStrategy, _epfSharpness)
             : null;
-        RestorationFilters.Apply(planes, stride, width, height, lf, sigma, _blocksX);
+        RestorationFilters.Apply(planes, stride, width, height, lf, sigma, _blocksX, parallel: _parallel);
 
         return planes;
     }

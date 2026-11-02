@@ -14,7 +14,7 @@ internal static class ChromaUpsampling
     /// <paramref name="source"/> (whose real size is <paramref name="width"/> x <paramref name="height"/> samples, rows
     /// <paramref name="srcStride"/> apart). The caller returns <paramref name="source"/> to the pool.
     /// </summary>
-    public static float[] Upsample(float[] source, int srcStride, int width, int height, int hShift, int vShift, int dstStride, int dstRows)
+    public static float[] Upsample(float[] source, int srcStride, int width, int height, int hShift, int vShift, int dstStride, int dstRows, ParallelSettings parallel = default)
     {
         var pool = ArrayPool<float>.Shared;
         float[] current = source;
@@ -38,7 +38,7 @@ internal static class ChromaUpsampling
                     output[outRow + (2 * x)] = (0.25f * prev) + cur;
                     output[outRow + (2 * x) + 1] = (0.25f * next) + cur;
                 }
-            });
+            }, settings: parallel);
 
             current = output;
             currentStride = dstStride;
@@ -65,7 +65,7 @@ internal static class ChromaUpsampling
                     output[out0 + x] = (0.25f * input[top + x]) + mid;
                     output[out1 + x] = (0.25f * input[bottom + x]) + mid;
                 }
-            });
+            }, settings: parallel);
 
             if (intermediate is not null)
             {

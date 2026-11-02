@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Numerics;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -136,12 +137,12 @@ internal readonly record struct Av1ParsedFrameHeader(Av1SequenceHeader Sequence,
 /// </summary>
 internal static class Av1FrameDecoder
 {
-    public static Av1FrameDecodeResult Decode(byte[] tileBytes)
+    public static Av1FrameDecodeResult Decode(byte[] tileBytes, ParallelSettings parallel = default)
     {
         var parsed = ParseFrameHeader(tileBytes);
         return parsed.Sequence.BitDepth == 8
-            ? DecodeTileGroup<byte>(tileBytes, parsed.Sequence, parsed.Frame, parsed.TileGroupOffset, parsed.TileGroupLength)
-            : DecodeTileGroup<ushort>(tileBytes, parsed.Sequence, parsed.Frame, parsed.TileGroupOffset, parsed.TileGroupLength);
+            ? DecodeTileGroup<byte>(tileBytes, parsed.Sequence, parsed.Frame, parsed.TileGroupOffset, parsed.TileGroupLength, parallel)
+            : DecodeTileGroup<ushort>(tileBytes, parsed.Sequence, parsed.Frame, parsed.TileGroupOffset, parsed.TileGroupLength, parallel);
     }
 
     /// <summary>
@@ -206,7 +207,7 @@ internal static class Av1FrameDecoder
     }
 
     /// <summary>Parses <c>tile_group_obu()</c> and runs every tile's partition/mode-info decode. Frame-sized neighbor context arrays are shared across tiles -- see <see cref="Av1TileDecoder"/>'s remarks for why that's safe.</summary>
-    private static Av1FrameDecodeResult<TPixel> DecodeTileGroup<TPixel>(byte[] data, Av1SequenceHeader sequence, Av1FrameHeader frame, int tileGroupOffset, int tileGroupLength)
+    private static Av1FrameDecodeResult<TPixel> DecodeTileGroup<TPixel>(byte[] data, Av1SequenceHeader sequence, Av1FrameHeader frame, int tileGroupOffset, int tileGroupLength, ParallelSettings parallel)
         where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var tileRanges = Av1TileGroupObu.Parse(data, tileGroupOffset, tileGroupLength, frame.TileInfo);
@@ -334,7 +335,7 @@ internal static class Av1FrameDecoder
                 isInters, mvRowsGrid, mvColsGrid, written,
                 worker, planeWidths, planeHeights,
                 deltaLfs, cdefIdx, loopfilterTxSizes, loopfilterTxSizeStrides, restorationUnits,
-                angleDeltaYGrid, angleDeltaUvGrid, useFilterIntraGrid, filterIntraModeGrid);
+                angleDeltaYGrid, angleDeltaUvGrid, useFilterIntraGrid, filterIntraModeGrid, parallel);
 
             tileDecoder.DecodeTile();
 
@@ -377,7 +378,7 @@ internal static class Av1FrameDecoder
             FilterIntraModeGrid = filterIntraModeGrid,
         };
 
-        Av1DeblockingFilter.Apply(result);
+        Av1DeblockingFilter.Apply(result, parallel);
 
         // Only loop restoration ever reads this pre-CDEF snapshot (spec §7.17.1's stripe-boundary rule);
         // Av1LoopRestoration.Apply returns immediately when UsesLr is false without touching it, so
@@ -395,8 +396,8 @@ internal static class Av1FrameDecoder
             }
         }
 
-        Av1Cdef.Apply(result);
-        Av1LoopRestoration.Apply(result, deblockedPlanes);
+        Av1Cdef.Apply(result, parallel);
+        Av1LoopRestoration.Apply(result, deblockedPlanes, parallel);
 
         return result;
     }

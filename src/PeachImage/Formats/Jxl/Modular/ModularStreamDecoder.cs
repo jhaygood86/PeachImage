@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Runtime.CompilerServices;
 using PeachImage.Formats.Jxl.Bitstream;
 using PeachImage.Formats.Jxl.Entropy;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jxl.Modular;
 
@@ -79,7 +80,8 @@ internal static class ModularStreamDecoder
         int maxChannelSize,
         int groupDim,
         ModularContextModel? globalModel,
-        bool undoTransforms)
+        bool undoTransforms,
+        ParallelSettings parallel = default)
     {
         // A stream with no channels (for example a VarDCT frame's global stream without extra channels) carries nothing at all.
         if (image.Channels.Count == 0)
@@ -167,7 +169,7 @@ internal static class ModularStreamDecoder
 
         if (undoTransforms)
         {
-            image.UndoTransforms(header.WeightedHeader);
+            image.UndoTransforms(header.WeightedHeader, parallel);
         }
 
         return header;

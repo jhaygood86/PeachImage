@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -16,7 +17,7 @@ internal static class Av1DeblockingFilter
     private const int MaxLoopFilter = 63;
     private const int SegLvlAltLfYV = 1;
 
-    public static void Apply<TPixel>(Av1FrameDecodeResult<TPixel> result)
+    public static void Apply<TPixel>(Av1FrameDecodeResult<TPixel> result, ParallelSettings parallel = default)
         where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var seq = result.Sequence;
@@ -51,9 +52,9 @@ internal static class Av1DeblockingFilter
                 // BandCells (a multiple of every step), and the pass boundary is the barrier between them.
                 int span = pass == 0 ? rowEnd : colEnd;
                 int chunks = (span + BandCells - 1) / BandCells;
-                if (span >= ParallelMinCells && chunks > 1 && Environment.ProcessorCount > 1)
+                if (span >= ParallelMinCells && chunks > 1 && parallel.EffectiveDegree > 1 && !parallel.IsSequential)
                 {
-                    Parallel.For(0, chunks, chunk =>
+                    Parallel.For(0, chunks, parallel.ToParallelOptions(), chunk =>
                     {
                         int lo = chunk * BandCells;
                         int hi = Math.Min(span, lo + BandCells);

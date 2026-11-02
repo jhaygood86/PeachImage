@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Parallelism;
 namespace PeachImage.Formats.Jpeg.Decoding.Upsampling;
 
 /// <summary>Upsamples a subsampled chroma (or any non-full-resolution) plane to the frame's full sample grid.</summary>
@@ -17,5 +18,6 @@ internal interface IChromaUpsampler
     void Upsample(
         byte[] source, int sourceWidth, int sourceHeight,
         byte[] destination, int destinationWidth, int destinationHeight,
-        int horizontalRatio, int verticalRatio);
+        int horizontalRatio, int verticalRatio,
+        ParallelSettings parallel = default);
 }

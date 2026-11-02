@@ -41,4 +41,18 @@ public class ResizeOptions
     /// orientation first (see <see cref="Image.ApplyOrientationInPlace(ImageOrientation)"/>), which resets it. Defaults to <see langword="false"/>.
     /// </summary>
     public bool CopyMetadata { get; init; }
+
+    /// <summary>
+    /// The most threads one resize call may use. -1 (the default) leaves it to the library, which fans out over up to
+    /// <see cref="Environment.ProcessorCount"/> workers; 1 resizes sequentially on the calling thread. The limit is per call, not
+    /// global: concurrent calls each use up to this many, so cap the total with <see cref="TaskScheduler"/>. Does not change the output.
+    /// </summary>
+    public int MaxDegreeOfParallelism { get; init; } = -1;
+
+    /// <summary>
+    /// An optional scheduler the resize's parallel work runs on, so a host can share one limit across concurrent calls (for example
+    /// the <see cref="ConcurrentExclusiveSchedulerPair.ConcurrentScheduler"/> of a pair created with a bounded concurrency level).
+    /// <see langword="null"/> (the default) uses the thread pool.
+    /// </summary>
+    public TaskScheduler? TaskScheduler { get; init; }
 }

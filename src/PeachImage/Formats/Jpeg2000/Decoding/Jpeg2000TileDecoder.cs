@@ -1,5 +1,6 @@
 using System.Buffers;
 using PeachImage.Formats.Jpeg2000.Internal;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jpeg2000.Decoding;
 
@@ -10,13 +11,15 @@ internal sealed class J2kTileDecoder : IDisposable
     private readonly J2kSiz _siz;
     private readonly int _tileIndex;
     private readonly int _reduce;
+    private readonly ParallelSettings _parallel;
 
     private J2kTileComponent[] _components = [];
     private J2kCod _cod = null!;
     private List<J2kProgressionChange>? _poc;
 
-    public J2kTileDecoder(J2kCodestream codestream, int tileIndex, int reduce)
+    public J2kTileDecoder(J2kCodestream codestream, int tileIndex, int reduce, ParallelSettings parallel = default)
     {
+        _parallel = parallel;
         _codestream = codestream;
         _siz = codestream.Siz;
         _tileIndex = tileIndex;
@@ -666,18 +669,30 @@ internal sealed class J2kTileDecoder : IDisposable
         }
 
         var scratchPool = new System.Collections.Concurrent.ConcurrentBag<J2kBlockScratch>();
-        Parallel.For(
-            0,
-            work.Count,
-            new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
-            () => scratchPool.TryTake(out var s) ? s : new J2kBlockScratch(),
-            (index, _, scratch) =>
+        if (_parallel.IsSequential)
+        {
+            var scratch = new J2kBlockScratch();
+            for (int index = 0; index < work.Count; index++)
             {
                 var (component, band, precinct, blockIndex, stride) = work[index];
                 DecodeBlock(component, band, ref precinct.Blocks[blockIndex], stride, scratch);
-                return scratch;
-            },
-            scratch => scratchPool.Add(scratch));
+            }
+        }
+        else
+        {
+            Parallel.For(
+                0,
+                work.Count,
+                _parallel.ToParallelOptions(),
+                () => scratchPool.TryTake(out var s) ? s : new J2kBlockScratch(),
+                (index, _, scratch) =>
+                {
+                    var (component, band, precinct, blockIndex, stride) = work[index];
+                    DecodeBlock(component, band, ref precinct.Blocks[blockIndex], stride, scratch);
+                    return scratch;
+                },
+                scratch => scratchPool.Add(scratch));
+        }
 
         foreach (var component in _components)
         {
@@ -692,11 +707,11 @@ internal sealed class J2kTileDecoder : IDisposable
             int stride = sizes[^1].Width;
             if (component.IntegerData is { } integers)
             {
-                J2kDwt.Inverse53(integers, stride, sizes);
+                J2kDwt.Inverse53(integers, stride, sizes, _parallel);
             }
             else
             {
-                J2kDwt.Inverse97(component.FloatData!, stride, sizes);
+                J2kDwt.Inverse97(component.FloatData!, stride, sizes, _parallel);
             }
         }
     }

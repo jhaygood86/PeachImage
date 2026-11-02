@@ -1,5 +1,6 @@
 using System.Buffers;
 using PeachImage.Formats.Avif.Decoding.Av1;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
@@ -52,7 +53,7 @@ internal static class Av1CdefSearch
         int[] reconY, int[]? reconU, int[]? reconV,
         int[] sourceY, int[]? sourceU, int[]? sourceV,
         int width, int height, int chromaWidth, int chromaHeight,
-        bool monoChrome, int baseQIdx, int loopFilterLevel)
+        bool monoChrome, int baseQIdx, int loopFilterLevel, ParallelSettings parallel = default)
     {
         int miCols = 2 * ((width + 7) >> 3);
         int miRows = 2 * ((height + 7) >> 3);
@@ -67,7 +68,7 @@ internal static class Av1CdefSearch
         // Candidates are independent trials on their own pooled copies, so they run in parallel; the winner is
         // then picked sequentially in candidate order (strict improvement only), exactly as before.
         var candidateSse = new long[Candidates.Length];
-        Parallel.For(0, Candidates.Length, index =>
+        void Trial(int index)
         {
             (int pri, int sec) = Candidates[index];
             var choice = new Av1CdefChoice(Damping: 3, YPriStrength: pri, YSecStrength: sec, UvPriStrength: pri, UvSecStrength: sec);
@@ -75,11 +76,23 @@ internal static class Av1CdefSearch
             var (trialY, trialU, trialV) = RentAndCopy(reconY, reconU, reconV, lumaLen, chromaLen);
             var frame = BuildFrameHeaderForChoice(width, height, monoChrome, baseQIdx, loopFilterLevel, choice);
             var result = BuildDecodeResult(seq, frame, trialY, trialU, trialV, miCols, miRows, width, height, chromaWidth, chromaHeight);
-            Av1Cdef.Apply(result);
+            Av1Cdef.Apply(result, parallel);
 
             candidateSse[index] = Av1SquaredError.Compute(result.Planes[0], sourceY, lumaLen) + Av1SquaredError.Compute(monoChrome ? null : result.Planes[1], sourceU, chromaLen) + Av1SquaredError.Compute(monoChrome ? null : result.Planes[2], sourceV, chromaLen);
             ReturnPlanes(result, monoChrome);
-        });
+        }
+
+        if (parallel.IsSequential)
+        {
+            for (int index = 0; index < Candidates.Length; index++)
+            {
+                Trial(index);
+            }
+        }
+        else
+        {
+            Parallel.For(0, Candidates.Length, parallel.ToParallelOptions(), Trial);
+        }
 
         for (int index = 0; index < Candidates.Length; index++)
         {

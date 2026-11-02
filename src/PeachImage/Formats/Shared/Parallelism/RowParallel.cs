@@ -30,25 +30,20 @@ internal static class RowParallel
     internal const int MinRowsForParallel = 64;
 
     /// <summary>
-    /// Explicitly caps <c>Parallel.For</c>'s degree of parallelism at <see cref="Environment.ProcessorCount"/>
-    /// rather than leaving it to the default (unbounded) heuristic. Left unbounded, the .NET thread pool's
-    /// dynamic thread injection can spin up more worker threads than the process can actually run
+    /// The degree of parallelism comes from the caller's <see cref="ParallelSettings"/>; <c>default</c> caps it at
+    /// <see cref="Environment.ProcessorCount"/> rather than leaving it to the default (unbounded) heuristic. Left unbounded,
+    /// the .NET thread pool's dynamic thread injection can spin up more worker threads than the process can actually run
     /// concurrently — confirmed empirically under a CPU-affinity-restricted process (the pinning this repo's
     /// own benchmark methodology uses for reproducibility, per LIBRARY_COMPARISON.md), where the unbounded
     /// default caused enough context-switch/oversubscription overhead to make several filters' parallel
-    /// upscale path *slower* than the sequential code it replaced. Explicitly capping
-    /// <c>ParallelOptions.MaxDegreeOfParallelism</c> at <see cref="Environment.ProcessorCount"/> (which does
-    /// correctly reflect the affinity-restricted count) fixed it. This same cap is shared by every caller
-    /// (resize and JPEG decode alike) rather than each maintaining its own — bounding one call's own
-    /// parallel fan-out, though it says nothing about many such calls running concurrently (e.g. a service
-    /// decoding/resizing many uploads at once, each independently capping at this same ceiling against the
-    /// shared process-wide thread pool) — a pre-existing tradeoff, not something either caller solves.
+    /// upscale path *slower* than the sequential code it replaced. The limit is per call: many concurrent calls each
+    /// fan out independently, so a host that needs a total cap passes a shared <see cref="TaskScheduler"/> (for example
+    /// from a <see cref="ConcurrentExclusiveSchedulerPair"/> with a bounded concurrency level), and a degree of 1 runs the
+    /// whole call on the calling thread.
     /// </summary>
-    private static readonly ParallelOptions Options = new() { MaxDegreeOfParallelism = Environment.ProcessorCount };
-
-    public static void For(int rowCount, Action<int> body)
+    public static void For(int rowCount, Action<int> body, ParallelSettings settings = default)
     {
-        if (rowCount < MinRowsForParallel)
+        if (rowCount < MinRowsForParallel || settings.IsSequential)
         {
             for (int i = 0; i < rowCount; i++)
             {
@@ -58,20 +53,20 @@ internal static class RowParallel
             return;
         }
 
-        Parallel.For(0, rowCount, Options, body);
+        Parallel.For(0, rowCount, settings.ToParallelOptions(), body);
     }
 
     /// <summary>
-    /// Same as <see cref="For(int, Action{int})"/>, but for a per-row body that needs mutable scratch state
+    /// Same as <see cref="For(int, Action{int}, ParallelSettings)"/>, but for a per-row body that needs mutable scratch state
     /// (e.g. a rented buffer) — <paramref name="localFactory"/> runs once per partition (once total in the
     /// sequential fallback, once per worker thread when parallel), not once per row, so scratch state can be
     /// safely reused across a partition's rows without a fresh allocation/rent every row and without two
     /// concurrent rows racing on the same buffer. <paramref name="localFinally"/>, if given, runs once per
     /// partition after that partition's rows are done (e.g. to return a rented buffer).
     /// </summary>
-    public static void For<TLocal>(int rowCount, Func<TLocal> localFactory, Action<int, TLocal> body, Action<TLocal>? localFinally = null)
+    public static void For<TLocal>(int rowCount, Func<TLocal> localFactory, Action<int, TLocal> body, Action<TLocal>? localFinally = null, ParallelSettings settings = default)
     {
-        if (rowCount < MinRowsForParallel)
+        if (rowCount < MinRowsForParallel || settings.IsSequential)
         {
             TLocal local = localFactory();
             for (int i = 0; i < rowCount; i++)
@@ -86,7 +81,7 @@ internal static class RowParallel
         Parallel.For(
             0,
             rowCount,
-            Options,
+            settings.ToParallelOptions(),
             localFactory,
             (i, _, local) =>
             {

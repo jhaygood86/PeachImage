@@ -1,3 +1,5 @@
+using PeachImage.Formats.Shared.Parallelism;
+
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
 /// <summary>
@@ -20,8 +22,9 @@ internal static class Av1FrameEncoder
     /// quantization (<c>base_q_idx</c> forced to 0, AV1's coded-lossless trigger, rather than derived from
     /// <paramref name="quality"/>).
     /// </summary>
-    public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality, bool lossless = false, int effort = 2, Action<Av1BlockDecisionRecord>? onLeafCommitted = null, int? tileRowsLog2 = null, int maxDegreeOfParallelism = -1)
+    public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality, bool lossless = false, int effort = 2, Action<Av1BlockDecisionRecord>? onLeafCommitted = null, int? tileRowsLog2 = null, int maxDegreeOfParallelism = -1, TaskScheduler? scheduler = null)
     {
+        var parallel = new ParallelSettings(maxDegreeOfParallelism, scheduler);
         // Lossless uses 128x128 superblocks (Av1SequenceHeaderWriter/Av1TileEncoder), so the coded canvas
         // must pad to a 128-pixel multiple instead of 64 -- same "every superblock fully in-bounds" reason
         // the 64-pixel padding exists for the non-lossless/64x64-superblock path (see this class's own
@@ -151,7 +154,7 @@ internal static class Av1FrameEncoder
             tileBytes = EncodeTileRows(
                 yPlane, uPlane, vPlane, reconY, reconU, reconV,
                 paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
-                monoChrome, baseQIdx, effort, chosenTileRowsLog2, maxDegreeOfParallelism, out tileSizeBytes);
+                monoChrome, baseQIdx, effort, chosenTileRowsLog2, parallel, out tileSizeBytes);
         }
         else
         {
@@ -214,7 +217,7 @@ internal static class Av1FrameEncoder
                 reconY, reconU, reconV,
                 yPlane, uPlane, vPlane,
                 paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
-                monoChrome, baseQIdx);
+                monoChrome, baseQIdx, parallel);
 
             // CDEF (spec §7.15) runs after deblocking, per spec's own filter ordering (Av1FrameDecoder.
             // DecodeTileGroup applies them in exactly this order) -- reconY/U/V already reflect the chosen
@@ -226,7 +229,7 @@ internal static class Av1FrameEncoder
                 reconY, reconU, reconV,
                 yPlane, uPlane, vPlane,
                 paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
-                monoChrome, baseQIdx, loopFilterLevel);
+                monoChrome, baseQIdx, loopFilterLevel, parallel);
         }
 
         byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(headerWidth, headerHeight, monoChrome, chroma444, enableCdef: !lossless, use128x128Superblock: lossless, enableRestoration: lossless);
@@ -292,13 +295,13 @@ internal static class Av1FrameEncoder
         int[] yPlane, int[]? uPlane, int[]? vPlane,
         int[] reconY, int[]? reconU, int[]? reconV,
         int paddedWidth, int paddedHeight, int paddedChromaWidth, int paddedChromaHeight,
-        bool monoChrome, int baseQIdx, int effort, int tileRowsLog2, int maxDegreeOfParallelism, out int tileSizeBytes)
+        bool monoChrome, int baseQIdx, int effort, int tileRowsLog2, ParallelSettings parallel, out int tileSizeBytes)
     {
         int[] rowStarts = Av1TileInfoWriter.ComputeRowStarts(paddedHeight / 4, use128x128Superblock: false, tileRowsLog2);
         int tileCount = rowStarts.Length - 1;
         var tiles = new byte[tileCount][];
 
-        Parallel.For(0, tileCount, new ParallelOptions { MaxDegreeOfParallelism = maxDegreeOfParallelism }, tile =>
+        void EncodeSlice(int tile)
         {
             int y0 = rowStarts[tile] * 4;
             int height = (rowStarts[tile + 1] * 4) - y0;
@@ -332,7 +335,19 @@ internal static class Av1FrameEncoder
                 reconUSlice.CopyTo(reconU.AsSpan(chromaOffset));
                 reconVSlice.CopyTo(reconV.AsSpan(chromaOffset));
             }
-        });
+        }
+
+        if (parallel.IsSequential)
+        {
+            for (int tile = 0; tile < tileCount; tile++)
+            {
+                EncodeSlice(tile);
+            }
+        }
+        else
+        {
+            Parallel.For(0, tileCount, parallel.ToParallelOptions(), EncodeSlice);
+        }
 
         int maxSizeMinus1 = 0;
         for (int i = 0; i < tileCount - 1; i++)
