@@ -80,7 +80,7 @@ internal static class JxlFrameDecoder
     private const int NumQuantTables = 17;
 
     /// <summary>Decodes the frame starting at <paramref name="offset"/> in <paramref name="codestream"/>.</summary>
-    public static JxlDecodedFrame Decode(byte[] codestream, int offset, JxlCodestreamHeaders headers, JxlDecoderState state, bool isPreview = false, JxlJpegData? jpegTarget = null, ParallelSettings parallel = default)
+    public static JxlDecodedFrame Decode(byte[] codestream, int offset, JxlCodestreamHeaders headers, JxlDecoderState state, bool isPreview = false, JxlJpegData? jpegTarget = null, ParallelSettings parallel = default, int reduceDenominator = 1)
     {
         var metadata = headers.Metadata;
         var reader = new JxlBitReader(codestream.AsSpan(offset));
@@ -157,6 +157,21 @@ internal static class JxlFrameDecoder
             vd.EnableJpegCapture(jpegTarget);
         }
 
+        // A plain still VarDCT frame can be reduced to 1/8 from its DC image alone (HF decoding and the inverse DCTs are skipped).
+        // Anything that needs the full-resolution pixels (features, upsampling, blending, extra channels...) takes the full path.
+        bool reduce = reduceDenominator == 8
+            && vd is not null
+            && !isPreview
+            && jpegTarget is null
+            && frame.ColorTransform == JxlColorTransform.Xyb
+            && frame.Upsampling == 1
+            && (frame.Flags & JxlFrameFlags.UseDcFrame) == 0
+            && frame.FrameType == JxlFrameType.Regular
+            && frame.IsLast
+            && !JxlFrameCompositor.NeedsBlending(frame)
+            && extraChannels == 0
+            && vd.IsFullResolution;
+
         ModularContextModel? globalModel = null;
         ModularGroupHeader? globalHeader = null;
         var features = new JxlFrameFeatures();
@@ -171,6 +186,7 @@ internal static class JxlFrameDecoder
                 features = JxlFrameFeatures.Read(ref br, frame, metadata, state);
                 matrices.ReadDc(ref br);
                 vd?.ReadGlobal(ref br);
+                reduce &= !features.HasAny;
                 (globalModel, globalHeader) = DecodeGlobalInfo(ref br, frame, metadata, image, colorChannels, vardct ? 0 : colorChannels, extraChannels);
                 vd?.SetGlobalModel(globalModel);
                 if (singleSection)
@@ -190,6 +206,11 @@ internal static class JxlFrameDecoder
                 if (vardct && (frame.Flags & JxlFrameFlags.UseDcFrame) == 0)
                 {
                     vd!.DecodeDc(ref br, g, bitDepth);
+                }
+
+                if (reduce)
+                {
+                    continue;
                 }
 
                 int gx = g % dims.XSizeDcGroups;
@@ -214,6 +235,11 @@ internal static class JxlFrameDecoder
             if (vardct && (frame.Flags & (JxlFrameFlags.SkipAdaptiveDcSmoothing | JxlFrameFlags.UseDcFrame)) == 0 && vd!.IsFullResolution && jpegTarget is null)
             {
                 vd!.AdaptiveDcSmoothing();
+            }
+
+            if (reduce)
+            {
+                return BuildReducedFrame(frame, headers, state, features, image, vd!, (int)(dataStart - offset + total), parallel);
             }
 
             // AC global.
@@ -380,6 +406,26 @@ internal static class JxlFrameDecoder
             ColorPlaneStride = result.Stride,
             ColorPlanesPooled = result.Pooled,
             ByteLength = byteLength,
+        };
+    }
+
+    // The DC image is the frame at 1/8 size, already in XYB with chroma-from-luma and adaptive smoothing applied: convert it to the output colour.
+    private static JxlDecodedFrame BuildReducedFrame(JxlFrameHeader frame, JxlCodestreamHeaders headers, JxlDecoderState state, JxlFrameFeatures features, ModularImage extras, VarDctFrame vd, int byteLength, ParallelSettings parallel)
+    {
+        var metadata = headers.Metadata;
+        var output = SelectXybOutput(metadata);
+        bool gray = metadata.ColorEncoding.ColorSpace == JxlColorSpace.Gray;
+        int width = frame.Dimensions.XSizeBlocks;
+        int height = frame.Dimensions.YSizeBlocks;
+        var result = FinishXyb(frame, headers, state, features, extras, vd.DcPlanes, width, width, height, 0f, 1f, output, gray, firstExtra: 0, planesPooled: false, parallel: parallel);
+        return new JxlDecodedFrame(frame, extras, 0)
+        {
+            ColorPlanes = result.Planes,
+            ColorPlaneStride = result.Stride,
+            ColorPlanesPooled = result.Pooled,
+            ByteLength = byteLength,
+            CanvasWidth = width,
+            CanvasHeight = height,
         };
     }
 

@@ -18,7 +18,15 @@ internal sealed class Av1ReconPipeline : IDisposable
     private const int MaxQueuedBatches = 8;
 
     private readonly IAv1ReconWorker _worker;
-    private readonly bool _threaded;
+    private const int ConsumerPending = 0;
+    private const int ConsumerRunning = 1;
+    private const int ConsumerAbandoned = 2;
+
+    // How long a caller-supplied scheduler gets to start the consumer before we give up on it (see the constructor).
+    private const int SchedulerStartTimeoutMs = 50;
+
+    private bool _threaded;
+    private int _consumerState;
 
     private BlockingCollection<Batch>? _queue;
     private ConcurrentQueue<Batch>? _free;
@@ -28,8 +36,23 @@ internal sealed class Av1ReconPipeline : IDisposable
     private ManualResetEventSlim? _drained;
     private ExceptionDispatchInfo? _error;
 
-    public Av1ReconPipeline(IAv1ReconWorker worker, bool threaded)
+    /// <param name="worker">Executes the commands.</param>
+    /// <param name="threaded">Whether to pipeline reconstruction onto a second thread.</param>
+    /// <param name="scheduler">
+    /// The scheduler to run the consumer on, or <see langword="null"/> for a dedicated long-running thread. The producer and consumer
+    /// block on each other (a full queue blocks the producer, a drain blocks until the consumer answers), so a consumer that never
+    /// gets to run would deadlock the decode. A supplied scheduler therefore only gets the pipelined mode when it reports it can run
+    /// at least two tasks at once, and even then it may be saturated by other callers: the consumer must signal that it has started
+    /// within a short bound, otherwise the pipeline is abandoned (the late consumer, if it ever runs, exits at once) and every
+    /// command runs inline. Both outcomes execute the same commands in the same order, so output is byte-identical.
+    /// </param>
+    public Av1ReconPipeline(IAv1ReconWorker worker, bool threaded, TaskScheduler? scheduler = null)
     {
+        if (threaded && scheduler is not null && scheduler.MaximumConcurrencyLevel < 2)
+        {
+            threaded = false;
+        }
+
         _worker = worker;
         _threaded = threaded;
 
@@ -40,7 +63,30 @@ internal sealed class Av1ReconPipeline : IDisposable
             _marker = new Batch();
             _drained = new ManualResetEventSlim(false);
             _current = new Batch();
-            _consumer = Task.Factory.StartNew(Consume, TaskCreationOptions.LongRunning);
+            if (scheduler is null)
+            {
+                _consumerState = ConsumerRunning;
+                _consumer = Task.Factory.StartNew(Consume, TaskCreationOptions.LongRunning);
+            }
+            else
+            {
+                var started = new ManualResetEventSlim(false); // not disposed: a late consumer may still signal it
+                _consumer = Task.Factory.StartNew(() => Consume(started), CancellationToken.None, TaskCreationOptions.LongRunning, scheduler);
+                if (!started.Wait(SchedulerStartTimeoutMs)
+                    && Interlocked.CompareExchange(ref _consumerState, ConsumerAbandoned, ConsumerPending) == ConsumerPending)
+                {
+                    // The scheduler had no slot for the consumer: run inline instead.
+                    _threaded = false;
+                    _queue.Dispose();
+                    _queue = null;
+                    _drained.Dispose();
+                    _drained = null;
+                    _free = null;
+                    _marker = null;
+                    _current = null;
+                    _consumer = null;
+                }
+            }
         }
     }
 
@@ -147,6 +193,17 @@ internal sealed class Av1ReconPipeline : IDisposable
         var full = _current!;
         _queue!.Add(full);
         _current = _free!.TryDequeue(out var reused) ? reused : new Batch();
+    }
+
+    private void Consume(ManualResetEventSlim started)
+    {
+        if (Interlocked.CompareExchange(ref _consumerState, ConsumerRunning, ConsumerPending) != ConsumerPending)
+        {
+            return;
+        }
+
+        started.Set();
+        Consume();
     }
 
     private void Consume()

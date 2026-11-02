@@ -1,8 +1,11 @@
 using System.Buffers;
+using System.Numerics;
 using PeachImage.Formats.Jpeg2000.Decoding;
 using PeachImage.Formats.Jpeg2000.Internal;
 using PeachImage.Formats.Shared.IO;
+using PeachImage.Formats.Shared.Orientation;
 using PeachImage.Formats.Shared.Parallelism;
+using PeachImage.Formats.Shared.Scaling;
 
 namespace PeachImage.Formats.Jpeg2000;
 
@@ -41,7 +44,7 @@ internal static class Jpeg2000Decoder
         using var input = ReadInput(stream);
         try
         {
-            var image = DecodeCore(input.ToMemory(), jpeg2000, ParallelSettings.From(options));
+            var image = DecodeCore(input.ToMemory(), options, ParallelSettings.From(options));
             if (options?.TargetPixelFormat is { } target && target != image.PixelFormat)
             {
                 using (image)
@@ -87,11 +90,12 @@ internal static class Jpeg2000Decoder
         throw new Jpeg2000DecodingException("Data is neither a JP2 file nor a JPEG 2000 codestream.");
     }
 
-    private static Image DecodeCore(ReadOnlyMemory<byte> data, Jpeg2000DecoderOptions? options, ParallelSettings parallel)
+    private static Image DecodeCore(ReadOnlyMemory<byte> data, DecoderOptions? baseOptions, ParallelSettings parallel)
     {
+        var options = baseOptions as Jpeg2000DecoderOptions;
         var (jp2, codestream) = Open(data);
         var siz = codestream.Siz;
-        int reduce = ClampReduce(codestream, options?.ReduceResolutionLevels ?? 0);
+        int reduce = ResolveReduce(codestream, baseOptions);
         var plan = J2kImagePlan.Create(siz, jp2, options?.IgnoreColorSpace ?? false);
 
         int count = siz.Components.Length;
@@ -197,6 +201,33 @@ internal static class Jpeg2000Decoder
         }
 
         return image;
+    }
+
+    /// <summary>
+    /// The resolution levels to drop: <see cref="Jpeg2000DecoderOptions.ReduceResolutionLevels"/> (clamped), plus log2(N) more for a
+    /// 1/N <see cref="DecoderOptions.ScaleDenominator"/> or <see cref="DecoderOptions.TargetSize"/>. N is measured against the size after
+    /// the explicit reduction, so the two compose. When the codestream lacks the levels for the whole scale request, none of it is applied
+    /// (never a partial reduction) and the image comes back at the explicitly reduced size for the caller to resample.
+    /// </summary>
+    private static int ResolveReduce(J2kCodestream codestream, DecoderOptions? options)
+    {
+        int explicitReduce = ClampReduce(codestream, (options as Jpeg2000DecoderOptions)?.ReduceResolutionLevels ?? 0);
+        if (options is null || !DecodeScale.IsRequested(options))
+        {
+            return explicitReduce;
+        }
+
+        var siz = codestream.Siz;
+        int width = CeilDivPow2(siz.Xsiz, explicitReduce) - CeilDivPow2(siz.XOsiz, explicitReduce);
+        int height = CeilDivPow2(siz.Ysiz, explicitReduce) - CeilDivPow2(siz.YOsiz, explicitReduce);
+        int denominator = DecodeScale.Resolve(options, width, height, ImageOrientation.Normal);
+        if (denominator <= 1)
+        {
+            return explicitReduce;
+        }
+
+        int total = explicitReduce + BitOperations.Log2((uint)denominator);
+        return ClampReduce(codestream, total) == total ? total : explicitReduce;
     }
 
     /// <summary>The largest reduction every tile and component can honor.</summary>

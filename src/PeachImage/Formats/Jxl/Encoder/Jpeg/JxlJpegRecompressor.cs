@@ -4,13 +4,14 @@ using PeachImage.Formats.Jxl.Encoder.Headers;
 using PeachImage.Formats.Jxl.Internal;
 using PeachImage.Formats.Jxl.Jpeg;
 using PeachImage.Formats.Shared.Metadata;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jxl.Encoder.Jpeg;
 
 /// <summary>Turns a JPEG file into a JPEG XL file from which that exact JPEG file can be reconstructed, without decoding any pixels.</summary>
 internal static class JxlJpegRecompressor
 {
-    public static byte[] Recompress(byte[] jpeg)
+    public static byte[] Recompress(byte[] jpeg, ParallelSettings parallel = default)
     {
         var parsed = JxlJpegParser.Parse(jpeg);
         var data = parsed.Data;
@@ -23,7 +24,7 @@ internal static class JxlJpegRecompressor
         var info = new JxlEncodedImageInfo((uint)data.Width, (uint)data.Height, 8, IsGray: data.Components.Count == 1, HasAlpha: false, XybEncoded: false, orientation, parsed.IccProfile);
         var codestream = new JxlBitWriter(Math.Max(1024, jpeg.Length));
         JxlCodestreamHeaderWriter.Write(codestream, info);
-        codestream.WriteBytes(JxlJpegFrameEncoder.Encode(data));
+        codestream.WriteBytes(JxlJpegFrameEncoder.Encode(data, parallel));
 
         using var output = new MemoryStream(jpeg.Length);
         JxlContainerWriter.Write(output, codestream.AsSpan(), parsed.Exif, parsed.Xmp, JxlJpegDataWriter.Write(data));
@@ -33,7 +34,7 @@ internal static class JxlJpegRecompressor
         byte[] rebuilt;
         try
         {
-            rebuilt = JxlJpegReconstructor.Reconstruct(file);
+            rebuilt = JxlJpegReconstructor.Reconstruct(file, parallel);
         }
         catch (JxlFormatException ex)
         {

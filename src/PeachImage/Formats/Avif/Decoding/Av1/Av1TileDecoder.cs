@@ -458,7 +458,7 @@ internal sealed class Av1TileDecoder
             && !_parallel.IsSequential
             && _parallel.EffectiveDegree > 1
             && (_miRowEnd - _miRowStart) * (_miColEnd - _miColStart) >= PipelineMinMiArea;
-        _recon = new Av1ReconPipeline(_worker, threaded);
+        _recon = new Av1ReconPipeline(_worker, threaded, _parallel.Scheduler);
 
         try
         {
