@@ -93,7 +93,7 @@ internal static class JxlDecoder
         Action<JxlDecodedFrame>? onPreview = options?.PreviewAvailable is { } callback
             ? preview => callback(Finish(JxlImageBuilder.Build(preview, headers, options.TargetPixelFormat, parallel), container, headers))
             : null;
-        foreach (var (frame, _) in VisibleFrames(container.Codestream.ToArray(), headers, parallel, onPreview))
+        foreach (var (frame, _) in VisibleFrames(container.Codestream.ToArray(), headers, parallel, onPreview, options?.ResolvedScaleDenominator ?? 1))
         {
             using (frame)
             {
@@ -122,7 +122,7 @@ internal static class JxlDecoder
     }
 
     /// <summary>Decodes every visible frame (composited onto the canvas) into <paramref name="format"/>. Used to check frames at full precision.</summary>
-    internal static List<Image> DecodeFrames(Stream stream, PixelFormat format)
+    internal static List<Image> DecodeFrames(Stream stream, PixelFormat format, ParallelSettings parallel = default)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
@@ -130,11 +130,11 @@ internal static class JxlDecoder
         var images = new List<Image>();
         try
         {
-            foreach (var (frame, _) in VisibleFrames(container.Codestream.ToArray(), headers, default))
+            foreach (var (frame, _) in VisibleFrames(container.Codestream.ToArray(), headers, parallel))
             {
                 using (frame)
                 {
-                    images.Add(Finish(JxlImageBuilder.Build(frame, headers, format), container, headers));
+                    images.Add(Finish(JxlImageBuilder.Build(frame, headers, format, parallel), container, headers));
                 }
             }
 
@@ -190,7 +190,8 @@ internal static class JxlDecoder
         byte[] codestream,
         JxlCodestreamHeaders headers,
         ParallelSettings parallel,
-        Action<JxlDecodedFrame>? onPreview = null)
+        Action<JxlDecodedFrame>? onPreview = null,
+        int reduceDenominator = 1)
     {
         var state = new JxlDecoderState();
         int offset = headers.FrameOffset;
@@ -209,7 +210,7 @@ internal static class JxlDecoder
                 throw new JxlDecodingException("The codestream ends before its last frame.");
             }
 
-            var decoded = JxlFrameDecoder.Decode(codestream, offset, headers, state, parallel: parallel);
+            var decoded = JxlFrameDecoder.Decode(codestream, offset, headers, state, parallel: parallel, reduceDenominator: reduceDenominator);
             offset += decoded.ByteLength;
             var header = decoded.Header;
             bool last = header.IsLast;

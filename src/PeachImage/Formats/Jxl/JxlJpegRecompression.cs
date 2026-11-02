@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Parallelism;
 using System.Diagnostics.CodeAnalysis;
 using PeachImage.Formats.Jxl.Encoder.Jpeg;
 
@@ -21,34 +22,58 @@ public static class JxlJpegRecompression
     /// <param name="stream">A readable stream positioned at the start of the JPEG file. It is read to its end.</param>
     /// <returns>The bytes of the JPEG XL file.</returns>
     /// <exception cref="JxlUnsupportedFeatureException">The data is not a JPEG, or it is one that cannot be recompressed losslessly.</exception>
-    public static byte[] RecompressJpeg(Stream stream)
+    public static byte[] RecompressJpeg(Stream stream) => RecompressJpeg(stream, -1);
+
+    /// <summary>Recompresses the JPEG file in <paramref name="stream"/> into a JPEG XL file, bounding the threads the call may use.</summary>
+    /// <param name="stream">A readable stream positioned at the start of the JPEG file. It is read to its end.</param>
+    /// <param name="maxDegreeOfParallelism">The most threads this call may use: -1 leaves it to the library (up to <see cref="Environment.ProcessorCount"/>), 1 runs on the calling thread. Per call, not global. Does not change the output.</param>
+    /// <param name="taskScheduler">An optional scheduler for the parallel work, to share one limit across concurrent calls. <see langword="null"/> uses the thread pool.</param>
+    /// <returns>The bytes of the JPEG XL file.</returns>
+    /// <exception cref="JxlUnsupportedFeatureException">The data is not a JPEG, or it is one that cannot be recompressed losslessly.</exception>
+    public static byte[] RecompressJpeg(Stream stream, int maxDegreeOfParallelism, TaskScheduler? taskScheduler = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
-        return JxlJpegRecompressor.Recompress(JxlDecoder.ReadAll(stream));
+        return JxlJpegRecompressor.Recompress(JxlDecoder.ReadAll(stream), new ParallelSettings(maxDegreeOfParallelism, taskScheduler));
     }
 
     /// <summary>Recompresses the JPEG file in <paramref name="source"/> and writes the JPEG XL file to <paramref name="destination"/>.</summary>
     /// <exception cref="JxlUnsupportedFeatureException">The data is not a JPEG, or it is one that cannot be recompressed losslessly.</exception>
-    public static void RecompressJpeg(Stream source, Stream destination)
+    public static void RecompressJpeg(Stream source, Stream destination) => RecompressJpeg(source, destination, -1);
+
+    /// <summary>Recompresses the JPEG file in <paramref name="source"/> and writes the JPEG XL file to <paramref name="destination"/>, bounding the threads the call may use.</summary>
+    /// <param name="source">A readable stream positioned at the start of the file. It is read to its end.</param>
+    /// <param name="destination">The stream the result is written to.</param>
+    /// <param name="maxDegreeOfParallelism">The most threads this call may use: -1 leaves it to the library (up to <see cref="Environment.ProcessorCount"/>), 1 runs on the calling thread. Per call, not global. Does not change the output.</param>
+    /// <param name="taskScheduler">An optional scheduler for the parallel work, to share one limit across concurrent calls. <see langword="null"/> uses the thread pool.</param>
+    /// <exception cref="JxlUnsupportedFeatureException">The data is not a JPEG, or it is one that cannot be recompressed losslessly.</exception>
+    public static void RecompressJpeg(Stream source, Stream destination, int maxDegreeOfParallelism, TaskScheduler? taskScheduler = null)
     {
         ArgumentNullException.ThrowIfNull(destination);
 
-        destination.Write(RecompressJpeg(source));
+        destination.Write(RecompressJpeg(source, maxDegreeOfParallelism, taskScheduler));
     }
 
     /// <summary>
     /// Recompresses the JPEG file in <paramref name="stream"/> if it can be recompressed losslessly. Returns <see langword="false"/>
     /// (without throwing) for data that is not a JPEG or uses features that cannot be reproduced.
     /// </summary>
-    public static bool TryRecompressJpeg(Stream stream, [NotNullWhen(true)] out byte[]? jxl)
+    public static bool TryRecompressJpeg(Stream stream, [NotNullWhen(true)] out byte[]? jxl) =>
+        TryRecompressJpeg(stream, -1, null, out jxl);
+
+    /// <summary>Like <see cref="TryRecompressJpeg(Stream, out byte[])"/>, bounding the threads the call may use.</summary>
+    /// <param name="stream">A readable stream positioned at the start of the file. It is read to its end.</param>
+    /// <param name="jxl">The JPEG XL file, when this returns <see langword="true"/>.</param>
+    /// <param name="maxDegreeOfParallelism">The most threads this call may use: -1 leaves it to the library (up to <see cref="Environment.ProcessorCount"/>), 1 runs on the calling thread. Per call, not global. Does not change the output.</param>
+    /// <param name="taskScheduler">An optional scheduler for the parallel work, to share one limit across concurrent calls. <see langword="null"/> uses the thread pool.</param>
+    public static bool TryRecompressJpeg(Stream stream, int maxDegreeOfParallelism, TaskScheduler? taskScheduler, [NotNullWhen(true)] out byte[]? jxl)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
         byte[] file = JxlDecoder.ReadAll(stream);
         try
         {
-            jxl = JxlJpegRecompressor.Recompress(file);
+            jxl = JxlJpegRecompressor.Recompress(file, new ParallelSettings(maxDegreeOfParallelism, taskScheduler));
             return true;
         }
         catch (JxlUnsupportedFeatureException)

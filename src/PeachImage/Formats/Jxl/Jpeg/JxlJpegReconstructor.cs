@@ -2,6 +2,7 @@ using PeachImage.Formats.Jxl.Container;
 using PeachImage.Formats.Jxl.Features;
 using PeachImage.Formats.Jxl.Frame;
 using PeachImage.Formats.Jxl.Headers;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jxl.Jpeg;
 
@@ -10,7 +11,7 @@ internal static class JxlJpegReconstructor
 {
     public static bool HasReconstructionData(byte[] file) => JxlContainer.Parse(file).JpegReconstruction is not null;
 
-    public static byte[] Reconstruct(byte[] file)
+    public static byte[] Reconstruct(byte[] file, ParallelSettings parallel = default)
     {
         var container = JxlContainer.Parse(file);
         if (container.JpegReconstruction is not { } reconstruction)
@@ -26,11 +27,11 @@ internal static class JxlJpegReconstructor
         int offset = headers.FrameOffset;
         if (headers.Metadata.PreviewSize is not null)
         {
-            using var preview = JxlFrameDecoder.Decode(codestream, offset, headers, state, isPreview: true);
+            using var preview = JxlFrameDecoder.Decode(codestream, offset, headers, state, isPreview: true, parallel: parallel);
             offset += preview.ByteLength;
         }
 
-        using (var frame = JxlFrameDecoder.Decode(codestream, offset, headers, state, jpegTarget: jpeg))
+        using (var frame = JxlFrameDecoder.Decode(codestream, offset, headers, state, jpegTarget: jpeg, parallel: parallel))
         {
             if (!frame.Header.IsLast)
             {

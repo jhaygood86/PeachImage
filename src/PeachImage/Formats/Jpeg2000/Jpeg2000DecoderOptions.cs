@@ -17,6 +17,9 @@ public sealed class Jpeg2000DecoderOptions : DecoderOptions
     /// <summary>
     /// Decodes at a reduced resolution: each increment halves the width and height (a value of 1 gives half size). The
     /// value is clamped to the number of decomposition levels the image has. Default 0 (full size).
+    /// It composes with <see cref="DecoderOptions.ScaleDenominator"/> / <see cref="DecoderOptions.TargetSize"/>, which are applied on top
+    /// of it (the scale is relative to the already reduced size) by dropping log2(N) further levels; if the codestream lacks them the
+    /// scale is not applied natively and the result is resampled to size instead.
     /// </summary>
     public int ReduceResolutionLevels { get; init; }
 }

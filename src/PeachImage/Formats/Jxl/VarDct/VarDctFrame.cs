@@ -130,6 +130,9 @@ internal sealed partial class VarDctFrame : IQuantTableReader
         }
     }
 
+    /// <summary>The DC image as three XYB planes of <see cref="JxlFrameDimensions.XSizeBlocks"/> x <see cref="JxlFrameDimensions.YSizeBlocks"/> samples (one per 8x8 block).</summary>
+    public float[][] DcPlanes => _dc;
+
     /// <summary>Sets the frame-wide Modular model (the global MA tree) that DC-group and RAW-table streams may use.</summary>
     public void SetGlobalModel(ModularContextModel? model) => _globalModel = model;
 
