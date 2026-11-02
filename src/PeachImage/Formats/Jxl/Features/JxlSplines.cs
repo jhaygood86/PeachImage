@@ -470,7 +470,7 @@ internal sealed class JxlSplines
     /// Adds the splines to the three XYB planes in place. Rows are independent, so they are drawn on all cores; each row adds its
     /// segments in their original order, which keeps the floating-point sums identical to a sequential pass.
     /// </summary>
-    public void AddTo(float[][] planes, int stride, int width, int height, bool vectorized = true)
+    public void AddTo(float[][] planes, int stride, int width, int height, bool vectorized = true, ParallelSettings parallel = default)
     {
         if (_segments.Length == 0 || width <= 0)
         {
@@ -527,7 +527,7 @@ internal sealed class JxlSplines
                 int i = indices[k];
                 DrawRow(in _segments[i], y, spanStart[i], spanEnd[i], planes, y * stride, vectorized);
             }
-        });
+        }, settings: parallel);
     }
 
     private static void DrawRow(in SplineSegment segment, int y, int x0, int x1, float[][] planes, int row, bool vectorized)

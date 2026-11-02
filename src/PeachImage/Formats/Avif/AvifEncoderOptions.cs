@@ -57,7 +57,4 @@ public sealed class AvifEncoderOptions : EncoderOptions
     /// <see cref="Lossless"/> is <see langword="true"/>.
     /// </summary>
     public int? TileRowsLog2 { get; init; }
-
-    /// <summary>The maximum number of threads used to encode tile rows in parallel. -1 (the default) uses all cores; 1 encodes sequentially. Does not change the output.</summary>
-    public int MaxDegreeOfParallelism { get; init; } = -1;
 }

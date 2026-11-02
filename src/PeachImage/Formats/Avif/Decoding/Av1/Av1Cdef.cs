@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using System.Threading.Tasks;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -43,7 +44,7 @@ internal static class Av1Cdef
     private static readonly int[][] CdefPriTaps = [[4, 2], [3, 3]];
     private static readonly int[][] CdefSecTaps = [[2, 1], [2, 1]];
 
-    public static void Apply<TPixel>(Av1FrameDecodeResult<TPixel> result)
+    public static void Apply<TPixel>(Av1FrameDecodeResult<TPixel> result, ParallelSettings parallel = default)
         where TPixel : unmanaged, IBinaryInteger<TPixel>
     {
         var seq = result.Sequence;
@@ -77,9 +78,9 @@ internal static class Av1Cdef
         // Each 8-luma-row strip reads only the (immutable) deblocked planes and writes only its own rows of
         // the output planes, so strips run independently; the per-strip State carries the availability flag.
         int strips = (frame.MiRows + step4 - 1) / step4;
-        if (strips >= ParallelMinStrips && Environment.ProcessorCount > 1)
+        if (strips >= ParallelMinStrips && parallel.EffectiveDegree > 1 && !parallel.IsSequential)
         {
-            Parallel.For(0, strips, () => new State<TPixel>(result, cdefPlanes), (strip, _, state) =>
+            Parallel.For(0, strips, parallel.ToParallelOptions(), () => new State<TPixel>(result, cdefPlanes), (strip, _, state) =>
             {
                 CdefStrip(result, state, cdefPlanes, strip * step4, step4, cdefMask4);
                 return state;

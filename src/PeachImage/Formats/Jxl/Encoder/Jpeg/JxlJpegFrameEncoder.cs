@@ -8,6 +8,7 @@ using PeachImage.Formats.Jxl.Frame;
 using PeachImage.Formats.Jxl.Jpeg;
 using PeachImage.Formats.Jxl.Modular;
 using PeachImage.Formats.Jxl.VarDct;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jxl.Encoder.Jpeg;
 
@@ -31,7 +32,7 @@ internal static class JxlJpegFrameEncoder
     private static readonly int[] ModeVerticalShift = [0, 1, 0, 1];
 
     /// <summary>Encodes <paramref name="jpeg"/> as a complete frame (header, table of contents and sections).</summary>
-    public static byte[] Encode(JxlJpegData jpeg)
+    public static byte[] Encode(JxlJpegData jpeg, ParallelSettings parallel = default)
     {
         bool gray = jpeg.Components.Count == 1;
         int[] modes = ChromaModes(jpeg);
@@ -84,7 +85,7 @@ internal static class JxlJpegFrameEncoder
         var tree = JxlMaTreeEncoder.PerChannel([ModularPredictor.Gradient, ModularPredictor.Gradient, ModularPredictor.Gradient, ModularPredictor.Gradient]);
 
         var acTokens = new JxlTokenList[dims.NumGroups];
-        JxlParallel.For(dims.NumGroups, g => acTokens[g] = EncodeAcGroup(dims, g, planes, dc[1], widths, hShift, vShift, blockContext, threshold));
+        JxlParallel.For(dims.NumGroups, g => acTokens[g] = EncodeAcGroup(dims, g, planes, dc[1], widths, hShift, vShift, blockContext, threshold), parallel);
 
         // DC group and AC-metadata token streams.
         var dcTokens = new JxlTokenList[dims.NumDcGroups];
@@ -205,7 +206,7 @@ internal static class JxlJpegFrameEncoder
                 var writer = new JxlBitWriter(Math.Max(256, acTokens[g].Count));
                 acPlan.WriteStream(writer, acTokens[g]);
                 sections[groupBase + g] = writer.ToArray();
-            });
+            }, parallel);
         }
 
         var frame = new JxlBitWriter();

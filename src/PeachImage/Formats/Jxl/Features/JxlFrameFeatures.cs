@@ -56,7 +56,8 @@ internal sealed class JxlFrameFeatures
         int height,
         FrameExtraChannels extras,
         float yToX,
-        float yToB)
+        float yToB,
+        ParallelSettings parallel = default)
     {
         if (Patches is { HasAny: true } patches)
         {
@@ -74,16 +75,16 @@ internal sealed class JxlFrameFeatures
         if (Splines is { } splines)
         {
             splines.Prepare(width, height, yToX, yToB);
-            splines.AddTo(planes, stride, width, height);
+            splines.AddTo(planes, stride, width, height, parallel: parallel);
         }
     }
 
     /// <summary>Adds the noise layer to the three planes, at the frame's final (upsampled) resolution.</summary>
-    public void ApplyNoise(JxlFrameHeader frame, JxlDecoderState state, float[][] planes, int stride, int width, int height, float yToX, float yToB)
+    public void ApplyNoise(JxlFrameHeader frame, JxlDecoderState state, float[][] planes, int stride, int width, int height, float yToX, float yToB, ParallelSettings parallel = default)
     {
         if (Noise is { } noise)
         {
-            JxlNoise.Add(noise, planes, stride, width, height, frame.Dimensions.GroupDimension, yToX, yToB, state.VisibleFrameIndex, state.NonVisibleFrameIndex);
+            JxlNoise.Add(noise, planes, stride, width, height, frame.Dimensions.GroupDimension, yToX, yToB, state.VisibleFrameIndex, state.NonVisibleFrameIndex, parallel: parallel);
         }
     }
 
@@ -133,11 +134,13 @@ internal sealed class FrameExtraChannels
     private readonly int _first;
     private readonly IReadOnlyList<JxlExtraChannelInfo> _info;
     private readonly int _stride;
+    private readonly ParallelSettings _parallel;
     private readonly Plane?[] _planes;
     private bool _modified;
 
-    public FrameExtraChannels(ModularImage image, int firstChannel, IReadOnlyList<JxlExtraChannelInfo> info, int stride)
+    public FrameExtraChannels(ModularImage image, int firstChannel, IReadOnlyList<JxlExtraChannelInfo> info, int stride, ParallelSettings parallel = default)
     {
+        _parallel = parallel;
         _image = image;
         _first = firstChannel;
         _info = info;
@@ -180,12 +183,12 @@ internal sealed class FrameExtraChannels
                 {
                     data[(y * stride) + x] = JxlCustomFloat.Decode(source[(y * channelWidth) + x], bits, exponentBits);
                 }
-            });
+            }, settings: _parallel);
         }
         else
         {
             float scale = JxlSampleConversion.NormalizationScale((int)depth.BitsPerSample);
-            RowParallel.For(channel.Height, y => JxlSampleConversion.ToFloat(source.AsSpan(y * channelWidth, channelWidth), data.AsSpan(y * stride, channelWidth), scale));
+            RowParallel.For(channel.Height, y => JxlSampleConversion.ToFloat(source.AsSpan(y * channelWidth, channelWidth), data.AsSpan(y * stride, channelWidth), scale), settings: _parallel);
         }
 
         var plane = new Plane(data, channel.Width, channel.Height, stride);
@@ -209,7 +212,7 @@ internal sealed class FrameExtraChannels
     public void Upsample(int index, int shift, float[] kernels, int dstStride)
     {
         var plane = Ensure(index);
-        plane.Data = JxlUpsampling.Upsample(plane.Data, plane.Stride, plane.Width, plane.Height, shift, kernels, Math.Max(dstStride, plane.Width << shift));
+        plane.Data = JxlUpsampling.Upsample(plane.Data, plane.Stride, plane.Width, plane.Height, shift, kernels, Math.Max(dstStride, plane.Width << shift), parallel: _parallel);
         plane.Stride = Math.Max(dstStride, plane.Width << shift);
         plane.Width <<= shift;
         plane.Height <<= shift;
@@ -241,7 +244,7 @@ internal sealed class FrameExtraChannels
                 old.Dispose();
             }
 
-            JxlSampleConversion.ToIntChannel(plane.Data, plane.Stride, channel.Array, channel.Width, channel.Height, depth);
+            JxlSampleConversion.ToIntChannel(plane.Data, plane.Stride, channel.Array, channel.Width, channel.Height, depth, _parallel);
         }
 
         _modified = false;

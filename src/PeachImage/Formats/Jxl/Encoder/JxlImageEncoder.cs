@@ -6,6 +6,7 @@ using PeachImage.Formats.Jxl.Encoder.Modular;
 using PeachImage.Formats.Jxl.Encoder.VarDct;
 using PeachImage.Formats.Jxl.Internal;
 using PeachImage.Formats.Shared.Metadata;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jxl.Encoder;
 
@@ -82,11 +83,11 @@ internal static class JxlImageEncoder
         if (lossy)
         {
             var lossyInput = new JxlVarDctFrameInput(input.Width, input.Height, bits, input.ColorChannels, input.Channels, isFloat);
-            codestream.WriteBytes(JxlVarDctFrameEncoder.Encode(lossyInput, JxlVarDctQuality.Settings(options)));
+            codestream.WriteBytes(JxlVarDctFrameEncoder.Encode(lossyInput, JxlVarDctQuality.Settings(options), ParallelSettings.From(options)));
         }
         else
         {
-            codestream.WriteBytes(JxlModularFrameEncoder.Encode(input, xybEncoded: false));
+            codestream.WriteBytes(JxlModularFrameEncoder.Encode(input, xybEncoded: false, ParallelSettings.From(options)));
         }
 
         JxlContainerWriter.Write(stream, codestream.AsSpan(), exif, xmp);

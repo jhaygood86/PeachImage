@@ -19,7 +19,7 @@ internal static class JxlYCbCrModular
     /// Converts one colour channel into a rented float plane of <paramref name="stride"/> x <paramref name="rows"/> floats,
     /// upsampling it to <paramref name="width"/> x <paramref name="height"/> when it is stored at a smaller size.
     /// </summary>
-    public static float[] ToPlane(ModularChannel channel, JxlBitDepth depth, int stride, int rows, int width, int height)
+    public static float[] ToPlane(ModularChannel channel, JxlBitDepth depth, int stride, int rows, int width, int height, ParallelSettings parallel = default)
     {
         var pool = ArrayPool<float>.Shared;
         if (channel.Width == width && channel.Height == height)
@@ -27,13 +27,13 @@ internal static class JxlYCbCrModular
             var plane = pool.Rent(stride * rows);
             if (stride == width)
             {
-                JxlSampleConversion.ToFloatPlane(channel.Array, plane, width, height, depth);
+                JxlSampleConversion.ToFloatPlane(channel.Array, plane, width, height, depth, parallel);
             }
             else
             {
                 var compact = pool.Rent(width * height);
-                JxlSampleConversion.ToFloatPlane(channel.Array, compact, width, height, depth);
-                RowParallel.For(height, y => Array.Copy(compact, y * width, plane, y * stride, width));
+                JxlSampleConversion.ToFloatPlane(channel.Array, compact, width, height, depth, parallel);
+                RowParallel.For(height, y => Array.Copy(compact, y * width, plane, y * stride, width), settings: parallel);
                 pool.Return(compact);
             }
 
@@ -43,8 +43,8 @@ internal static class JxlYCbCrModular
         int hShift = channel.HShift;
         int vShift = channel.VShift;
         var reduced = pool.Rent(channel.Width * channel.Height);
-        JxlSampleConversion.ToFloatPlane(channel.Array, reduced, channel.Width, channel.Height, depth);
-        float[] upsampled = ChromaUpsampling.Upsample(reduced, channel.Width, channel.Width, channel.Height, hShift, vShift, stride, rows);
+        JxlSampleConversion.ToFloatPlane(channel.Array, reduced, channel.Width, channel.Height, depth, parallel);
+        float[] upsampled = ChromaUpsampling.Upsample(reduced, channel.Width, channel.Width, channel.Height, hShift, vShift, stride, rows, parallel);
         pool.Return(reduced);
         return upsampled;
     }

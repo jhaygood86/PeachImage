@@ -2,6 +2,7 @@ using System.Buffers;
 using PeachImage.Formats.Jpeg2000.Decoding;
 using PeachImage.Formats.Jpeg2000.Internal;
 using PeachImage.Formats.Shared.IO;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jpeg2000;
 
@@ -40,7 +41,7 @@ internal static class Jpeg2000Decoder
         using var input = ReadInput(stream);
         try
         {
-            var image = DecodeCore(input.ToMemory(), jpeg2000);
+            var image = DecodeCore(input.ToMemory(), jpeg2000, ParallelSettings.From(options));
             if (options?.TargetPixelFormat is { } target && target != image.PixelFormat)
             {
                 using (image)
@@ -86,7 +87,7 @@ internal static class Jpeg2000Decoder
         throw new Jpeg2000DecodingException("Data is neither a JP2 file nor a JPEG 2000 codestream.");
     }
 
-    private static Image DecodeCore(ReadOnlyMemory<byte> data, Jpeg2000DecoderOptions? options)
+    private static Image DecodeCore(ReadOnlyMemory<byte> data, Jpeg2000DecoderOptions? options, ParallelSettings parallel)
     {
         var (jp2, codestream) = Open(data);
         var siz = codestream.Siz;
@@ -128,7 +129,7 @@ internal static class Jpeg2000Decoder
                 Array.Clear(planes[c], 0, pixels);
             }
 
-            return DecodePlanes(codestream, jp2, options, siz, reduce, plan, planes, planeWidths, planeHeights, planeOriginX, planeOriginY);
+            return DecodePlanes(codestream, jp2, options, siz, reduce, plan, planes, planeWidths, planeHeights, planeOriginX, planeOriginY, parallel);
         }
         finally
         {
@@ -153,32 +154,42 @@ internal static class Jpeg2000Decoder
         int[] planeWidths,
         int[] planeHeights,
         int[] planeOriginX,
-        int[] planeOriginY)
+        int[] planeOriginY,
+        ParallelSettings parallel)
     {
 
         var tiles = codestream.TileParts.GroupBy(p => p.TileIndex).ToDictionary(g => g.Key, g => g.OrderBy(p => p.PartIndex).ToList());
-        Parallel.ForEach(
-            tiles,
-            new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
-            entry =>
+        void DecodeTile(KeyValuePair<int, List<J2kTilePart>> entry)
+        {
+            var decoder = new J2kTileDecoder(codestream, entry.Key, reduce, parallel);
+            try
             {
-                var decoder = new J2kTileDecoder(codestream, entry.Key, reduce);
-                try
-                {
-                    decoder.Decode(entry.Value);
-                    J2kTileWriter.Write(decoder, siz, reduce, planes, planeWidths, planeOriginX, planeOriginY);
-                }
-                finally
-                {
-                    decoder.Release();
-                }
-            });
+                decoder.Decode(entry.Value);
+                J2kTileWriter.Write(decoder, siz, reduce, planes, planeWidths, planeOriginX, planeOriginY);
+            }
+            finally
+            {
+                decoder.Release();
+            }
+        }
+
+        if (parallel.IsSequential)
+        {
+            foreach (var entry in tiles)
+            {
+                DecodeTile(entry);
+            }
+        }
+        else
+        {
+            Parallel.ForEach(tiles, parallel.ToParallelOptions(), DecodeTile);
+        }
 
         int gridX0 = CeilDivPow2(siz.XOsiz, reduce);
         int gridY0 = CeilDivPow2(siz.YOsiz, reduce);
         int width = CeilDivPow2(siz.Xsiz, reduce) - gridX0;
         int height = CeilDivPow2(siz.Ysiz, reduce) - gridY0;
-        var image = plan.Build(siz, reduce, planes, planeWidths, planeHeights, planeOriginX, planeOriginY, width, height, gridX0, gridY0);
+        var image = plan.Build(siz, reduce, planes, planeWidths, planeHeights, planeOriginX, planeOriginY, width, height, gridX0, gridY0, parallel);
         image.HasAlpha = plan.HasAlpha;
         if (jp2?.IccProfile is { } icc && !(options?.IgnoreColorSpace ?? false))
         {

@@ -5,6 +5,7 @@ using PeachImage.Formats.Jxl.Frame;
 using PeachImage.Formats.Jxl.Headers;
 using PeachImage.Formats.Jxl.Internal;
 using PeachImage.Formats.Shared.Metadata;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jxl;
 
@@ -88,14 +89,15 @@ internal static class JxlDecoder
         ArgumentNullException.ThrowIfNull(stream);
 
         var (container, headers) = Open(stream);
+        var parallel = ParallelSettings.From(options);
         Action<JxlDecodedFrame>? onPreview = options?.PreviewAvailable is { } callback
-            ? preview => callback(Finish(JxlImageBuilder.Build(preview, headers, options.TargetPixelFormat), container, headers))
+            ? preview => callback(Finish(JxlImageBuilder.Build(preview, headers, options.TargetPixelFormat, parallel), container, headers))
             : null;
-        foreach (var (frame, _) in VisibleFrames(container.Codestream.ToArray(), headers, onPreview))
+        foreach (var (frame, _) in VisibleFrames(container.Codestream.ToArray(), headers, parallel, onPreview))
         {
             using (frame)
             {
-                var built = JxlImageBuilder.Build(frame, headers, options?.TargetPixelFormat);
+                var built = JxlImageBuilder.Build(frame, headers, options?.TargetPixelFormat, parallel);
                 return Finish(built, container, headers);
             }
         }
@@ -110,14 +112,13 @@ internal static class JxlDecoder
     public static AnimatedImage DecodeAnimation(Stream stream, DecoderOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
-        _ = options;
 
         var (container, headers) = Open(stream);
         var metadata = headers.Metadata;
         int width = checked((int)headers.Size.Width);
         int height = checked((int)headers.Size.Height);
         int loops = metadata.Animation is { } animation ? checked((int)Math.Min(animation.NumLoops, int.MaxValue)) : 1;
-        return new AnimatedImage(EnumerateAnimation(container, headers), width, height, loops);
+        return new AnimatedImage(EnumerateAnimation(container, headers, ParallelSettings.From(options)), width, height, loops);
     }
 
     /// <summary>Decodes every visible frame (composited onto the canvas) into <paramref name="format"/>. Used to check frames at full precision.</summary>
@@ -129,7 +130,7 @@ internal static class JxlDecoder
         var images = new List<Image>();
         try
         {
-            foreach (var (frame, _) in VisibleFrames(container.Codestream.ToArray(), headers))
+            foreach (var (frame, _) in VisibleFrames(container.Codestream.ToArray(), headers, default))
             {
                 using (frame)
                 {
@@ -146,15 +147,15 @@ internal static class JxlDecoder
         }
     }
 
-    private static IEnumerable<AnimatedImageFrame> EnumerateAnimation(JxlContainer container, JxlCodestreamHeaders headers)
+    private static IEnumerable<AnimatedImageFrame> EnumerateAnimation(JxlContainer container, JxlCodestreamHeaders headers, ParallelSettings parallel)
     {
         var animation = headers.Metadata.Animation;
-        foreach (var (frame, ticks) in VisibleFrames(container.Codestream.ToArray(), headers))
+        foreach (var (frame, ticks) in VisibleFrames(container.Codestream.ToArray(), headers, parallel))
         {
             Image image;
             using (frame)
             {
-                image = Finish(JxlImageBuilder.Build(frame, headers, PixelFormat.Rgba32), container, headers);
+                image = Finish(JxlImageBuilder.Build(frame, headers, PixelFormat.Rgba32, parallel), container, headers);
             }
 
             TimeSpan duration = TimeSpan.Zero;
@@ -188,6 +189,7 @@ internal static class JxlDecoder
     private static IEnumerable<(JxlDecodedFrame Frame, uint Ticks)> VisibleFrames(
         byte[] codestream,
         JxlCodestreamHeaders headers,
+        ParallelSettings parallel,
         Action<JxlDecodedFrame>? onPreview = null)
     {
         var state = new JxlDecoderState();
@@ -195,7 +197,7 @@ internal static class JxlDecoder
         if (headers.Metadata.PreviewSize is not null)
         {
             // The preview is a small stand-in for the image; it precedes the real frames and is not part of them.
-            using var preview = JxlFrameDecoder.Decode(codestream, offset, headers, state, isPreview: true);
+            using var preview = JxlFrameDecoder.Decode(codestream, offset, headers, state, isPreview: true, parallel: parallel);
             onPreview?.Invoke(preview);
             offset += preview.ByteLength;
         }
@@ -207,7 +209,7 @@ internal static class JxlDecoder
                 throw new JxlDecodingException("The codestream ends before its last frame.");
             }
 
-            var decoded = JxlFrameDecoder.Decode(codestream, offset, headers, state);
+            var decoded = JxlFrameDecoder.Decode(codestream, offset, headers, state, parallel: parallel);
             offset += decoded.ByteLength;
             var header = decoded.Header;
             bool last = header.IsLast;
@@ -215,7 +217,7 @@ internal static class JxlDecoder
             JxlDecodedFrame shown;
             try
             {
-                shown = JxlFrameCompositor.Compose(decoded, headers, state);
+                shown = JxlFrameCompositor.Compose(decoded, headers, state, parallel);
             }
             catch
             {

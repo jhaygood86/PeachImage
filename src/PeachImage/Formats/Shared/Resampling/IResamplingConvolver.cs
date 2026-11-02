@@ -25,12 +25,12 @@ internal interface IResamplingConvolver
     /// <paramref name="width"/> pixels; <paramref name="destination"/> receives <paramref name="weightMap"/>'s
     /// destination-row count of rows, same <paramref name="width"/>.
     /// </summary>
-    void ConvolveVertical(float[] source, int width, int sourceHeight, float[] destination, ResamplingWeightMap weightMap);
+    void ConvolveVertical(float[] source, int width, int sourceHeight, float[] destination, ResamplingWeightMap weightMap, ParallelSettings parallel = default);
 
     /// <summary>
     /// Convolves horizontally: <paramref name="source"/> is <paramref name="height"/> rows of
     /// <paramref name="sourceWidth"/> pixels; <paramref name="destination"/> receives <paramref name="weightMap"/>'s
     /// destination-column count of columns, same <paramref name="height"/>.
     /// </summary>
-    void ConvolveHorizontal(float[] source, int sourceWidth, int height, float[] destination, ResamplingWeightMap weightMap);
+    void ConvolveHorizontal(float[] source, int sourceWidth, int height, float[] destination, ResamplingWeightMap weightMap, ParallelSettings parallel = default);
 }

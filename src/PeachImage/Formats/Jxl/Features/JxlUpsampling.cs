@@ -127,7 +127,7 @@ internal static class JxlUpsampling
     /// <c>2^shift</c>, mirroring at the plane's edges. The result has <c>width &lt;&lt; shift</c> columns per row
     /// (<paramref name="dstStride"/> floats apart).
     /// </summary>
-    public static float[] Upsample(float[] source, int srcStride, int width, int height, int shift, float[] kernels, int dstStride, bool vectorized = true, float[]? destination = null)
+    public static float[] Upsample(float[] source, int srcStride, int width, int height, int shift, float[] kernels, int dstStride, bool vectorized = true, float[]? destination = null, ParallelSettings parallel = default)
     {
         int n = 1 << shift;
         var output = destination ?? new float[dstStride * height * n];
@@ -137,7 +137,7 @@ internal static class JxlUpsampling
             xs[i] = Mirror(i - 2, width);
         }
 
-        RowParallel.For(height, y => UpsampleRow(source, srcStride, width, height, y, shift, kernels, dstStride, output, xs, vectorized));
+        RowParallel.For(height, y => UpsampleRow(source, srcStride, width, height, y, shift, kernels, dstStride, output, xs, vectorized), settings: parallel);
         return output;
     }
 

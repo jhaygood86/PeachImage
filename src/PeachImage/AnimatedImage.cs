@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Parallelism;
 using PeachImage.Formats.Shared.Compositing;
 using PeachImage.Formats.Shared.Resampling;
 using PeachImage.Internal;
@@ -100,6 +101,12 @@ public sealed class AnimatedImage
             throw new UnknownImageFormatException("The image format could not be determined from the stream contents, or does not support animation.");
         }
 
+        if (options is { } limits && (limits.MaxPixels is not null || limits.HasExpansionRatioLimit))
+        {
+            preparedStream = Image.EnsureSeekable(preparedStream);
+            Image.EnforceDeclaredLimits(codec, preparedStream, limits);
+        }
+
         return codec.DecodeAnimation(preparedStream, options);
     }
 
@@ -198,7 +205,7 @@ public sealed class AnimatedImage
 
         foreach (var frame in frames)
         {
-            var resizedImage = ImageResizer.ResizeWithWeights(frame.Image, intermediateWidth, intermediateHeight, horizontalWeights, verticalWeights);
+            var resizedImage = ImageResizer.ResizeWithWeights(frame.Image, intermediateWidth, intermediateHeight, horizontalWeights, verticalWeights, ParallelSettings.From(options));
             if (!needsFraming)
             {
                 yield return new AnimatedImageFrame(resizedImage, frame.Duration, frame.Disposal);

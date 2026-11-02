@@ -18,7 +18,7 @@ namespace PeachImage.Formats.Shared.Resampling;
 /// </summary>
 internal sealed class Vector128ResamplingConvolver : IResamplingConvolver
 {
-    public void ConvolveVertical(float[] source, int width, int sourceHeight, float[] destination, ResamplingWeightMap weightMap)
+    public void ConvolveVertical(float[] source, int width, int sourceHeight, float[] destination, ResamplingWeightMap weightMap, ParallelSettings parallel = default)
     {
         int rowLength = width * ImageResizer.FloatsPerPixel;
 
@@ -34,10 +34,10 @@ internal sealed class Vector128ResamplingConvolver : IResamplingConvolver
                 var sourceRow = source.AsSpan((start + k) * rowLength, rowLength);
                 Accumulate(sourceRow, weights[k], destRow);
             }
-        });
+        }, parallel);
     }
 
-    public void ConvolveHorizontal(float[] source, int sourceWidth, int height, float[] destination, ResamplingWeightMap weightMap)
+    public void ConvolveHorizontal(float[] source, int sourceWidth, int height, float[] destination, ResamplingWeightMap weightMap, ParallelSettings parallel = default)
     {
         const int stride = ImageResizer.FloatsPerPixel;
         int destWidth = weightMap.DestinationSize;
@@ -61,7 +61,7 @@ internal sealed class Vector128ResamplingConvolver : IResamplingConvolver
 
                 accumulator.StoreUnsafe(ref MemoryMarshal.GetReference(destRow.Slice(destX * stride, stride)));
             }
-        });
+        }, parallel);
     }
 
     /// <summary>Accumulates <c>accumulator += source * weight</c> elementwise, 4 floats at a time with a scalar tail for any remainder.</summary>

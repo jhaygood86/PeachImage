@@ -11,7 +11,7 @@ namespace PeachImage.Formats.Jxl.VarDct;
 internal static class ColorKernels
 {
     /// <summary>Converts XYB opsin samples to linear RGB in place (see <see cref="FramePostProcessing.XybToLinearRgbReference"/>).</summary>
-    public static void XybToLinearRgb(float[][] planes, int stride, int width, int height, JxlCustomTransformData transform, float intensityTarget, bool gray, bool vectorized = true, float[]? srgbToEncoding = null)
+    public static void XybToLinearRgb(float[][] planes, int stride, int width, int height, JxlCustomTransformData transform, float intensityTarget, bool gray, bool vectorized = true, float[]? srgbToEncoding = null, ParallelSettings parallel = default)
     {
         float[] biases = transform.OpsinBiases;
         float cbrtR = MathF.Cbrt(biases[0]);
@@ -112,13 +112,13 @@ internal static class ColorKernels
                 p1[i] = (m[3] * mixedR) + (m[4] * mixedG) + (m[5] * mixedB);
                 p2[i] = (m[6] * mixedR) + (m[7] * mixedG) + (m[8] * mixedB);
             }
-        });
+        }, settings: parallel);
     }
 
     /// <summary>
     /// Converts planes holding (Cb, Y, Cr) -- Y centred on 128/255 -- to (R, G, B) in place with the full-range BT.601 matrix of JFIF.
     /// </summary>
-    public static void YCbCrToRgb(float[][] planes, int stride, int width, int height)
+    public static void YCbCrToRgb(float[][] planes, int stride, int width, int height, ParallelSettings parallel = default)
     {
         const float c128 = 128f / 255f;
         const float crcr = 1.402f;
@@ -161,11 +161,11 @@ internal static class ColorKernels
                 p1[i] = (cgcr * cr) + ((cgcb * cb) + yy);
                 p2[i] = (cbcb * cb) + yy;
             }
-        });
+        }, settings: parallel);
     }
 
     // PQ (SMPTE ST 2084) and HLG (BT.2100) encode absolute display light; both are scalar and rare, so they are not vectorized.
-    private static void HdrTransfer(float[][] planes, int stride, int width, int height, JxlColorEncoding encoding, float intensityTarget)
+    private static void HdrTransfer(float[][] planes, int stride, int width, int height, JxlColorEncoding encoding, float intensityTarget, ParallelSettings parallel)
     {
         bool pq = encoding.TransferFunction == JxlTransferFunction.Pq;
         float[] luminances = JxlColorSpaceMath.Luminances(encoding);
@@ -200,7 +200,7 @@ internal static class ColorKernels
                 planes[1][row + x] = pq ? Pq(g, toTenThousand) : Hlg(g);
                 planes[2][row + x] = pq ? Pq(b, toTenThousand) : Hlg(b);
             }
-        });
+        }, settings: parallel);
     }
 
     private static float Pq(float x, float toTenThousand)
@@ -245,11 +245,11 @@ internal static class ColorKernels
     }
 
     /// <summary>Applies the output transfer function (linear light to the encoded signal) to the three planes in place.</summary>
-    public static void LinearToTransfer(float[][] planes, int stride, int width, int height, JxlColorEncoding encoding, bool vectorized = true, float intensityTarget = 255f)
+    public static void LinearToTransfer(float[][] planes, int stride, int width, int height, JxlColorEncoding encoding, bool vectorized = true, float intensityTarget = 255f, ParallelSettings parallel = default)
     {
         if (!encoding.HaveGamma && encoding.TransferFunction is JxlTransferFunction.Pq or JxlTransferFunction.Hlg)
         {
-            HdrTransfer(planes, stride, width, height, encoding, intensityTarget);
+            HdrTransfer(planes, stride, width, height, encoding, intensityTarget, parallel);
             return;
         }
 
@@ -293,7 +293,7 @@ internal static class ColorKernels
             {
                 plane[row + x] = curve(plane[row + x]);
             }
-        });
+        }, settings: parallel);
     }
 
     private static Vector<float> Apply(CurveKind kind, float gamma, Vector<float> v)

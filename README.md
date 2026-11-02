@@ -376,8 +376,11 @@ bytes and its tags are only parsed when you call `GetIccColorProfile()`.
 a side for AVIF and WebP) before allocating. On top of that:
 
 - `DecoderOptions.MaxPixels` refuses an image whose header declares more pixels, before any pixel memory exists.
-- `DecoderOptions.MaxExpansionRatio` refuses an image that would decode to more than that many bytes per byte of file (so a few
-  hundred bytes of PNG, GIF or WebP cannot decode into gigabytes). Both throw `ImageTooLargeException`.
+- `DecoderOptions.MaxExpansionRatio` refuses an image that would decode to more than that many bytes per byte of file (decoded pixel
+  bytes over compressed bytes), so a few hundred bytes of PNG, GIF or WebP cannot decode into gigabytes. `MaxExpansionRatios` sets it per
+  format (about 100 to 200 suits JPEG; flat PNG, lossless WebP and GIF need tens of thousands). Both throw `ImageTooLargeException`.
+- `DecoderOptions.MaxDegreeOfParallelism` / `TaskScheduler` (also on `ResizeOptions` and `EncoderOptions`) bound the threads one call uses;
+  `ScaleDenominator` / `TargetSize` decode a JPEG at 1/2, 1/4 or 1/8 size; `ApplyOrientation` returns the image upright.
 
 **The "public copy" recipe.** Load, turn upright, resize, and re-encode without EXIF, XMP or IPTC but with the colour profile:
 

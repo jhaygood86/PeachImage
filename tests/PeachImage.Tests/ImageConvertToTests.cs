@@ -140,10 +140,11 @@ public class ImageConvertToTests
     }
 
     [Theory]
-    [InlineData(PixelFormat.Cmyk32, PixelFormat.Rgb24)]
     [InlineData(PixelFormat.Rgb24, PixelFormat.Cmyk32)]
-    [InlineData(PixelFormat.Ycck32, PixelFormat.Rgba32)]
-    public void Cmyk_IsNotSupported(PixelFormat from, PixelFormat to)
+    [InlineData(PixelFormat.Cmyk32, PixelFormat.Ycck32)]
+    [InlineData(PixelFormat.Cmyk32, PixelFormat.Rgb48)]
+    [InlineData(PixelFormat.Ycck32, PixelFormat.RgbaF32)]
+    public void Cmyk_IsNotSupportedOutsideRgbRgbaAndGray8(PixelFormat from, PixelFormat to)
     {
         using var image = Image.Create(2, 2, from);
         Assert.Throws<NotSupportedException>(() => image.ConvertTo(to));

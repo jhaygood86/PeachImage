@@ -35,22 +35,23 @@ internal sealed class Vector256TriangleFilterUpsampler : IChromaUpsampler
     public void Upsample(
         byte[] source, int sourceWidth, int sourceHeight,
         byte[] destination, int destinationWidth, int destinationHeight,
-        int horizontalRatio, int verticalRatio)
+        int horizontalRatio, int verticalRatio,
+        ParallelSettings parallel = default)
     {
         if (horizontalRatio != 2 || verticalRatio is not (1 or 2))
         {
-            Fallback.Upsample(source, sourceWidth, sourceHeight, destination, destinationWidth, destinationHeight, horizontalRatio, verticalRatio);
+            Fallback.Upsample(source, sourceWidth, sourceHeight, destination, destinationWidth, destinationHeight, horizontalRatio, verticalRatio, parallel);
             return;
         }
 
-        UpsampleHorizontalDoubling(source, sourceWidth, sourceHeight, destination, destinationWidth, destinationHeight, verticalRatio);
+        UpsampleHorizontalDoubling(source, sourceWidth, sourceHeight, destination, destinationWidth, destinationHeight, verticalRatio, parallel);
     }
 
     /// <summary>Vectorized path for <c>horizontalRatio == 2</c> — see <see cref="TriangleFilterUpsampler"/>'s remarks for the decomposition this implements.</summary>
     private static void UpsampleHorizontalDoubling(
         byte[] source, int sourceWidth, int sourceHeight,
         byte[] destination, int destinationWidth, int destinationHeight,
-        int verticalRatio)
+        int verticalRatio, ParallelSettings parallel)
     {
         // Rented once per RowParallel partition (not once for the whole plane, and not fresh per row) via
         // the TLocal hook — see TriangleFilterUpsampler.UpsampleHorizontalDoubling's remarks for why.
@@ -76,7 +77,8 @@ internal sealed class Vector256TriangleFilterUpsampler : IChromaUpsampler
 
             BlendRow(a, sourceWidth, dstRow);
         },
-            aBuffer => ArrayPool<ushort>.Shared.Return(aBuffer));
+            aBuffer => ArrayPool<ushort>.Shared.Return(aBuffer),
+            parallel);
     }
 
     /// <summary>Computes <c>columnBlend[c] = 3*main[c] + vNeighbor[c]</c> for every source column, 16 at a time.</summary>

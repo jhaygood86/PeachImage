@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Numerics;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jpeg2000.Decoding;
 
@@ -22,7 +23,7 @@ internal static class J2kDwt
     private const int StripWidth = 64;
 
     /// <summary>Reconstructs a tile-component with the reversible transform. <paramref name="levels"/> holds the size of every resolution, lowest first.</summary>
-    public static void Inverse53(int[] data, int stride, ReadOnlySpan<J2kResolutionSize> levels)
+    public static void Inverse53(int[] data, int stride, ReadOnlySpan<J2kResolutionSize> levels, ParallelSettings parallel = default)
     {
         for (int r = 1; r < levels.Length; r++)
         {
@@ -40,13 +41,13 @@ internal static class J2kDwt
             int casX = res.OriginX & 1;
             int casY = res.OriginY & 1;
 
-            Parallel53Rows(data, stride, width, height, lowWidth, casX);
-            Parallel53Columns(data, stride, width, height, lowHeight, casY);
+            Parallel53Rows(data, stride, width, height, lowWidth, casX, parallel);
+            Parallel53Columns(data, stride, width, height, lowHeight, casY, parallel);
         }
     }
 
     /// <summary>Reconstructs a tile-component with the irreversible transform.</summary>
-    public static void Inverse97(float[] data, int stride, ReadOnlySpan<J2kResolutionSize> levels)
+    public static void Inverse97(float[] data, int stride, ReadOnlySpan<J2kResolutionSize> levels, ParallelSettings parallel = default)
     {
         for (int r = 1; r < levels.Length; r++)
         {
@@ -64,14 +65,14 @@ internal static class J2kDwt
             int casX = res.OriginX & 1;
             int casY = res.OriginY & 1;
 
-            Parallel97Rows(data, stride, width, height, lowWidth, casX);
-            Parallel97Columns(data, stride, width, height, lowHeight, casY);
+            Parallel97Rows(data, stride, width, height, lowWidth, casX, parallel);
+            Parallel97Columns(data, stride, width, height, lowHeight, casY, parallel);
         }
     }
 
     // ------------------------------------------------------------------ 5/3
 
-    private static void Parallel53Rows(int[] data, int stride, int width, int height, int lowCount, int cas)
+    private static void Parallel53Rows(int[] data, int stride, int width, int height, int lowCount, int cas, ParallelSettings parallel)
     {
         void Body(int from, int to)
         {
@@ -92,10 +93,10 @@ internal static class J2kDwt
             }
         }
 
-        RunRanges(height, 16, 64, Body);
+        RunRanges(height, 16, 64, Body, parallel);
     }
 
-    private static void Parallel53Columns(int[] data, int stride, int width, int height, int lowCount, int cas)
+    private static void Parallel53Columns(int[] data, int stride, int width, int height, int lowCount, int cas, ParallelSettings parallel)
     {
         int strips = (width + StripWidth - 1) / StripWidth;
         void Body(int from, int to)
@@ -117,7 +118,7 @@ internal static class J2kDwt
             }
         }
 
-        RunRanges(strips, 1, 2, Body);
+        RunRanges(strips, 1, 2, Body, parallel);
     }
 
     private static void Lift53(Span<int> low, Span<int> high, int cas)
@@ -261,7 +262,7 @@ internal static class J2kDwt
 
     // ------------------------------------------------------------------ 9/7
 
-    private static void Parallel97Rows(float[] data, int stride, int width, int height, int lowCount, int cas)
+    private static void Parallel97Rows(float[] data, int stride, int width, int height, int lowCount, int cas, ParallelSettings parallel)
     {
         void Body(int from, int to)
         {
@@ -282,10 +283,10 @@ internal static class J2kDwt
             }
         }
 
-        RunRanges(height, 16, 64, Body);
+        RunRanges(height, 16, 64, Body, parallel);
     }
 
-    private static void Parallel97Columns(float[] data, int stride, int width, int height, int lowCount, int cas)
+    private static void Parallel97Columns(float[] data, int stride, int width, int height, int lowCount, int cas, ParallelSettings parallel)
     {
         int strips = (width + StripWidth - 1) / StripWidth;
         void Body(int from, int to)
@@ -307,7 +308,7 @@ internal static class J2kDwt
             }
         }
 
-        RunRanges(strips, 1, 2, Body);
+        RunRanges(strips, 1, 2, Body, parallel);
     }
 
     private static void Lift97(Span<float> low, Span<float> high, int cas)
@@ -482,16 +483,16 @@ internal static class J2kDwt
         }
     }
 
-    private static void RunRanges(int total, int chunk, int minimumForParallel, Action<int, int> body)
+    private static void RunRanges(int total, int chunk, int minimumForParallel, Action<int, int> body, ParallelSettings parallel)
     {
         int chunks = (total + chunk - 1) / chunk;
-        if (chunks <= 1 || total < minimumForParallel)
+        if (chunks <= 1 || total < minimumForParallel || parallel.IsSequential)
         {
             body(0, total);
             return;
         }
 
-        Parallel.For(0, chunks, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, c =>
+        Parallel.For(0, chunks, parallel.ToParallelOptions(), c =>
             body(c * chunk, Math.Min(total, (c + 1) * chunk)));
     }
 }

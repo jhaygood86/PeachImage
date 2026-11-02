@@ -4,6 +4,7 @@ using PeachImage.Formats.Jxl.Encoder.Entropy;
 using PeachImage.Formats.Jxl.Encoder.Headers;
 using PeachImage.Formats.Jxl.Frame;
 using PeachImage.Formats.Jxl.Modular;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jxl.Encoder.Modular;
 
@@ -41,7 +42,7 @@ internal static class JxlModularFrameEncoder
     private const int GroupDimension = 128 << JxlFrameHeaderWriter.GroupSizeShift;
 
     /// <summary>Encodes <paramref name="input"/> as a complete frame (header, table of contents and sections).</summary>
-    public static byte[] Encode(JxlModularFrameInput input, bool xybEncoded)
+    public static byte[] Encode(JxlModularFrameInput input, bool xybEncoded, ParallelSettings parallel = default)
     {
         int width = input.Width;
         int height = input.Height;
@@ -95,7 +96,7 @@ internal static class JxlModularFrameEncoder
                 }
 
                 groupTokens[g] = tokens;
-            });
+            }, parallel);
         }
 
         // Entropy codes: one for the tree itself, one shared by every pixel stream of the frame.
@@ -141,7 +142,7 @@ internal static class JxlModularFrameEncoder
                 WriteStreamHeader(writer, []);
                 pixelPlan.WriteStream(writer, groupTokens[g]);
                 sections[groupBase + g] = writer.ToArray();
-            });
+            }, parallel);
         }
 
         var frame = new JxlBitWriter();

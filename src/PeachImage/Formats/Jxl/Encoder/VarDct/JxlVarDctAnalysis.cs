@@ -16,7 +16,7 @@ internal static class JxlVarDctAnalysis
     // Activity below this is treated as flat so empty blocks do not ask for unbounded precision.
     private const double ActivityFloor = 0.004;
 
-    public static void Run(JxlVarDctFrameState state)
+    public static void Run(JxlVarDctFrameState state, ParallelSettings parallel = default)
     {
         int blocksX = state.BlocksX;
         int blocksY = state.BlocksY;
@@ -66,7 +66,7 @@ internal static class JxlVarDctAnalysis
             rowXY[by] = xy;
             rowBY[by] = by2;
             rowYY[by] = yy;
-        });
+        }, settings: parallel);
 
         // DC colour correlation: the global least-squares ratio of X and of B to Y over the block means.
         double sXY = rowXY.Sum();

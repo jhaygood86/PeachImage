@@ -32,7 +32,7 @@ internal static class RestorationFilters
     /// array's elements may be replaced by other buffers of the same size; callers must use the array, not its old elements. The
     /// planes must have been rented from <see cref="ArrayPool{T}.Shared"/>: buffers are exchanged with (and returned to) that pool.
     /// </summary>
-    public static void Apply(float[][] planes, int stride, int width, int height, JxlLoopFilter filter, float[]? sigma, int blocksX, bool vectorized = true)
+    public static void Apply(float[][] planes, int stride, int width, int height, JxlLoopFilter filter, float[]? sigma, int blocksX, bool vectorized = true, ParallelSettings parallel = default)
     {
         bool epf = filter.EpfIterations > 0 && sigma is not null;
         if (!filter.Gab && !epf)
@@ -50,7 +50,7 @@ internal static class RestorationFilters
 
         try
         {
-            ApplyFilters(planes, scratch, stride, width, height, filter, sigma, blocksX, vectorized, epf);
+            ApplyFilters(planes, scratch, stride, width, height, filter, sigma, blocksX, vectorized, epf, parallel);
         }
         finally
         {
@@ -62,11 +62,11 @@ internal static class RestorationFilters
         }
     }
 
-    private static void ApplyFilters(float[][] planes, float[][] scratch, int stride, int width, int height, JxlLoopFilter filter, float[]? sigma, int blocksX, bool vectorized, bool epf)
+    private static void ApplyFilters(float[][] planes, float[][] scratch, int stride, int width, int height, JxlLoopFilter filter, float[]? sigma, int blocksX, bool vectorized, bool epf, ParallelSettings parallel)
     {
         if (filter.Gab)
         {
-            Gaborish(planes, scratch, stride, width, height, filter, vectorized);
+            Gaborish(planes, scratch, stride, width, height, filter, vectorized, parallel);
             Swap(planes, scratch);
         }
 
@@ -77,16 +77,16 @@ internal static class RestorationFilters
             int iterations = filter.EpfIterations;
             if (iterations >= 3)
             {
-                EpfPass(planes, scratch, stride, width, height, filter, sigma!, blocksX, 0, xs, ys, vectorized);
+                EpfPass(planes, scratch, stride, width, height, filter, sigma!, blocksX, 0, xs, ys, vectorized, parallel);
                 Swap(planes, scratch);
             }
 
-            EpfPass(planes, scratch, stride, width, height, filter, sigma!, blocksX, 1, xs, ys, vectorized);
+            EpfPass(planes, scratch, stride, width, height, filter, sigma!, blocksX, 1, xs, ys, vectorized, parallel);
             Swap(planes, scratch);
 
             if (iterations >= 2)
             {
-                EpfPass(planes, scratch, stride, width, height, filter, sigma!, blocksX, 2, xs, ys, vectorized);
+                EpfPass(planes, scratch, stride, width, height, filter, sigma!, blocksX, 2, xs, ys, vectorized, parallel);
                 Swap(planes, scratch);
             }
         }
@@ -117,7 +117,7 @@ internal static class RestorationFilters
 
     // ---- Gaborish -----------------------------------------------------------------------------------------------------
 
-    private static void Gaborish(float[][] source, float[][] destination, int stride, int width, int height, JxlLoopFilter filter, bool vectorized)
+    private static void Gaborish(float[][] source, float[][] destination, int stride, int width, int height, JxlLoopFilter filter, bool vectorized, ParallelSettings parallel)
     {
         int bands = (height + 7) / 8;
         for (int c = 0; c < 3; c++)
@@ -138,7 +138,7 @@ internal static class RestorationFilters
                 {
                     GaborishRow(src, dst, stride, width, height, y, centre, w1, w2, vectorized);
                 }
-            });
+            }, settings: parallel);
         }
     }
 
@@ -201,7 +201,8 @@ internal static class RestorationFilters
         int pass,
         int[] xs,
         int[] ys,
-        bool vectorized)
+        bool vectorized,
+        ParallelSettings parallel)
     {
         float baseScale = pass switch
         {
@@ -224,7 +225,8 @@ internal static class RestorationFilters
                     FillRowSigma(scratch, sigma, blocksX, width, y, baseScale, borderScale);
                     EpfRow(source, destination, stride, width, height, y, pass, scale, scratch, xs, ys, vectorized);
                 }
-            });
+            },
+            settings: parallel);
     }
 
     private static void FillRowSigma(RowScratch scratch, float[] sigma, int blocksX, int width, int y, float baseScale, float borderScale)

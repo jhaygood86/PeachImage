@@ -33,34 +33,35 @@ internal sealed class TriangleFilterUpsampler : IChromaUpsampler
     public void Upsample(
         byte[] source, int sourceWidth, int sourceHeight,
         byte[] destination, int destinationWidth, int destinationHeight,
-        int horizontalRatio, int verticalRatio)
+        int horizontalRatio, int verticalRatio,
+        ParallelSettings parallel = default)
     {
         if (horizontalRatio == 1 && verticalRatio == 1)
         {
-            Fallback.Upsample(source, sourceWidth, sourceHeight, destination, destinationWidth, destinationHeight, 1, 1);
+            Fallback.Upsample(source, sourceWidth, sourceHeight, destination, destinationWidth, destinationHeight, 1, 1, parallel);
             return;
         }
 
         if (horizontalRatio is not (1 or 2) || verticalRatio is not (1 or 2))
         {
-            Fallback.Upsample(source, sourceWidth, sourceHeight, destination, destinationWidth, destinationHeight, horizontalRatio, verticalRatio);
+            Fallback.Upsample(source, sourceWidth, sourceHeight, destination, destinationWidth, destinationHeight, horizontalRatio, verticalRatio, parallel);
             return;
         }
 
         if (horizontalRatio == 2)
         {
-            UpsampleHorizontalDoubling(source, sourceWidth, sourceHeight, destination, destinationWidth, destinationHeight, verticalRatio);
+            UpsampleHorizontalDoubling(source, sourceWidth, sourceHeight, destination, destinationWidth, destinationHeight, verticalRatio, parallel);
             return;
         }
 
-        UpsampleScalar(source, sourceWidth, sourceHeight, destination, destinationWidth, destinationHeight, horizontalRatio, verticalRatio);
+        UpsampleScalar(source, sourceWidth, sourceHeight, destination, destinationWidth, destinationHeight, horizontalRatio, verticalRatio, parallel);
     }
 
     /// <summary>Vectorized path for <c>horizontalRatio == 2</c> — see the type-level remarks for the decomposition this implements.</summary>
     private static void UpsampleHorizontalDoubling(
         byte[] source, int sourceWidth, int sourceHeight,
         byte[] destination, int destinationWidth, int destinationHeight,
-        int verticalRatio)
+        int verticalRatio, ParallelSettings parallel)
     {
         // a[] holds one padded row's worth of column-blend values: a[0]/a[sourceWidth+1] are the
         // edge-replicated padding, a[1..sourceWidth] the real per-column blends (a[i] holds A[i-1] in the
@@ -91,7 +92,8 @@ internal sealed class TriangleFilterUpsampler : IChromaUpsampler
 
             BlendRow(a, sourceWidth, dstRow);
         },
-            aBuffer => ArrayPool<ushort>.Shared.Return(aBuffer));
+            aBuffer => ArrayPool<ushort>.Shared.Return(aBuffer),
+            parallel);
     }
 
     /// <summary>Computes <c>columnBlend[c] = 3*main[c] + vNeighbor[c]</c> for every source column.</summary>
@@ -158,7 +160,7 @@ internal sealed class TriangleFilterUpsampler : IChromaUpsampler
     private static void UpsampleScalar(
         byte[] source, int sourceWidth, int sourceHeight,
         byte[] destination, int destinationWidth, int destinationHeight,
-        int horizontalRatio, int verticalRatio)
+        int horizontalRatio, int verticalRatio, ParallelSettings parallel)
     {
         RowParallel.For(destinationHeight, y =>
         {
@@ -188,6 +190,6 @@ internal sealed class TriangleFilterUpsampler : IChromaUpsampler
                 int blended = ((main * 9) + (horizontalNeighbor * 3) + (verticalNeighbor * 3) + diagonalNeighbor + 8) / 16;
                 dstRow[x] = (byte)Math.Clamp(blended, 0, 255);
             }
-        });
+        }, parallel);
     }
 }

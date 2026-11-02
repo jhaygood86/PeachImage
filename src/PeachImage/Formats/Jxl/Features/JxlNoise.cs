@@ -62,7 +62,8 @@ internal static class JxlNoise
         float yToB,
         uint visibleFrameIndex,
         uint nonVisibleFrameIndex,
-        bool vectorized = true)
+        bool vectorized = true,
+        ParallelSettings parallel = default)
     {
         if (!parameters.HasAny)
         {
@@ -80,14 +81,14 @@ internal static class JxlNoise
 
         try
         {
-            GenerateRandomFields(random, width, height, groupDim, visibleFrameIndex, nonVisibleFrameIndex);
+            GenerateRandomFields(random, width, height, groupDim, visibleFrameIndex, nonVisibleFrameIndex, parallel);
             for (int c = 0; c < 3; c++)
             {
-                Convolve(random[c], convolved[c], width, height, vectorized);
+                Convolve(random[c], convolved[c], width, height, vectorized, parallel);
             }
 
             float[] lut = parameters.Lut;
-            RowParallel.For(height, y => AddRow(planes, stride, y, width, convolved, lut, yToX, yToB, vectorized));
+            RowParallel.For(height, y => AddRow(planes, stride, y, width, convolved, lut, yToX, yToB, vectorized), settings: parallel);
         }
         finally
         {
@@ -200,7 +201,7 @@ internal static class JxlNoise
 
     // 5x5 high-pass: 4 * (1 - box kernel), with symmetric extension at the frame edges. The 24 neighbours are summed in the
     // order of the reference decoder: the four outer rows column by column, then the other four pixels of the centre row.
-    private static void Convolve(float[] source, float[] output, int width, int height, bool vectorized)
+    private static void Convolve(float[] source, float[] output, int width, int height, bool vectorized, ParallelSettings parallel)
     {
         var xs = new int[width + 4];
         for (int i = 0; i < xs.Length; i++)
@@ -248,7 +249,7 @@ internal static class JxlNoise
             {
                 output[r2 + x] = ConvolvePixel(source, xs, x, r0, r1, r2, r3, r4);
             }
-        });
+        }, settings: parallel);
     }
 
     private static float ConvolvePixel(float[] source, int[] xs, int x, int r0, int r1, int r2, int r3, int r4)
@@ -270,7 +271,7 @@ internal static class JxlNoise
         return (others * 0.16f) + (source[r2 + x] * -3.84f);
     }
 
-    private static void GenerateRandomFields(float[][] planes, int width, int height, int groupDim, uint visible, uint nonVisible)
+    private static void GenerateRandomFields(float[][] planes, int width, int height, int groupDim, uint visible, uint nonVisible, ParallelSettings parallel)
     {
         int groupsX = (width + groupDim - 1) / groupDim;
         int groupsY = (height + groupDim - 1) / groupDim;
@@ -289,7 +290,7 @@ internal static class JxlNoise
             {
                 FillRect(ref rng, planes[c], width, x0, y0, w, h);
             }
-        });
+        }, parallel);
     }
 
     // Floats come from batches of 16: whole batches while more than a batch remains in the row, then one batch for the tail.

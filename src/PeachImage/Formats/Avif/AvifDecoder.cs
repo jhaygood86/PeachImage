@@ -1,6 +1,7 @@
 using PeachImage.Formats.Avif.Container;
 using PeachImage.Formats.Avif.Decoding.Av1;
 using PeachImage.Formats.Avif.Internal;
+using PeachImage.Formats.Shared.Parallelism;
 using PeachImage.Internal;
 
 namespace PeachImage.Formats.Avif;
@@ -98,12 +99,13 @@ internal static class AvifDecoder
             throw new AvifUnsupportedFeatureException($"AVIF bit depth {container.BitDepth} is not supported.");
         }
 
-        var color = Av1TileComposer.Composite(container.ColorTiles, container.GridRows, container.GridColumns, container.Width, container.Height);
+        var parallel = ParallelSettings.From(options);
+        var color = Av1TileComposer.Composite(container.ColorTiles, container.GridRows, container.GridColumns, container.Width, container.Height, parallel);
 
         Av1TileComposer.CompositedFrame? alpha = null;
         if (container.AlphaTiles is { } alphaTiles)
         {
-            alpha = Av1TileComposer.Composite(alphaTiles, container.GridRows, container.GridColumns, container.Width, container.Height);
+            alpha = Av1TileComposer.Composite(alphaTiles, container.GridRows, container.GridColumns, container.Width, container.Height, parallel);
         }
 
         var seq = color.Sequence;
@@ -112,7 +114,7 @@ internal static class AvifDecoder
         // image's extent is written, so the rented buffer's stale contents never surface).
         int byteCount = Av1YuvToRgbConverter.OutputByteCount(seq.MonoChrome, seq.BitDepth, alpha is not null, container.Width, container.Height);
         byte[] pooledPixels = ImageBufferPool.Shared.Rent(byteCount);
-        Av1YuvToRgbConverter.ConvertInto(pooledPixels, color, alpha, container.Width, container.Height);
+        Av1YuvToRgbConverter.ConvertInto(pooledPixels, color, alpha, container.Width, container.Height, parallel);
 
         // color/alpha planes (pool-rented by Av1TileComposer.Composite) have now been read for the last time.
         color.ReturnPlanes();

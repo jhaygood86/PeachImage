@@ -23,7 +23,7 @@ internal static class JxlForwardXyb
     /// <paramref name="bitsPerSample"/> bits, sRGB transfer) into three XYB planes of <paramref name="paddedWidth"/> x
     /// <paramref name="paddedHeight"/>, replicating the last row and column into the padding.
     /// </summary>
-    public static float[][] Convert(int[][] channels, int colorChannels, int width, int height, int bitsPerSample, bool isFloat, int paddedWidth, int paddedHeight)
+    public static float[][] Convert(int[][] channels, int colorChannels, int width, int height, int bitsPerSample, bool isFloat, int paddedWidth, int paddedHeight, ParallelSettings parallel = default)
     {
         float[]? lut = isFloat ? null : BuildLinearLut(bitsPerSample);
         var planes = new float[3][];
@@ -56,7 +56,7 @@ internal static class JxlForwardXyb
                 planes[1][dst + x] = (gl + gm) * 0.5f;
                 planes[2][dst + x] = gs;
             }
-        });
+        }, settings: parallel);
 
         return planes;
     }

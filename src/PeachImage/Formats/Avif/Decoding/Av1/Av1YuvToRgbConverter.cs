@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using System.Threading.Tasks;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -43,12 +44,13 @@ internal static class Av1YuvToRgbConverter
         TAlpha[]? alphaPlane,
         int alphaWidth,
         int outWidth,
-        int outHeight)
+        int outHeight,
+        ParallelSettings parallel = default)
         where TColor : unmanaged, IBinaryInteger<TColor>
         where TAlpha : unmanaged, IBinaryInteger<TAlpha>
     {
         var pixels = new byte[OutputByteCount(monoChrome, bitDepth, alphaPlane is not null, outWidth, outHeight)];
-        ConvertInto(pixels, colorPlanes, colorWidths, monoChrome, subsamplingX, subsamplingY, matrixCoefficients, colorRangeFull, bitDepth, alphaPlane, alphaWidth, outWidth, outHeight);
+        ConvertInto(pixels, colorPlanes, colorWidths, monoChrome, subsamplingX, subsamplingY, matrixCoefficients, colorRangeFull, bitDepth, alphaPlane, alphaWidth, outWidth, outHeight, parallel);
         return pixels;
     }
 
@@ -61,34 +63,35 @@ internal static class Av1YuvToRgbConverter
         Av1TileComposer.CompositedFrame color,
         Av1TileComposer.CompositedFrame? alpha,
         int outWidth,
-        int outHeight)
+        int outHeight,
+        ParallelSettings parallel = default)
     {
         switch (color)
         {
             case Av1TileComposer.CompositedFrame<byte> c:
-                ConvertWithAlpha(pixels, c, alpha, outWidth, outHeight);
+                ConvertWithAlpha(pixels, c, alpha, outWidth, outHeight, parallel);
                 break;
             default:
-                ConvertWithAlpha(pixels, (Av1TileComposer.CompositedFrame<ushort>)color, alpha, outWidth, outHeight);
+                ConvertWithAlpha(pixels, (Av1TileComposer.CompositedFrame<ushort>)color, alpha, outWidth, outHeight, parallel);
                 break;
         }
     }
 
-    private static void ConvertWithAlpha<TColor>(byte[] pixels, Av1TileComposer.CompositedFrame<TColor> color, Av1TileComposer.CompositedFrame? alpha, int outWidth, int outHeight)
+    private static void ConvertWithAlpha<TColor>(byte[] pixels, Av1TileComposer.CompositedFrame<TColor> color, Av1TileComposer.CompositedFrame? alpha, int outWidth, int outHeight, ParallelSettings parallel)
         where TColor : unmanaged, IBinaryInteger<TColor>
     {
         var seq = color.Sequence;
         switch (alpha)
         {
             case null:
-                ConvertInto<TColor, byte>(pixels, color.Planes, color.Widths, seq.MonoChrome, seq.SubsamplingX, seq.SubsamplingY, seq.MatrixCoefficients, seq.ColorRange, seq.BitDepth, null, 0, outWidth, outHeight);
+                ConvertInto<TColor, byte>(pixels, color.Planes, color.Widths, seq.MonoChrome, seq.SubsamplingX, seq.SubsamplingY, seq.MatrixCoefficients, seq.ColorRange, seq.BitDepth, null, 0, outWidth, outHeight, parallel);
                 break;
             case Av1TileComposer.CompositedFrame<byte> a:
-                ConvertInto(pixels, color.Planes, color.Widths, seq.MonoChrome, seq.SubsamplingX, seq.SubsamplingY, seq.MatrixCoefficients, seq.ColorRange, seq.BitDepth, a.Planes[0], a.Widths[0], outWidth, outHeight);
+                ConvertInto(pixels, color.Planes, color.Widths, seq.MonoChrome, seq.SubsamplingX, seq.SubsamplingY, seq.MatrixCoefficients, seq.ColorRange, seq.BitDepth, a.Planes[0], a.Widths[0], outWidth, outHeight, parallel);
                 break;
             default:
                 var wide = (Av1TileComposer.CompositedFrame<ushort>)alpha;
-                ConvertInto(pixels, color.Planes, color.Widths, seq.MonoChrome, seq.SubsamplingX, seq.SubsamplingY, seq.MatrixCoefficients, seq.ColorRange, seq.BitDepth, wide.Planes[0], wide.Widths[0], outWidth, outHeight);
+                ConvertInto(pixels, color.Planes, color.Widths, seq.MonoChrome, seq.SubsamplingX, seq.SubsamplingY, seq.MatrixCoefficients, seq.ColorRange, seq.BitDepth, wide.Planes[0], wide.Widths[0], outWidth, outHeight, parallel);
                 break;
         }
     }
@@ -118,13 +121,14 @@ internal static class Av1YuvToRgbConverter
         TAlpha[]? alphaPlane,
         int alphaWidth,
         int outWidth,
-        int outHeight)
+        int outHeight,
+        ParallelSettings parallel = default)
         where TColor : unmanaged, IBinaryInteger<TColor>
         where TAlpha : unmanaged, IBinaryInteger<TAlpha>
     {
         // Rows are independent (each reads only its own source rows and writes only its own output bytes),
         // so tall images are converted in row bands on the thread pool.
-        int bands = Math.Min(Environment.ProcessorCount, outHeight / MinRowsPerBand);
+        int bands = Math.Min(parallel.EffectiveDegree, outHeight / MinRowsPerBand);
         if (bands < 2)
         {
             ConvertRows(pixels, colorPlanes, colorWidths, monoChrome, subsamplingX, subsamplingY, matrixCoefficients, colorRangeFull, bitDepth, alphaPlane, alphaWidth, outWidth, 0, outHeight);
@@ -134,7 +138,7 @@ internal static class Av1YuvToRgbConverter
         // Band edges are even rows so a 4:2:0 chroma row is never shared in a way that matters (reads only).
         int bandRows = ((outHeight + bands - 1) / bands + 1) & ~1;
         int bandCount = (outHeight + bandRows - 1) / bandRows;
-        Parallel.For(0, bandCount, band =>
+        Parallel.For(0, bandCount, parallel.ToParallelOptions(), band =>
         {
             int start = band * bandRows;
             int end = Math.Min(outHeight, start + bandRows);

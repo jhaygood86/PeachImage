@@ -19,10 +19,11 @@ namespace PeachImage.Formats.Jpeg.Decoding;
 internal static class FrameReconstructor
 {
     /// <summary>Reconstructs pixel data from <paramref name="frame"/>.</summary>
-    public static Image Reconstruct(DecodedFrame frame, JpegDecoderOptions? options)
+    public static Image Reconstruct(DecodedFrame frame, JpegDecoderOptions? options, ParallelSettings parallel = default, int scaleDenominator = 1)
     {
-        int width = frame.FrameHeader.Width;
-        int height = frame.FrameHeader.Height;
+        // At 1/N scale every block reconstructs to (8/N) x (8/N) samples, so the image is ceil(size / N) on each side.
+        int width = (frame.FrameHeader.Width + scaleDenominator - 1) / scaleDenominator;
+        int height = (frame.FrameHeader.Height + scaleDenominator - 1) / scaleDenominator;
 
         IChromaUpsampler upsampler = options?.FastUpsampling == true
             ? new NearestNeighborUpsampler()
@@ -43,7 +44,7 @@ internal static class FrameReconstructor
         {
             for (int i = 0; i < frame.Components.Length; i++)
             {
-                planes[i] = ReconstructComponentPlane(frame.Components[i], width, height, hMax, vMax, upsampler, rented);
+                planes[i] = ReconstructComponentPlane(frame.Components[i], width, height, hMax, vMax, upsampler, rented, parallel, scaleDenominator);
             }
 
             int pixelCount = width * height;
@@ -52,11 +53,11 @@ internal static class FrameReconstructor
             return frame.ColorSpace switch
             {
                 JpegColorSpace.Grayscale => BuildGrayscaleImage(planes[0], width, height, pixelCount),
-                JpegColorSpace.YCbCr => BuildYCbCrImage(planes, width, height),
-                JpegColorSpace.Rgb => BuildDirectRgbImage(planes, width, height),
-                JpegColorSpace.Cmyk => BuildDirectCmykImage(planes, width, height, invertCmyk),
-                JpegColorSpace.Ycck when decodeRawYcck => BuildRawYcckImage(planes, width, height),
-                JpegColorSpace.Ycck => BuildYcckImage(planes, width, height),
+                JpegColorSpace.YCbCr => BuildYCbCrImage(planes, width, height, parallel),
+                JpegColorSpace.Rgb => BuildDirectRgbImage(planes, width, height, parallel),
+                JpegColorSpace.Cmyk => BuildDirectCmykImage(planes, width, height, invertCmyk, parallel),
+                JpegColorSpace.Ycck when decodeRawYcck => BuildRawYcckImage(planes, width, height, parallel),
+                JpegColorSpace.Ycck => BuildYcckImage(planes, width, height, parallel),
                 _ => throw new JpegDecodingException($"Unsupported JPEG color space: {frame.ColorSpace}."),
             };
         }
@@ -69,13 +70,16 @@ internal static class FrameReconstructor
         }
     }
 
-    private static byte[] ReconstructComponentPlane(ComponentDecodeState component, int width, int height, int hMax, int vMax, IChromaUpsampler upsampler, List<byte[]> rented)
+    private static byte[] ReconstructComponentPlane(ComponentDecodeState component, int width, int height, int hMax, int vMax, IChromaUpsampler upsampler, List<byte[]> rented, ParallelSettings parallel, int scaleDenominator)
     {
-        int actualWidth = component.ActualWidthInSamples;
-        int actualHeight = component.ActualHeightInSamples;
+        int blockSize = 8 / scaleDenominator;
+        int actualWidth = (component.ActualWidthInSamples + scaleDenominator - 1) / scaleDenominator;
+        int actualHeight = (component.ActualHeightInSamples + scaleDenominator - 1) / scaleDenominator;
         var cropped = Rent(actualWidth * actualHeight, rented);
 
-        var dequant = DctKernelSelector.Inverse.PrepareDequantTable(component.QuantizationTable.Values);
+        var dequant = scaleDenominator == 1
+            ? DctKernelSelector.Inverse.PrepareDequantTable(component.QuantizationTable.Values)
+            : ScaledInverseDct.PrepareDequantTable(component.QuantizationTable.Values, blockSize);
 
         // IDCT writes straight into `cropped` at its actual (non-MCU-padded) size — skipping the
         // MCU-padded-buffer-then-row-copy this used to do — by classifying each block against the
@@ -99,18 +103,18 @@ internal static class FrameReconstructor
             () => ArrayPool<byte>.Shared.Rent(64),
             (by, scratchBuffer) =>
         {
-            int blockTop = by * 8;
+            int blockTop = by * blockSize;
             if (blockTop >= actualHeight)
             {
                 return;
             }
 
             var scratch = scratchBuffer.AsSpan(0, 64);
-            int rowsInBlock = Math.Min(8, actualHeight - blockTop);
+            int rowsInBlock = Math.Min(blockSize, actualHeight - blockTop);
 
             for (int bx = 0; bx < component.Coefficients.BlocksWide; bx++)
             {
-                int blockLeft = bx * 8;
+                int blockLeft = bx * blockSize;
                 if (blockLeft >= actualWidth)
                 {
                     break;
@@ -118,23 +122,39 @@ internal static class FrameReconstructor
 
                 var block = component.Coefficients.Block(bx, by);
 
-                if (rowsInBlock == 8 && blockLeft + 8 <= actualWidth)
+                if (rowsInBlock == blockSize && blockLeft + blockSize <= actualWidth)
                 {
                     int outOffset = (blockTop * actualWidth) + blockLeft;
-                    DctKernelSelector.Inverse.Transform(block, dequant, cropped.AsSpan(outOffset), actualWidth);
+                    if (scaleDenominator == 1)
+                    {
+                        DctKernelSelector.Inverse.Transform(block, dequant, cropped.AsSpan(outOffset), actualWidth);
+                    }
+                    else
+                    {
+                        ScaledInverseDct.Transform(block, dequant, cropped.AsSpan(outOffset), actualWidth, blockSize);
+                    }
                 }
                 else
                 {
-                    int colsInBlock = Math.Min(8, actualWidth - blockLeft);
-                    DctKernelSelector.Inverse.Transform(block, dequant, scratch, outputStride: 8);
+                    int colsInBlock = Math.Min(blockSize, actualWidth - blockLeft);
+                    if (scaleDenominator == 1)
+                    {
+                        DctKernelSelector.Inverse.Transform(block, dequant, scratch, outputStride: 8);
+                    }
+                    else
+                    {
+                        ScaledInverseDct.Transform(block, dequant, scratch, blockSize, blockSize);
+                    }
+
                     for (int y = 0; y < rowsInBlock; y++)
                     {
-                        scratch.Slice(y * 8, colsInBlock).CopyTo(cropped.AsSpan(((blockTop + y) * actualWidth) + blockLeft, colsInBlock));
+                        scratch.Slice(y * blockSize, colsInBlock).CopyTo(cropped.AsSpan(((blockTop + y) * actualWidth) + blockLeft, colsInBlock));
                     }
                 }
             }
         },
-            scratchBuffer => ArrayPool<byte>.Shared.Return(scratchBuffer));
+            scratchBuffer => ArrayPool<byte>.Shared.Return(scratchBuffer),
+            parallel);
 
         int hRatio = hMax / component.Frame.HorizontalSamplingFactor;
         int vRatio = vMax / component.Frame.VerticalSamplingFactor;
@@ -147,7 +167,7 @@ internal static class FrameReconstructor
         int upsampledWidth = actualWidth * hRatio;
         int upsampledHeight = actualHeight * vRatio;
         var upsampled = Rent(upsampledWidth * upsampledHeight, rented);
-        upsampler.Upsample(cropped, actualWidth, actualHeight, upsampled, upsampledWidth, upsampledHeight, hRatio, vRatio);
+        upsampler.Upsample(cropped, actualWidth, actualHeight, upsampled, upsampledWidth, upsampledHeight, hRatio, vRatio, parallel);
 
         return CropOrPad(upsampled, upsampledWidth, upsampledHeight, width, height, rented);
     }
@@ -184,7 +204,7 @@ internal static class FrameReconstructor
         return Image.FromBuffer(width, height, PixelFormat.Gray8, gray, owned: true);
     }
 
-    private static Image BuildYCbCrImage(byte[][] planes, int width, int height)
+    private static Image BuildYCbCrImage(byte[][] planes, int width, int height, ParallelSettings parallel)
     {
         int pixelCount = width * height;
         byte[] rgb = ImageBufferPool.Shared.Rent(pixelCount * 3);
@@ -198,12 +218,12 @@ internal static class FrameReconstructor
                 planes[2].AsSpan(rowOffset, width),
                 rgb.AsSpan(rowOffset * 3, width * 3),
                 width);
-        });
+        }, parallel);
 
         return Image.FromBuffer(width, height, PixelFormat.Rgb24, rgb, owned: true);
     }
 
-    private static Image BuildDirectRgbImage(byte[][] planes, int width, int height)
+    private static Image BuildDirectRgbImage(byte[][] planes, int width, int height, ParallelSettings parallel)
     {
         int pixelCount = width * height;
         byte[] rgb = ImageBufferPool.Shared.Rent(pixelCount * 3);
@@ -216,14 +236,14 @@ internal static class FrameReconstructor
                 planes[2].AsSpan(rowOffset, width),
                 rgb.AsSpan(rowOffset * 3, width * 3),
                 width);
-        });
+        }, parallel);
 
         return Image.FromBuffer(width, height, PixelFormat.Rgb24, rgb, owned: true);
     }
 
-    private static Image BuildDirectCmykImage(byte[][] planes, int width, int height, bool isAdobeInverted)
+    private static Image BuildDirectCmykImage(byte[][] planes, int width, int height, bool isAdobeInverted, ParallelSettings parallel)
     {
-        byte[] cmyk = InterleaveFourPlanes(planes, width, height);
+        byte[] cmyk = InterleaveFourPlanes(planes, width, height, parallel);
 
         if (isAdobeInverted)
         {
@@ -234,13 +254,13 @@ internal static class FrameReconstructor
                 {
                     row[i] = (byte)(255 - row[i]);
                 }
-            });
+            }, parallel);
         }
 
         return Image.FromBuffer(width, height, PixelFormat.Cmyk32, cmyk, owned: true);
     }
 
-    private static Image BuildYcckImage(byte[][] planes, int width, int height)
+    private static Image BuildYcckImage(byte[][] planes, int width, int height, ParallelSettings parallel)
     {
         int pixelCount = width * height;
         byte[] cmyk = ImageBufferPool.Shared.Rent(pixelCount * 4);
@@ -255,19 +275,19 @@ internal static class FrameReconstructor
                 planes[3].AsSpan(rowOffset, width),
                 cmyk.AsSpan(rowOffset * 4, width * 4),
                 width);
-        });
+        }, parallel);
 
         return Image.FromBuffer(width, height, PixelFormat.Cmyk32, cmyk, owned: true);
     }
 
     /// <summary>Interleaves the raw, unconverted Y/Cb/Cr/K planes of a YCCK frame with no color-space transform applied.</summary>
-    private static Image BuildRawYcckImage(byte[][] planes, int width, int height)
+    private static Image BuildRawYcckImage(byte[][] planes, int width, int height, ParallelSettings parallel)
     {
-        byte[] ycck = InterleaveFourPlanes(planes, width, height);
+        byte[] ycck = InterleaveFourPlanes(planes, width, height, parallel);
         return Image.FromBuffer(width, height, PixelFormat.Ycck32, ycck, owned: true);
     }
 
-    private static byte[] InterleaveFourPlanes(byte[][] planes, int width, int height)
+    private static byte[] InterleaveFourPlanes(byte[][] planes, int width, int height, ParallelSettings parallel)
     {
         int pixelCount = width * height;
         byte[] interleaved = ImageBufferPool.Shared.Rent(pixelCount * 4);
@@ -281,7 +301,7 @@ internal static class FrameReconstructor
                 planes[3].AsSpan(rowOffset, width),
                 interleaved.AsSpan(rowOffset * 4, width * 4),
                 width);
-        });
+        }, parallel);
 
         return interleaved;
     }

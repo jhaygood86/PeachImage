@@ -47,10 +47,10 @@ internal static class JxlIccOutput
     }
 
     /// <summary>Converts the luminance in the first plane (linear light) to the gray profile's device values, in place.</summary>
-    public static void FromLinearGray(IccProfile profile, float[][] planes, int stride, int width, int height) =>
-        Guarded(() => FromLinearGrayCore(profile, planes, stride, width, height));
+    public static void FromLinearGray(IccProfile profile, float[][] planes, int stride, int width, int height, ParallelSettings parallel = default) =>
+        Guarded(() => FromLinearGrayCore(profile, planes, stride, width, height, parallel));
 
-    private static void FromLinearGrayCore(IccProfile profile, float[][] planes, int stride, int width, int height)
+    private static void FromLinearGrayCore(IccProfile profile, float[][] planes, int stride, int width, int height, ParallelSettings parallel)
     {
         // A neutral of luminance Y has the D50 white point scaled by Y in the profile connection space.
         var white = IccColorMath.XyzD50ToLinearSrgb.Inverse().Multiply(new IccVector3(1, 1, 1));
@@ -67,11 +67,11 @@ internal static class JxlIccOutput
                 {
                     plane[row + x] = Lookup(lut, plane[row + x] * scale);
                 }
-            });
+            }, settings: parallel);
             return;
         }
 
-        Parallel.For(0, height, y =>
+        JxlParallel.Rows(height, parallel, y =>
         {
             Span<double> device = stackalloc double[1];
             int row = y * stride;
@@ -85,19 +85,19 @@ internal static class JxlIccOutput
     }
 
     /// <summary>Converts three linear-sRGB planes to the profile's device values in place.</summary>
-    public static void FromLinearSrgb(IccProfile profile, float[][] planes, int stride, int width, int height) =>
-        Guarded(() => FromLinearSrgbCore(profile, planes, stride, width, height));
+    public static void FromLinearSrgb(IccProfile profile, float[][] planes, int stride, int width, int height, ParallelSettings parallel = default) =>
+        Guarded(() => FromLinearSrgbCore(profile, planes, stride, width, height, parallel));
 
-    private static void FromLinearSrgbCore(IccProfile profile, float[][] planes, int stride, int width, int height)
+    private static void FromLinearSrgbCore(IccProfile profile, float[][] planes, int stride, int width, int height, ParallelSettings parallel)
     {
         var toXyz = IccColorMath.XyzD50ToLinearSrgb.Inverse();
         if (profile.TryGetFromXyzMatrixTrc(IccIntent.RelativeColorimetric, out var fromXyz, out double[][] inverseTables) && inverseTables.Length == 3)
         {
-            MatrixTrc(planes, stride, width, height, fromXyz, toXyz, inverseTables);
+            MatrixTrc(planes, stride, width, height, fromXyz, toXyz, inverseTables, parallel);
             return;
         }
 
-        Parallel.For(0, height, y =>
+        JxlParallel.Rows(height, parallel, y =>
         {
             Span<double> device = stackalloc double[3];
             int row = y * stride;
@@ -115,7 +115,7 @@ internal static class JxlIccOutput
 
     // RGB matrix/TRC profile: linear sRGB -> D50 XYZ -> linear device RGB is one 3x3 matrix, then each channel goes through its
     // inverse tone-curve table (the same 2048-entry tables and linear interpolation the general engine uses).
-    private static void MatrixTrc(float[][] planes, int stride, int width, int height, IccMatrix3x3 fromXyz, IccMatrix3x3 toXyz, double[][] inverseTables)
+    private static void MatrixTrc(float[][] planes, int stride, int width, int height, IccMatrix3x3 fromXyz, IccMatrix3x3 toXyz, double[][] inverseTables, ParallelSettings parallel)
     {
         var combined = new float[9];
         for (int column = 0; column < 3; column++)
@@ -173,7 +173,7 @@ internal static class JxlIccOutput
                 p1[i] = Lookup(luts[1], p1[i]);
                 p2[i] = Lookup(luts[2], p2[i]);
             }
-        });
+        }, settings: parallel);
     }
 
     private static float[] ToFloatTable(double[] table)

@@ -20,7 +20,7 @@ internal static class JxlGaborish
     /// Replaces <paramref name="planes"/> (each <paramref name="stride"/> wide) with the planes the decoder's Gaborish maps back to
     /// the originals over the real <paramref name="width"/> x <paramref name="height"/> area, then re-extends the padding beyond it.
     /// </summary>
-    public static void Sharpen(float[][] planes, int stride, int width, int height, int paddedHeight)
+    public static void Sharpen(float[][] planes, int stride, int width, int height, int paddedHeight, ParallelSettings parallel = default)
     {
         var weights = new JxlLoopFilter().GabWeights;
         JxlParallel.For(planes.Length, c =>
@@ -28,12 +28,12 @@ internal static class JxlGaborish
             float w1 = weights[c * 2];
             float w2 = weights[(c * 2) + 1];
             float norm = 1.0f / (1.0f + (4 * (w1 + w2)));
-            SharpenPlane(planes[c], stride, width, height, norm, w1 * norm, w2 * norm);
+            SharpenPlane(planes[c], stride, width, height, norm, w1 * norm, w2 * norm, parallel);
             ExtendPadding(planes[c], stride, width, height, paddedHeight);
-        });
+        }, parallel);
     }
 
-    private static void SharpenPlane(float[] plane, int stride, int width, int height, float centre, float cross, float diagonal)
+    private static void SharpenPlane(float[] plane, int stride, int width, int height, float centre, float cross, float diagonal, ParallelSettings parallel)
     {
         var target = new float[width * height];
         for (int y = 0; y < height; y++)
@@ -45,7 +45,7 @@ internal static class JxlGaborish
         var blurred = new float[width * height];
         for (int iteration = 0; iteration < Iterations; iteration++)
         {
-            RowParallel.For(height, y => BlurRow(current, blurred, width, height, y, centre, cross, diagonal));
+            RowParallel.For(height, y => BlurRow(current, blurred, width, height, y, centre, cross, diagonal), settings: parallel);
             for (int i = 0; i < current.Length; i++)
             {
                 current[i] += target[i] - blurred[i];

@@ -27,6 +27,7 @@ internal static class FrameDecoder
     /// </summary>
     public static (JpegFrameHeader FrameHeader, JpegColorSpace ColorSpace, bool IsAdobeInverted, ImageOrientation Orientation) IdentifyFrameHeader(Stream stream)
     {
+        long streamStart = stream.CanSeek ? stream.Position : -1;
         var source = new JpegByteSource(stream);
         var markerReader = new JpegMarkerReader(source);
 
@@ -112,6 +113,7 @@ internal static class FrameDecoder
     /// </param>
     public static DecodedFrame Decode(Stream stream, int maxScanCount = JpegDecodingLimits.MaxScanCount, Action<DecodedFrame>? progressFrameAvailable = null)
     {
+        long streamStart = stream.CanSeek ? stream.Position : -1;
         var source = new JpegByteSource(stream);
         var markerReader = new JpegMarkerReader(source);
 
@@ -215,6 +217,7 @@ internal static class FrameDecoder
 
                     frameHeader = JpegFrameHeader.Parse(ReadSegment(markerReader), isProgressive: marker == JpegMarker.Sof2);
                     ThrowIfDimensionsExceedLimits(frameHeader);
+                    ThrowIfStreamCannotHoldBaselineFrame(frameHeader, stream, streamStart, source.BytePosition);
                     (components, mcusAcross, mcusDown) = BuildComponentPlans(frameHeader);
                     break;
                 }
@@ -456,6 +459,41 @@ internal static class FrameDecoder
         {
             throw new JpegDecodingException(
                 $"JPEG frame dimensions {frameHeader.Width}x{frameHeader.Height} ({pixelCount:N0} pixels) exceed the maximum supported pixel count ({JpegDecodingLimits.MaxPixelCount:N0}).");
+        }
+    }
+
+    // A baseline block costs at least two bits (a DC code and an end-of-block code, one bit each at the very least), so a seekable stream
+    // too short to hold the claimed block grid at one bit per block cannot be genuine. Refused before the coefficient buffers (about
+    // 400 MB for a header claiming 8000x8000) are allocated. Progressive frames are exempt: an end-of-band run makes a block nearly free,
+    // so they rely on MaxExpansionRatio instead.
+    private static void ThrowIfStreamCannotHoldBaselineFrame(JpegFrameHeader frameHeader, Stream stream, long streamStart, long consumed)
+    {
+        if (frameHeader.IsProgressive || streamStart < 0)
+        {
+            return;
+        }
+
+        int hMax = 1;
+        int vMax = 1;
+        foreach (var c in frameHeader.Components)
+        {
+            hMax = Math.Max(hMax, c.HorizontalSamplingFactor);
+            vMax = Math.Max(vMax, c.VerticalSamplingFactor);
+        }
+
+        long mcusAcross = ((long)frameHeader.Width + (8 * hMax) - 1) / (8 * hMax);
+        long mcusDown = ((long)frameHeader.Height + (8 * vMax) - 1) / (8 * vMax);
+        long blocks = 0;
+        foreach (var c in frameHeader.Components)
+        {
+            blocks += mcusAcross * c.HorizontalSamplingFactor * mcusDown * c.VerticalSamplingFactor;
+        }
+
+        long remainingBytes = stream.Length - streamStart - consumed;
+        if (blocks / 8 > remainingBytes)
+        {
+            throw new JpegDecodingException(
+                $"JPEG frame {frameHeader.Width}x{frameHeader.Height} declares {blocks:N0} blocks, more than the {remainingBytes:N0} remaining bytes can hold; the header is inconsistent with the data.");
         }
     }
 

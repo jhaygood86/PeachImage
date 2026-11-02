@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Numerics;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -42,12 +43,12 @@ internal static class Av1TileComposer
         }
     }
 
-    public static CompositedFrame Composite(IReadOnlyList<byte[]> tiles, int gridRows, int gridColumns, int outWidth, int outHeight)
+    public static CompositedFrame Composite(IReadOnlyList<byte[]> tiles, int gridRows, int gridColumns, int outWidth, int outHeight, ParallelSettings parallel = default)
     {
         var frames = new Av1FrameDecodeResult[tiles.Count];
         for (int i = 0; i < tiles.Count; i++)
         {
-            frames[i] = Av1FrameDecoder.Decode(tiles[i]);
+            frames[i] = Av1FrameDecoder.Decode(tiles[i], parallel);
         }
 
         // The composited canvas uses the first tile's sample type; a tile of another bit depth (legal to

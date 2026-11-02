@@ -17,15 +17,93 @@ internal static class ImagePixelConverter
 
     public static bool IsConvertible(PixelFormat format) => format is not (PixelFormat.Cmyk32 or PixelFormat.Ycck32);
 
-    public static Image Convert(Image source, PixelFormat target)
+    /// <summary>
+    /// Whether <paramref name="from"/> can be converted to <paramref name="to"/>. Ink-based sources (CMYK, YCCK) convert only to
+    /// RGB, RGBA and gray, using the profile-less formula of <see cref="InkToRgba32"/>; nothing converts into them.
+    /// </summary>
+    public static bool CanConvert(PixelFormat from, PixelFormat to) =>
+        from is PixelFormat.Cmyk32 or PixelFormat.Ycck32
+            ? to is PixelFormat.Rgb24 or PixelFormat.Rgba32 or PixelFormat.Gray8
+            : IsConvertible(from) && IsConvertible(to);
+
+    /// <summary>
+    /// Converts 8-bit <see cref="PixelFormat.Cmyk32"/> (or raw <see cref="PixelFormat.Ycck32"/>) to opaque Rgba32 with no colour profile:
+    /// <c>R = 255 x (1 - C) x (1 - K)</c>, likewise G and B, where the channels are scaled to 0..1 (0 is no ink). An approximation
+    /// of how the inks would look, not a colorimetric conversion.
+    /// </summary>
+    public static Image InkToRgba32(Image source)
     {
+        var result = Image.Create(source.Width, source.Height, PixelFormat.Rgba32);
+        try
+        {
+            var src = source.GetPixelSpan();
+            var dst = result.GetPixelSpan();
+            int count = source.Width * source.Height;
+            bool ycck = source.PixelFormat == PixelFormat.Ycck32;
+            for (int i = 0; i < count; i++)
+            {
+                int s = i * 4;
+                int c, m, y, k = src[s + 3];
+                if (ycck)
+                {
+                    (byte r, byte g, byte b) = PeachImage.Formats.Jpeg.ColorConversion.ScalarColorConverter.ConvertYCbCrPixel(src[s], src[s + 1], src[s + 2]);
+                    c = 255 - r;
+                    m = 255 - g;
+                    y = 255 - b;
+                }
+                else
+                {
+                    c = src[s];
+                    m = src[s + 1];
+                    y = src[s + 2];
+                }
+
+                int invK = 255 - k;
+                dst[s] = Scale(255 - c, invK);
+                dst[s + 1] = Scale(255 - m, invK);
+                dst[s + 2] = Scale(255 - y, invK);
+                dst[s + 3] = 255;
+            }
+
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
+    }
+
+    // a * b / 255, rounded to nearest.
+    private static byte Scale(int a, int b) => (byte)(((a * b) + 127) / 255);
+
+    public static Image Convert(Image source, PixelFormat target, ParallelSettings parallel = default)
+    {
+        if (source.PixelFormat is PixelFormat.Cmyk32 or PixelFormat.Ycck32)
+        {
+            var rgba = InkToRgba32(source);
+            if (target == PixelFormat.Rgba32)
+            {
+                return rgba;
+            }
+
+            try
+            {
+                return Convert(rgba, target, parallel);
+            }
+            finally
+            {
+                rgba.Dispose();
+            }
+        }
+
         var result = Image.Create(source.Width, source.Height, target);
         try
         {
             var from = source.PixelFormat;
             if (!TryFastPath(source, result, from, target))
             {
-                ConvertGeneric(source, result, from, target);
+                ConvertGeneric(source, result, from, target, parallel);
             }
 
             return result;
@@ -67,7 +145,7 @@ internal static class ImagePixelConverter
         }
     }
 
-    private static void ConvertGeneric(Image source, Image result, PixelFormat from, PixelFormat target)
+    private static void ConvertGeneric(Image source, Image result, PixelFormat from, PixelFormat target, ParallelSettings parallel)
     {
         int width = source.Width;
         var sourceMemory = source.PixelMemory;
@@ -87,7 +165,7 @@ internal static class ImagePixelConverter
             {
                 ArrayPool<float>.Shared.Return(scratch);
             }
-        });
+        }, parallel);
     }
 
     // Decodes a row to straight float RGBA (gray is replicated, a missing alpha is 1).

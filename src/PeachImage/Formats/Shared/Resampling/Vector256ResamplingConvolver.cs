@@ -25,7 +25,7 @@ internal sealed class Vector256ResamplingConvolver : IResamplingConvolver
 {
     private static readonly Vector128ResamplingConvolver HorizontalFallback = new();
 
-    public void ConvolveVertical(float[] source, int width, int sourceHeight, float[] destination, ResamplingWeightMap weightMap)
+    public void ConvolveVertical(float[] source, int width, int sourceHeight, float[] destination, ResamplingWeightMap weightMap, ParallelSettings parallel = default)
     {
         int rowLength = width * ImageResizer.FloatsPerPixel;
 
@@ -41,11 +41,11 @@ internal sealed class Vector256ResamplingConvolver : IResamplingConvolver
                 var sourceRow = source.AsSpan((start + k) * rowLength, rowLength);
                 Accumulate(sourceRow, weights[k], destRow);
             }
-        });
+        }, parallel);
     }
 
-    public void ConvolveHorizontal(float[] source, int sourceWidth, int height, float[] destination, ResamplingWeightMap weightMap) =>
-        HorizontalFallback.ConvolveHorizontal(source, sourceWidth, height, destination, weightMap);
+    public void ConvolveHorizontal(float[] source, int sourceWidth, int height, float[] destination, ResamplingWeightMap weightMap, ParallelSettings parallel = default) =>
+        HorizontalFallback.ConvolveHorizontal(source, sourceWidth, height, destination, weightMap, parallel);
 
     /// <summary>Accumulates <c>accumulator += source * weight</c> elementwise, 8 floats (two pixels) at a time with a scalar tail for any remainder.</summary>
     private static void Accumulate(ReadOnlySpan<float> source, float weight, Span<float> accumulator)

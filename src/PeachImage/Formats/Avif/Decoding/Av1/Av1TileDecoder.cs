@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -89,6 +90,7 @@ internal sealed class Av1TileDecoder
     private readonly IAv1ReconWorker _worker;
     private readonly int[] _planeWidths;
     private readonly int[] _planeHeights;
+    private readonly ParallelSettings _parallel;
 
     // Per-superblock BlockDecoded flags (spec §5.11.3), one flat array per plane sized for the largest
     // possible superblock (128x128 luma -> 32 4x4 units per side) with a uniform +1 offset so index -1 is
@@ -388,8 +390,10 @@ internal sealed class Av1TileDecoder
         int[] angleDeltaYGrid,
         int[] angleDeltaUvGrid,
         bool[] useFilterIntraGrid,
-        int[] filterIntraModeGrid)
+        int[] filterIntraModeGrid,
+        ParallelSettings parallel = default)
     {
+        _parallel = parallel;
         _s = symbols;
         _cdf = cdf;
         _seq = seq;
@@ -451,6 +455,8 @@ internal sealed class Av1TileDecoder
         // Large tiles split parse and pixel reconstruction across two threads; small ones (where starting a
         // thread would cost more than it saves) and single-core hosts reconstruct inline.
         bool threaded = Environment.ProcessorCount > 1
+            && !_parallel.IsSequential
+            && _parallel.EffectiveDegree > 1
             && (_miRowEnd - _miRowStart) * (_miColEnd - _miColStart) >= PipelineMinMiArea;
         _recon = new Av1ReconPipeline(_worker, threaded);
 
