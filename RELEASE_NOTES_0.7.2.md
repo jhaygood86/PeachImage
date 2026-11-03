@@ -4,7 +4,7 @@
 **Full changelog:** [v0.7.1...v0.7.2](https://github.com/jhaygood86/PeachImage/compare/v0.7.1...v0.7.2)
 **Release tag:** [v0.7.2](https://github.com/jhaygood86/PeachImage/releases/tag/v0.7.2)
 
-Pixel density is now reported for JPEG and TIFF, in one documented unit. Nothing that worked before changes.
+Pixel density is now reported for JPEG, TIFF, BMP, JPEG 2000 and (through EXIF) WebP, AVIF and JPEG XL, in one documented unit. Nothing that worked before changes.
 
 ## Resolution metadata
 
@@ -16,7 +16,10 @@ Pixel density is now reported for JPEG and TIFF, in one documented unit. Nothing
 - **JPEG**: the JFIF density is used when its unit is dots per inch or dots per centimetre. A JFIF header that only gives a pixel aspect ratio (unit 0, which is what PeachImage itself writes) is not a resolution, so the EXIF `XResolution`/`YResolution`/`ResolutionUnit` of IFD0 is used instead. JFIF wins when both carry a density. Before this release JPEG always reported `null`.
 - **TIFF**: `XResolution`, `YResolution` and `ResolutionUnit` of the first IFD; a missing unit means inch, as in the TIFF specification. Unit "none" and zero densities report `null`.
 - **PNG** is unchanged (`pHYs`, pixels per metre).
-- Other formats still report `null`.
+- **BMP**: `biXPelsPerMeter`/`biYPelsPerMeter` of a Windows DIB header (zero means not recorded).
+- **JPEG 2000**: the JP2 `res ` box, capture resolution (`resc`) before display resolution (`resd`).
+- **PNG `eXIf`, WebP, AVIF, JPEG XL**: when the format has no density field of its own, the `XResolution`/`YResolution`/`ResolutionUnit` of the EXIF block (as for JPEG).
+- GIF and the remaining formats record no absolute density and still report `null`.
 
 ## Behaviour notes
 

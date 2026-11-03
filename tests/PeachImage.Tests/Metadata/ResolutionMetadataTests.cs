@@ -115,6 +115,138 @@ public class ResolutionMetadataTests
         Assert.Equal(2835 / PerInch, decoded.Metadata.HorizontalDpi!.Value, 3);
     }
 
+    [Theory]
+    [InlineData("png")]
+    [InlineData("webp")]
+    [InlineData("avif")]
+    [InlineData("jxl")]
+    public void ExifDensity_SurvivesFormatsWithoutADensityField(string format)
+    {
+        using var source = Image.Create(16, 16, PixelFormat.Rgb24);
+        source.GetPixelSpan().Fill(100);
+        source.Metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Exif, Data = ExifWithDensity(true, 2, 150)[6..] });
+        using var ms = new MemoryStream();
+        source.Save(ms, format);
+        ms.Position = 0;
+
+        using var decoded = Image.Load(ms);
+
+        Assert.Equal(150 * PerInch, decoded.Metadata.HorizontalResolution!.Value, 3);
+    }
+
+    [Fact]
+    public void Bmp_ReportsPelsPerMetre()
+    {
+        using var source = Image.Create(4, 4, PixelFormat.Rgb24);
+        using var ms = new MemoryStream();
+        source.Save(ms, "bmp");
+        byte[] bmp = ms.ToArray();
+        BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(38), 3780);
+        BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(42), 2835);
+
+        using var decoded = Image.Load(new MemoryStream(bmp));
+
+        Assert.Equal(3780, decoded.Metadata.HorizontalResolution);
+        Assert.Equal(2835, decoded.Metadata.VerticalResolution);
+    }
+
+    [Fact]
+    public void Bmp_WithZeroPelsPerMetre_HasNoResolution()
+    {
+        using var source = Image.Create(4, 4, PixelFormat.Rgb24);
+        using var ms = new MemoryStream();
+        source.Save(ms, "bmp");
+        ms.Position = 0;
+
+        using var decoded = Image.Load(ms);
+
+        Assert.Null(decoded.Metadata.HorizontalResolution);
+    }
+
+    [Theory]
+    [InlineData(0x72657363, 0x72657364, 3780)] // capture box wins
+    [InlineData(0x72657364, 0, 7)]
+    public void Jpeg2000_ReadsCaptureThenDisplayResolution(int firstBox, int secondBox, int expectedHorizontal)
+    {
+        byte[] jp2 = ReadAsset("box_gray.jp2");
+        var resBoxes = new List<byte>();
+        // vertical N/D = 2835 / 1 (E 0); horizontal N/D = expectedHorizontal-or-3780 / 1.
+        resBoxes.AddRange(Box(firstBox, Rational(2835, 1, firstBox == 0x72657363 ? 3780 : 7, 1, 0, 0)));
+        if (secondBox != 0)
+        {
+            resBoxes.AddRange(Box(secondBox, Rational(1, 1, 5, 1, 0, 0)));
+        }
+
+        byte[] res = Box(0x72657320, [.. resBoxes]);
+        byte[] patched = InsertIntoJp2h(jp2, res);
+
+        using var image = Image.Load(new MemoryStream(patched));
+
+        Assert.Equal(expectedHorizontal, image.Metadata.HorizontalResolution);
+        Assert.Equal(2835, image.Metadata.VerticalResolution);
+    }
+
+    [Fact]
+    public void Jpeg2000_ResolutionExponent_Scales()
+    {
+        byte[] patched = InsertIntoJp2h(ReadAsset("box_gray.jp2"), Box(0x72657320, Box(0x72657363, Rational(1, 1, 5, 1, 3, 2))));
+
+        using var image = Image.Load(new MemoryStream(patched));
+
+        Assert.Equal(500, image.Metadata.HorizontalResolution);
+        Assert.Equal(1000, image.Metadata.VerticalResolution);
+    }
+
+    private static byte[] ReadAsset(string name)
+    {
+        using var stream = typeof(ResolutionMetadataTests).Assembly.GetManifestResourceStream("PeachImage.Tests.Formats.Jpeg2000.Assets." + name)!;
+        using var ms = new MemoryStream();
+        stream.CopyTo(ms);
+        return ms.ToArray();
+    }
+
+    private static byte[] Rational(int vn, int vd, int hn, int hd, int ve, int he)
+    {
+        var b = new byte[10];
+        BinaryPrimitives.WriteUInt16BigEndian(b, (ushort)vn);
+        BinaryPrimitives.WriteUInt16BigEndian(b.AsSpan(2), (ushort)vd);
+        BinaryPrimitives.WriteUInt16BigEndian(b.AsSpan(4), (ushort)hn);
+        BinaryPrimitives.WriteUInt16BigEndian(b.AsSpan(6), (ushort)hd);
+        b[8] = (byte)ve;
+        b[9] = (byte)he;
+        return b;
+    }
+
+    private static byte[] Box(int type, byte[] body)
+    {
+        var b = new byte[8 + body.Length];
+        BinaryPrimitives.WriteUInt32BigEndian(b, (uint)b.Length);
+        BinaryPrimitives.WriteUInt32BigEndian(b.AsSpan(4), (uint)type);
+        body.CopyTo(b, 8);
+        return b;
+    }
+
+    /// <summary>Appends <paramref name="box"/> to the file's top-level <c>jp2h</c> box and grows its length.</summary>
+    private static byte[] InsertIntoJp2h(byte[] jp2, byte[] box)
+    {
+        int pos = 0;
+        while (pos + 8 <= jp2.Length)
+        {
+            uint length = BinaryPrimitives.ReadUInt32BigEndian(jp2.AsSpan(pos));
+            if (BinaryPrimitives.ReadUInt32BigEndian(jp2.AsSpan(pos + 4)) == 0x6A703268)
+            {
+                int end = pos + (int)length;
+                byte[] result = [.. jp2.AsSpan(0, end), .. box, .. jp2.AsSpan(end)];
+                BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(pos), length + (uint)box.Length);
+                return result;
+            }
+
+            pos += (int)length;
+        }
+
+        throw new InvalidOperationException("no jp2h");
+    }
+
     private static byte[] Tiff(bool littleEndian, int? unit, (uint X, uint Y)? density) =>
         new Formats.Tiff.Unit.TiffFixtureBuilder
         {

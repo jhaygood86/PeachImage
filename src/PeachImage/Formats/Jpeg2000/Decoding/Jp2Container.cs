@@ -32,6 +32,35 @@ internal sealed class Jp2Info
     /// <summary>The ICC profile of the first <c>colr</c> box using method 2 (a "restricted" ICC profile), if any.</summary>
     public byte[]? IccProfile { get; set; }
 
+    /// <summary>Pixels per metre (horizontal, vertical) from the <c>resc</c> (else <c>resd</c>) box, if present and valid.</summary>
+    public (double X, double Y)? Resolution { get; set; }
+
+    private bool _hasCaptureResolution;
+
+    internal void SetResolution(ReadOnlySpan<byte> body, bool capture)
+    {
+        // VRcN, VRcD, HRcN, HRcD (UInt16 each), VRcE, HRcE (Int8 each): pixels per metre = N / D * 10^E.
+        if (body.Length < 10 || (_hasCaptureResolution && !capture))
+        {
+            return;
+        }
+
+        int vd = (body[2] << 8) | body[3];
+        int hd = (body[6] << 8) | body[7];
+        if (vd == 0 || hd == 0)
+        {
+            return;
+        }
+
+        double v = ((body[0] << 8) | body[1]) / (double)vd * Math.Pow(10, (sbyte)body[8]);
+        double h = ((body[4] << 8) | body[5]) / (double)hd * Math.Pow(10, (sbyte)body[9]);
+        if (v > 0 && h > 0 && double.IsFinite(v) && double.IsFinite(h))
+        {
+            Resolution = (h, v);
+            _hasCaptureResolution = capture;
+        }
+    }
+
     public Jp2Palette? Palette { get; set; }
 
     public Jp2ComponentMapping[]? ComponentMappings { get; set; }
@@ -102,6 +131,15 @@ internal sealed class Jp2Info
             {
                 case 0x6A703268 when depth == 0: // jp2h
                     ParseBoxes(body, info, depth + 1);
+                    break;
+                case 0x72657320 when depth == 1: // res
+                    ParseBoxes(body, info, depth + 1);
+                    break;
+                case 0x72657363 when depth == 2: // resc
+                    info.SetResolution(body.Span, capture: true);
+                    break;
+                case 0x72657364 when depth == 2: // resd
+                    info.SetResolution(body.Span, capture: false);
                     break;
                 case 0x636F6C72: // colr
                     ParseColr(body.Span, info);
