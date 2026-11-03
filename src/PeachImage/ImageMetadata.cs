@@ -5,11 +5,24 @@ namespace PeachImage;
 /// <summary>Format-agnostic metadata associated with an <see cref="Image"/>.</summary>
 public sealed class ImageMetadata
 {
-    /// <summary>The horizontal resolution, in pixels per unit, if known.</summary>
+    /// <summary>
+    /// The horizontal resolution in pixels per metre, if the file records one. Filled from PNG <c>pHYs</c>, JPEG JFIF
+    /// (or EXIF when JFIF gives only an aspect ratio) and TIFF <c>XResolution</c>; inch and centimetre densities are
+    /// converted, so every format reports the same unit. A density that gives only a pixel aspect ratio is not a resolution and is left <see langword="null"/>.
+    /// </summary>
     public double? HorizontalResolution { get; set; }
 
-    /// <summary>The vertical resolution, in pixels per unit, if known.</summary>
+    /// <summary>The vertical resolution in pixels per metre, if known (see <see cref="HorizontalResolution"/>).</summary>
     public double? VerticalResolution { get; set; }
+
+    /// <summary>Pixels per metre in one pixel per inch; multiply dots per inch by this to get pixels per metre.</summary>
+    internal const double InchesPerMetre = 100.0 / 2.54;
+
+    /// <summary><see cref="HorizontalResolution"/> expressed in pixels per inch (dots per inch), if known.</summary>
+    public double? HorizontalDpi => HorizontalResolution / InchesPerMetre;
+
+    /// <summary><see cref="VerticalResolution"/> expressed in pixels per inch (dots per inch), if known.</summary>
+    public double? VerticalDpi => VerticalResolution / InchesPerMetre;
 
     /// <summary>Raw metadata profiles (EXIF, ICC, XMP, etc.) captured during decode.</summary>
     public IList<RawMetadataProfile> Profiles { get; } = [];
