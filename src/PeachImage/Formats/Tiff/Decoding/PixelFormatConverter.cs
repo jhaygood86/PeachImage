@@ -54,6 +54,7 @@ internal static class PixelFormatConverter
             _ => throw new TiffDecodingException($"Cannot convert decoded {image.PixelFormat} pixels to requested format {targetFormat}."),
         };
 
+        ResolutionCarrier.Copy(image, converted);
         return converted;
     }
 

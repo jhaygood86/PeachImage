@@ -48,6 +48,28 @@ public sealed class ImageMetadata
     /// <summary>The raw EXIF GPS values (see <see cref="PeachImage.ExifLocation"/>), or <see langword="null"/> when the EXIF names none.</summary>
     public ExifLocation? ExifLocation => Location.Exif;
 
+    /// <summary>
+    /// Fills <see cref="HorizontalResolution"/> and <see cref="VerticalResolution"/> from the EXIF block in <see cref="Profiles"/> when the format
+    /// gave none of its own: PNG <c>eXIf</c>, WebP, AVIF and JPEG XL carry density there.
+    /// </summary>
+    internal void ApplyExifResolution()
+    {
+        if (HorizontalResolution is not null)
+        {
+            return;
+        }
+
+        foreach (var profile in Profiles)
+        {
+            if (profile.Kind == MetadataProfileKind.Exif && ExifResolutionReader.Read(profile.Data) is { } density)
+            {
+                HorizontalResolution = density.X;
+                VerticalResolution = density.Y;
+                return;
+            }
+        }
+    }
+
     internal LocationInfo LocationFromProfiles()
     {
         var found = default(LocationInfo);

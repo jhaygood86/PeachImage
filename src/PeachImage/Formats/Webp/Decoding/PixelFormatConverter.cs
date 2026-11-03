@@ -22,6 +22,7 @@ internal static class PixelFormatConverter
             _ => throw new WebpDecodingException($"Cannot convert decoded {image.PixelFormat} pixels to requested format {targetFormat}."),
         };
 
+        ResolutionCarrier.Copy(image, converted);
         return converted;
     }
 
