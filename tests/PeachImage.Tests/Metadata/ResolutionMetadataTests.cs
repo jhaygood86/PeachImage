@@ -247,6 +247,46 @@ public class ResolutionMetadataTests
         throw new InvalidOperationException("no jp2h");
     }
 
+    [Fact]
+    public void Bmp_DensitySurvivesATargetPixelFormat()
+    {
+        using var source = Image.Create(4, 4, PixelFormat.Rgb24);
+        using var ms = new MemoryStream();
+        source.Save(ms, "bmp");
+        byte[] bmp = ms.ToArray();
+        BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(38), 3780);
+        BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(42), 2835);
+
+        using var decoded = Image.Load(new MemoryStream(bmp), new DecoderOptions { TargetPixelFormat = PixelFormat.Rgba32 });
+
+        Assert.Equal(PixelFormat.Rgba32, decoded.PixelFormat);
+        Assert.Equal(3780, decoded.Metadata.HorizontalResolution);
+        Assert.Equal(2835, decoded.Metadata.VerticalResolution);
+    }
+
+    [Theory]
+    [InlineData("png")]
+    [InlineData("webp")]
+    [InlineData("jpeg")]
+    [InlineData("avif")]
+    [InlineData("jxl")]
+    public void Density_SurvivesATargetPixelFormat(string format)
+    {
+        using var source = Image.Create(16, 16, PixelFormat.Rgb24);
+        source.GetPixelSpan().Fill(100);
+        source.Metadata.HorizontalResolution = 11811;
+        source.Metadata.VerticalResolution = 11811;
+        source.Metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Exif, Data = ExifWithDensity(true, 2, 300)[6..] });
+        using var ms = new MemoryStream();
+        source.Save(ms, format);
+        ms.Position = 0;
+
+        using var decoded = Image.Load(ms, new DecoderOptions { TargetPixelFormat = PixelFormat.Rgba32 });
+
+        Assert.Equal(PixelFormat.Rgba32, decoded.PixelFormat);
+        Assert.Equal(300 * PerInch, decoded.Metadata.HorizontalResolution!.Value, 0);
+    }
+
     private static byte[] Tiff(bool littleEndian, int? unit, (uint X, uint Y)? density) =>
         new Formats.Tiff.Unit.TiffFixtureBuilder
         {
