@@ -112,6 +112,8 @@ internal static class BmpHeaderReader
         uint compressionCode = BinaryPrimitives.ReadUInt32LittleEndian(rest[12..16]);
         uint declaredImageSize = rest.Length >= 20 ? BinaryPrimitives.ReadUInt32LittleEndian(rest[16..20]) : 0;
         uint colorsUsed = rest.Length >= 32 ? BinaryPrimitives.ReadUInt32LittleEndian(rest[28..32]) : 0;
+        int xPerMetre = rest.Length >= 28 ? BinaryPrimitives.ReadInt32LittleEndian(rest[20..24]) : 0;
+        int yPerMetre = rest.Length >= 28 ? BinaryPrimitives.ReadInt32LittleEndian(rest[24..28]) : 0;
 
         var compression = MapWindowsCompression(compressionCode);
 
@@ -166,6 +168,8 @@ internal static class BmpHeaderReader
             Compression = compression,
             ColorsUsed = colorsUsed,
             DeclaredImageSize = declaredImageSize,
+            XPixelsPerMetre = xPerMetre,
+            YPixelsPerMetre = yPerMetre,
             RMask = rMask,
             GMask = gMask,
             BMask = bMask,

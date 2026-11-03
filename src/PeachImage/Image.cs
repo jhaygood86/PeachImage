@@ -539,6 +539,7 @@ public sealed class Image : IDisposable
         }
 
         var image = codec.Decode(preparedStream, decodeOptions);
+        FillResolutionFromExif(image.Metadata);
         if (scale > 1)
         {
             // Formats without a native reduction come back at full size: average them down so every format yields the same size.
@@ -564,6 +565,25 @@ public sealed class Image : IDisposable
         }
 
         return image;
+    }
+
+    /// <summary>Formats with no density field of their own (PNG <c>eXIf</c>, WebP, AVIF, JPEG XL) can carry it in their EXIF block.</summary>
+    private static void FillResolutionFromExif(ImageMetadata metadata)
+    {
+        if (metadata.HorizontalResolution is not null)
+        {
+            return;
+        }
+
+        foreach (var profile in metadata.Profiles)
+        {
+            if (profile.Kind == MetadataProfileKind.Exif && ExifResolutionReader.Read(profile.Data) is { } density)
+            {
+                metadata.HorizontalResolution = density.X;
+                metadata.VerticalResolution = density.Y;
+                return;
+            }
+        }
     }
 
     /// <summary>Attempts to load an image from <paramref name="stream"/>, returning <see langword="false"/> instead of throwing on failure.</summary>

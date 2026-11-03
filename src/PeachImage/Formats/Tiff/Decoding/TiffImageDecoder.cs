@@ -1,4 +1,5 @@
 using PeachImage.Formats.Shared.Ccitt;
+using PeachImage.Formats.Shared.Metadata;
 using PeachImage.Formats.Tiff.Internal;
 
 namespace PeachImage.Formats.Tiff.Decoding;
@@ -20,9 +21,26 @@ internal static class TiffImageDecoder
 
         var image = Image.Create(descriptor.Width, descriptor.Height, descriptor.PixelFormat);
         DecodeStrips(reader, descriptor, palette, image);
+        ReadResolution(ifd, image);
         ReadIccProfile(ifd, image);
         ReadXmpPacket(ifd, image);
         return image;
+    }
+
+    // ResolutionUnit: 1 = no absolute unit (aspect ratio only), 2 = inch (the default), 3 = centimetre.
+    private static void ReadResolution(TiffIfd ifd, Image image)
+    {
+        double? x = ifd.TryGetRational(TiffTags.XResolution);
+        double? y = ifd.TryGetRational(TiffTags.YResolution);
+        double? perMetre = ResolutionUnits.FromTiffUnit(ifd.GetUInt16(TiffTags.ResolutionUnit, 2));
+        if (x is not > 0 || y is not > 0 || perMetre is null)
+        {
+            return;
+        }
+
+        double factor = perMetre.Value;
+        image.Metadata.HorizontalResolution = x * factor;
+        image.Metadata.VerticalResolution = y * factor;
     }
 
     private static void ReadIccProfile(TiffIfd ifd, Image image)

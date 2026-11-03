@@ -31,6 +31,12 @@ internal readonly record struct BmpHeader
 
     public BmpCompression Compression { get; init; }
 
+    /// <summary>Declared horizontal pixels per metre; 0 or less means not recorded.</summary>
+    public int XPixelsPerMetre { get; init; }
+
+    /// <summary>Declared vertical pixels per metre; 0 or less means not recorded.</summary>
+    public int YPixelsPerMetre { get; init; }
+
     /// <summary>Declared palette entry count. 0 means "use the default for <see cref="BitCount"/>" (1 &lt;&lt; BitCount).</summary>
     public uint ColorsUsed { get; init; }
 

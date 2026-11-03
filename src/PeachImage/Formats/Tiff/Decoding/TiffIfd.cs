@@ -70,6 +70,28 @@ internal sealed class TiffIfd(TiffReader reader, IReadOnlyDictionary<ushort, Tif
         return reader.HasBytes(valuesOffset, (int)totalBytes) ? reader.ReadSpan(valuesOffset, (int)totalBytes).ToArray() : null;
     }
 
+    /// <summary>
+    /// The first value of a RATIONAL <paramref name="tag"/> as a double, or <see langword="null"/> when the tag is absent,
+    /// not a RATIONAL, malformed or has a zero denominator. Optional metadata, so a bad entry is skipped rather than thrown.
+    /// </summary>
+    public double? TryGetRational(ushort tag)
+    {
+        if (!entries.TryGetValue(tag, out var entry) || entry.Type != TiffTagType.Rational || entry.Count < 1 || !reader.HasBytes(entry.ValueFieldOffset, 4))
+        {
+            return null;
+        }
+
+        long offset = reader.ReadUInt32(entry.ValueFieldOffset);
+        if (offset is < 0 or > int.MaxValue || !reader.HasBytes((int)offset, 8))
+        {
+            return null;
+        }
+
+        uint numerator = reader.ReadUInt32((int)offset);
+        uint denominator = reader.ReadUInt32((int)offset + 4);
+        return denominator == 0 ? null : (double)numerator / denominator;
+    }
+
     private uint[] ReadValues(TiffIfdEntry entry)
     {
         int typeSize = entry.Type.GetByteSize();

@@ -195,6 +195,12 @@ internal static class Jpeg2000Decoder
         int height = CeilDivPow2(siz.Ysiz, reduce) - gridY0;
         var image = plan.Build(siz, reduce, planes, planeWidths, planeHeights, planeOriginX, planeOriginY, width, height, gridX0, gridY0, parallel);
         image.HasAlpha = plan.HasAlpha;
+        if (jp2?.Resolution is { } density)
+        {
+            image.Metadata.HorizontalResolution = density.X;
+            image.Metadata.VerticalResolution = density.Y;
+        }
+
         if (jp2?.IccProfile is { } icc && !(options?.IgnoreColorSpace ?? false))
         {
             image.Metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Icc, Data = icc });

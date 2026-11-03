@@ -12,6 +12,9 @@ internal static class TiffTags
     public const ushort StripOffsets = 273;
     public const ushort Orientation = 274;
     public const ushort SamplesPerPixel = 277;
+    public const ushort XResolution = 282;
+    public const ushort YResolution = 283;
+    public const ushort ResolutionUnit = 296;
     public const ushort RowsPerStrip = 278;
     public const ushort StripByteCounts = 279;
     public const ushort T4Options = 292;

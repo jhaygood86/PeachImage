@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Metadata;
 using PeachImage.Formats.Jpeg.Decoding;
 using PeachImage.Formats.Shared.Parallelism;
 using PeachImage.Formats.Shared.Scaling;
@@ -80,6 +81,8 @@ internal static class JpegDecoder
             image.Metadata.Profiles.Add(profile);
         }
 
+        ApplyResolution(image.Metadata);
+
         bool hasAlpha = image.PixelFormat.HasAlpha();
         var result = PixelFormatConverter.ConvertIfNeeded(image, options?.TargetPixelFormat, options?.FallbackCmykProfile);
         if (!ReferenceEquals(result, image))
@@ -89,5 +92,36 @@ internal static class JpegDecoder
 
         result.HasAlpha = hasAlpha;
         return result;
+    }
+
+    /// <summary>Density from JFIF (units 1 or 2), else from EXIF, in pixels per metre; JFIF units 0 is only an aspect ratio.</summary>
+    private static void ApplyResolution(ImageMetadata metadata)
+    {
+        foreach (var profile in metadata.Profiles)
+        {
+            // APP0 payload: "JFIF\0", version (2), units (1), Xdensity (2, big endian), Ydensity (2, big endian).
+            if (profile.Kind == MetadataProfileKind.Jfif && profile.Data.Length >= 12 && profile.Data.AsSpan(0, 5).SequenceEqual("JFIF\0"u8)
+                && ResolutionUnits.FromJfifUnit(profile.Data[7]) is { } factor)
+            {
+                int x = (profile.Data[8] << 8) | profile.Data[9];
+                int y = (profile.Data[10] << 8) | profile.Data[11];
+                if (x > 0 && y > 0)
+                {
+                    metadata.HorizontalResolution = x * factor;
+                    metadata.VerticalResolution = y * factor;
+                    return;
+                }
+            }
+        }
+
+        foreach (var profile in metadata.Profiles)
+        {
+            if (profile.Kind == MetadataProfileKind.Exif && ExifResolutionReader.Read(profile.Data) is { } density)
+            {
+                metadata.HorizontalResolution = density.X;
+                metadata.VerticalResolution = density.Y;
+                return;
+            }
+        }
     }
 }

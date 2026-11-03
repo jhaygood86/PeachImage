@@ -55,6 +55,12 @@ internal sealed class TiffFixtureBuilder
     /// <summary>When set, writes the Orientation tag (274) with this raw value.</summary>
     public int? Orientation { get; init; }
 
+    /// <summary>XResolution/YResolution as whole-number rationals (denominator 1), when set.</summary>
+    public (uint X, uint Y)? Density { get; init; }
+
+    /// <summary>ResolutionUnit (296), written only when set; the TIFF default is 2 (inch).</summary>
+    public int? ResolutionUnit { get; init; }
+
     public bool OmitStripByteCounts { get; init; }
 
     public bool OmitStripOffsets { get; init; }
@@ -134,6 +140,17 @@ internal sealed class TiffFixtureBuilder
         }
 
         AddShort(277, SamplesPerPixel); // SamplesPerPixel
+
+        if (Density is { } density)
+        {
+            entries.Add((282, 5, 1, [], Pack(TypeLong, [density.X, 1u])));
+            entries.Add((283, 5, 1, [], Pack(TypeLong, [density.Y, 1u])));
+        }
+
+        if (ResolutionUnit is { } resolutionUnit)
+        {
+            AddShort(296, resolutionUnit);
+        }
 
         if (RowsPerStrip is { } rps)
         {

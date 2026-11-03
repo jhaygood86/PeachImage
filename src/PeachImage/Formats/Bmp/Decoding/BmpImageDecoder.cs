@@ -18,6 +18,11 @@ internal static class BmpImageDecoder
         bool hasAlpha = header.HasAlphaMask && header.BitCount is 16 or 32;
         var pixelFormat = hasAlpha ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
         var image = Image.Create(header.Width, header.Height, pixelFormat);
+        if (header.XPixelsPerMetre > 0 && header.YPixelsPerMetre > 0)
+        {
+            image.Metadata.HorizontalResolution = header.XPixelsPerMetre;
+            image.Metadata.VerticalResolution = header.YPixelsPerMetre;
+        }
 
         if (header.Compression is BmpCompression.Rle8 or BmpCompression.Rle4)
         {
