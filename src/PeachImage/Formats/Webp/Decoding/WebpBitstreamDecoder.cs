@@ -21,7 +21,7 @@ internal static class WebpBitstreamDecoder
     /// <summary>
     /// Decodes the alpha plane (if any) at the bitstream's own dimensions first, then hands it into the VP8
     /// frame decoder so pixel conversion can emit RGBA32 directly instead of building an RGB24 image and
-    /// widening it afterward -- see <see cref="Vp8FrameDecoder.ProduceRgbFrame"/>'s remarks for why that
+    /// widening it afterward -- see <see cref="Vp8FrameDecoder"/>'s remarks for why that
     /// matters. Dimensions are read via a cheap peek rather than waiting on the frame decoder's own parse,
     /// since alpha decode needs them first; both read the identical bytes, so they can't disagree.
     /// </summary>

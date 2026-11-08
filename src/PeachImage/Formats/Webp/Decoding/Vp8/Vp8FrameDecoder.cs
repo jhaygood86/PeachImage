@@ -87,7 +87,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
             int UOff(int x, int y) => ((y + 1) * uvStride) + x + 1;
 
             var modeDecoder = new Vp8ModeDecoder(mbCols, segmentHeader, useSkipProbability, skipFalseProbability);
-            var coeffContext = new Vp8CoefficientContext(mbCols);
+            var coeffContext = new Vp8TokenContext(mbCols);
             var modes = new Vp8MacroblockModes();
 
             var segmentAtMb = new int[mbCols * mbRows];
@@ -95,12 +95,10 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
             var innerFilterAtMb = new bool[mbCols * mbRows];
 
             Span<short> coeffs = stackalloc short[25 * 16];
-            Span<short> y2Coeffs = stackalloc short[16];
-            Span<short> blockDc = stackalloc short[16];
             Span<byte> aboveRight = stackalloc byte[4];
-            Span<bool> colY = stackalloc bool[4];
-            Span<bool> colU = stackalloc bool[2];
-            Span<bool> colV = stackalloc bool[2];
+
+            using var writer = new RgbRowWriter(
+                yPlane, yStride, uPlane, vPlane, uvStride, mbCols, mbRows, frameHeader.Width, frameHeader.Height, YOff, UOff, alphaPlane, output);
 
             for (int mbY = 0; mbY < mbRows; mbY++)
             {
@@ -124,16 +122,16 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
 
                     if (modes.Skip)
                     {
-                        ResetSkippedContext(coeffContext, mbX, modes.IsI4x4);
+                        coeffContext.ResetSkipped(mbX, modes.IsI4x4);
                         anyNonZero = false;
                         nonZeroBlocks = 0;
                         acBlocks = 0;
                     }
                     else
                     {
-                        anyNonZero = DecodeMacroblockCoefficients(
-                            tokenBr, coeffProbabilities, quant, modes, mbX, coeffContext,
-                            coeffs, y2Coeffs, blockDc, colY, colU, colV, out nonZeroBlocks, out acBlocks);
+                        Vp8CoefficientDecoder.DecodeMacroblock(
+                            tokenBr, coeffProbabilities, quant, modes.IsI4x4, ref coeffContext.Above[mbX], ref coeffContext.Left,
+                            coeffs, out nonZeroBlocks, out acBlocks, out anyNonZero);
                     }
 
                     int mbIndex = (mbY * mbCols) + mbX;
@@ -209,13 +207,27 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                         }
                     }
                 }
+
+                // Intra prediction reads the unfiltered row above, so row mbY-1 is filtered only now that row mbY is
+                // reconstructed. That row's filtering also finishes row mbY-2, and lines of the row itself down to
+                // line 12 (the next row's top edge still reaches up to three lines into it); chroma is final through line 4
+                // of its 8, and the upsampler looks one chroma row past the line it converts, so lines below
+                // (mbY-1)*16 + 8 wait.
+                if (mbY > 0)
+                {
+                    ApplyLoopFilterRow(
+                        mbY - 1, yPlane, yStride, uPlane, vPlane, uvStride, mbCols,
+                        loopFilterHeader, filterStrengths, segmentAtMb, isI4x4AtMb, innerFilterAtMb, YOff, UOff);
+                    writer.ConvertTo(Math.Min(((mbY - 1) * 16) + 8, frameHeader.Height));
+                }
             }
 
-            ApplyLoopFilter(
-                yPlane, yStride, uPlane, vPlane, uvStride, mbCols, mbRows,
+            // The last row has nothing after it to wait for.
+            ApplyLoopFilterRow(
+                mbRows - 1, yPlane, yStride, uPlane, vPlane, uvStride, mbCols,
                 loopFilterHeader, filterStrengths, segmentAtMb, isI4x4AtMb, innerFilterAtMb, YOff, UOff);
-
-            return ProduceRgbFrame(yPlane, yStride, uPlane, vPlane, uvStride, mbCols, mbRows, frameHeader.Width, frameHeader.Height, YOff, UOff, alphaPlane, output);
+            writer.ConvertTo(frameHeader.Height);
+            return writer.Finish();
         }
         finally
         {
@@ -273,197 +285,6 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         }
     }
 
-    private static void ResetSkippedContext(Vp8CoefficientContext context, int mbX, bool isI4x4)
-    {
-        for (int i = 0; i < 4; i++)
-        {
-            context.AboveY[(mbX * 4) + i] = false;
-            context.LeftY[i] = false;
-        }
-
-        for (int i = 0; i < 2; i++)
-        {
-            context.AboveU[(mbX * 2) + i] = false;
-            context.LeftU[i] = false;
-            context.AboveV[(mbX * 2) + i] = false;
-            context.LeftV[i] = false;
-        }
-
-        if (!isI4x4)
-        {
-            context.AboveDc[mbX] = false;
-            context.LeftDc = false;
-        }
-    }
-
-    /// <summary>
-    /// Decodes one macroblock's coefficients, and reports per 4x4 block which of the three reconstruction cases
-    /// it falls into via two 24-bit masks (blocks 0-15 luma, 16-19 U, 20-23 V).
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// A bit set in <paramref name="acBlocks"/> means the block carries at least one AC coefficient and needs
-    /// the full inverse transform; a bit set in <paramref name="nonZeroBlocks"/> but not in
-    /// <paramref name="acBlocks"/> means DC only; clear in both means the block is entirely zero and
-    /// reconstruction can skip it outright. At ordinary quality most blocks are in that last case.
-    /// </para>
-    /// <para>
-    /// The AC test is <c>last &gt; 1</c>, where <c>last</c> is the scan position decoding stopped at. That is
-    /// exact rather than approximate for two reasons: every coefficient the decoder writes is nonzero (the
-    /// magnitude is at least 1 and the quantizer is at least 1), and the zigzag maps scan position 0 to raster
-    /// position 0 and every later scan position to a raster position above it — so "stopped past scan 1"
-    /// and "some raster position 1..15 is nonzero" are the same statement.
-    /// </para>
-    /// </remarks>
-    private static bool DecodeMacroblockCoefficients(
-        Vp8BoolDecoder tokenBr,
-        byte[] probabilities,
-        Vp8QuantMatrix quant,
-        Vp8MacroblockModes modes,
-        int mbX,
-        Vp8CoefficientContext context,
-        Span<short> coeffs,
-        Span<short> y2Coeffs,
-        Span<short> blockDc,
-        Span<bool> colY,
-        Span<bool> colU,
-        Span<bool> colV,
-        out uint nonZeroBlocks,
-        out uint acBlocks)
-    {
-        bool anyNonZero = false;
-        nonZeroBlocks = 0;
-        acBlocks = 0;
-
-        if (!modes.IsI4x4)
-        {
-            y2Coeffs.Clear();
-            int dcCtx = (context.LeftDc ? 1 : 0) + (context.AboveDc[mbX] ? 1 : 0);
-            int dcLast = Vp8CoefficientDecoder.DecodeBlock(tokenBr, probabilities, 1, dcCtx, 0, quant.Y2Dc, quant.Y2Ac, y2Coeffs);
-            bool dcNonZero = dcLast > 0;
-            context.LeftDc = dcNonZero;
-            context.AboveDc[mbX] = dcNonZero;
-            if (dcNonZero)
-            {
-                anyNonZero = true;
-            }
-
-            Vp8ScalarInverseWht.Transform(y2Coeffs, blockDc);
-            for (int i = 0; i < 16; i++)
-            {
-                coeffs[(i * 16) + 0] = blockDc[i];
-            }
-        }
-
-        int yPlaneType = modes.IsI4x4 ? 3 : 0;
-        int yFirst = modes.IsI4x4 ? 0 : 1;
-
-        for (int i = 0; i < 4; i++)
-        {
-            colY[i] = context.AboveY[(mbX * 4) + i];
-        }
-
-        for (int row = 0; row < 4; row++)
-        {
-            bool rowLeft = context.LeftY[row];
-            for (int col = 0; col < 4; col++)
-            {
-                int idx = (row * 4) + col;
-                int ctx = (rowLeft ? 1 : 0) + (colY[col] ? 1 : 0);
-                Span<short> block = coeffs.Slice(idx * 16, 16);
-                int last = Vp8CoefficientDecoder.DecodeBlock(tokenBr, probabilities, yPlaneType, ctx, yFirst, quant.Y1Dc, quant.Y1Ac, block);
-                bool nz = last > yFirst;
-                if (nz || block[0] != 0)
-                {
-                    anyNonZero = true;
-                }
-
-                // block[0] is read after the Y2/WHT pass above has written each luma block's DC, so this sees
-                // the DC the reconstruction will actually transform, not just what this block's own tokens set.
-                if (last > 1)
-                {
-                    acBlocks |= 1u << idx;
-                    nonZeroBlocks |= 1u << idx;
-                }
-                else if (block[0] != 0)
-                {
-                    nonZeroBlocks |= 1u << idx;
-                }
-
-                rowLeft = nz;
-                colY[col] = nz;
-            }
-
-            context.LeftY[row] = rowLeft;
-        }
-
-        for (int i = 0; i < 4; i++)
-        {
-            context.AboveY[(mbX * 4) + i] = colY[i];
-        }
-
-        anyNonZero |= DecodeChromaPlane(tokenBr, probabilities, quant, mbX, context.AboveU, context.LeftU, coeffs, colU, blockOffset: 16, ref nonZeroBlocks, ref acBlocks);
-        anyNonZero |= DecodeChromaPlane(tokenBr, probabilities, quant, mbX, context.AboveV, context.LeftV, coeffs, colV, blockOffset: 20, ref nonZeroBlocks, ref acBlocks);
-
-        return anyNonZero;
-    }
-
-    private static bool DecodeChromaPlane(
-        Vp8BoolDecoder tokenBr,
-        byte[] probabilities,
-        Vp8QuantMatrix quant,
-        int mbX,
-        bool[] above,
-        bool[] left,
-        Span<short> coeffs,
-        Span<bool> col,
-        int blockOffset,
-        ref uint nonZeroBlocks,
-        ref uint acBlocks)
-    {
-        bool anyNonZero = false;
-
-        col[0] = above[(mbX * 2) + 0];
-        col[1] = above[(mbX * 2) + 1];
-
-        for (int row = 0; row < 2; row++)
-        {
-            bool rowLeft = left[row];
-            for (int c = 0; c < 2; c++)
-            {
-                int idx = blockOffset + (row * 2) + c;
-                int ctx = (rowLeft ? 1 : 0) + (col[c] ? 1 : 0);
-                Span<short> block = coeffs.Slice(idx * 16, 16);
-                int last = Vp8CoefficientDecoder.DecodeBlock(tokenBr, probabilities, 2, ctx, 0, quant.UvDc, quant.UvAc, block);
-                bool nz = last > 0;
-                if (nz || block[0] != 0)
-                {
-                    anyNonZero = true;
-                }
-
-                if (last > 1)
-                {
-                    acBlocks |= 1u << idx;
-                    nonZeroBlocks |= 1u << idx;
-                }
-                else if (block[0] != 0)
-                {
-                    nonZeroBlocks |= 1u << idx;
-                }
-
-                rowLeft = nz;
-                col[c] = nz;
-            }
-
-            left[row] = rowLeft;
-        }
-
-        above[(mbX * 2) + 0] = col[0];
-        above[(mbX * 2) + 1] = col[1];
-
-        return anyNonZero;
-    }
-
     /// <summary>
     /// Computes the 4 "above-right" pixels shared by every subblock in the rightmost column (x=3) of a B_PRED
     /// macroblock's 4x4 grid, reproducing libwebp's <c>top_right[BPS] = top_right[2*BPS] = top_right[3*BPS] =
@@ -493,14 +314,15 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         }
     }
 
-    private static void ApplyLoopFilter(
+    /// <summary>Loop-filters macroblock row <paramref name="mbY"/>. Rows are filtered in raster order, so calling this for each row in turn is the same as one pass over the frame.</summary>
+    private static void ApplyLoopFilterRow(
+        int mbY,
         byte[] yPlane,
         int yStride,
         byte[] uPlane,
         byte[] vPlane,
         int uvStride,
         int mbCols,
-        int mbRows,
         Vp8LoopFilterHeader header,
         Vp8FilterStrength[,] filterStrengths,
         int[] segmentAtMb,
@@ -514,7 +336,6 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
             return;
         }
 
-        for (int mbY = 0; mbY < mbRows; mbY++)
         {
             for (int mbX = 0; mbX < mbCols; mbX++)
             {
@@ -586,112 +407,145 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         }
     }
 
+    /// <summary>
+    /// Converts finished YUV lines to RGB (or RGBA) as the frame decode makes them final, so the planes are read while still in
+    /// cache instead of in a separate pass over the whole frame.
+    /// </summary>
     /// <remarks>
-    /// When <paramref name="alphaPlane"/> is supplied, this writes RGBA32 directly rather than producing an
-    /// RGB24 buffer for a caller to widen afterward. The two used to be separate steps:
-    /// <see cref="Vp8ScalarInverseDct"/>'s row loop here built a full RGB24 image, and
-    /// <c>WebpDecoder.InterleaveRgba</c> then made a second full-image pass copying it plus the alpha plane
-    /// into a freshly allocated RGBA32 buffer -- so a whole extra image-sized array (6.2 MB at 1080p) existed
-    /// only to be immediately copied from and discarded. Instead, each row is converted into a small
-    /// pool-rented RGB scratch row (not image-sized) and spliced with that row's alpha byte straight into the
-    /// final buffer as it is produced. <see cref="IVp8ColorConverter.ConvertRow"/> itself is untouched either
-    /// way -- it always writes plain 3-byte-stride RGB, whether that goes straight to the final buffer (no
-    /// alpha) or through the scratch row (alpha present).
+    /// When an alpha plane is supplied this writes RGBA32 directly rather than producing an RGB24 buffer for a caller to widen
+    /// afterward: each row is converted into a small pool-rented RGB scratch row (not image-sized) and spliced with that
+    /// row's alpha byte straight into the final buffer as it is produced. <see cref="IVp8ColorConverter.ConvertRow"/> itself always
+    /// writes plain 3-byte-stride RGB, whether that goes straight to the final buffer (no alpha) or through the scratch row.
     /// </remarks>
-    private static Vp8DecodedFrame ProduceRgbFrame(
-        byte[] yPlane,
-        int yStride,
-        byte[] uPlane,
-        byte[] vPlane,
-        int uvStride,
-        int mbCols,
-        int mbRows,
-        int width,
-        int height,
-        Func<int, int, int> yOff,
-        Func<int, int, int> uOff,
-        byte[]? alphaPlane,
-        WebpOutput? target)
+    private sealed class RgbRowWriter : IDisposable
     {
-        IVp8ColorConverter converter = Vp8ColorConverterSelector.Instance;
-        int bytesPerPixel = alphaPlane is null ? 3 : 4;
-        // Exactly width * height * bytesPerPixel bytes -- callers (including tests) rely on Pixels.Length
-        // being exact, so this is a plain heap allocation, not a pool rental. Uninitialized, because the row
-        // loop below writes every byte of it; zeroing 6 MB first is pure wasted bandwidth.
-        // With a caller-provided destination there is no array at all: rows are written where they belong.
-        byte[] output = target is null
-            ? GC.AllocateUninitializedArray<byte>(checked((int)((long)width * height * bytesPerPixel)))
-            : [];
-        int rowBytes = width * bytesPerPixel;
+        private readonly byte[] _yPlane;
+        private readonly byte[] _uPlane;
+        private readonly byte[] _vPlane;
+        private readonly int _yStride;
+        private readonly int _uvStride;
+        private readonly int _width;
+        private readonly int _height;
+        private readonly int _chromaWidth;
+        private readonly int _chromaHeight;
+        private readonly int _uBase;
+        private readonly int _bytesPerPixel;
+        private readonly int _rowBytes;
+        private readonly Func<int, int, int> _yOff;
+        private readonly byte[]? _alphaPlane;
+        private readonly WebpOutput? _target;
+        private readonly IVp8ColorConverter _converter;
+        private readonly byte[] _output;
+        private readonly byte[] _uRow;
+        private readonly byte[] _vRow;
+        private readonly byte[]? _rgbRow;
+        private int _nextRow;
 
-        int chromaWidth = mbCols * 8;
-        int chromaHeight = mbRows * 8;
-        int uBase = uOff(0, 0);
-
-        // Two full-width scratch rows for the upsampled chroma, rented rather than allocated: at most 16383
-        // bytes each, so they stay resident in L1 across the whole frame.
-        byte[] uRow = WebpBufferPool.Shared.Rent(width);
-        byte[] vRow = WebpBufferPool.Shared.Rent(width);
-
-        // Only rented when alpha is present -- see the type's remarks. Empty/unused in the common opaque case,
-        // so that path allocates and touches nothing beyond what it always has.
-        byte[]? rgbRow = alphaPlane is null || converter is Sse2Vp8ColorConverter ? null : WebpBufferPool.Shared.Rent(width * 3);
-
-        try
+        public RgbRowWriter(
+            byte[] yPlane,
+            int yStride,
+            byte[] uPlane,
+            byte[] vPlane,
+            int uvStride,
+            int mbCols,
+            int mbRows,
+            int width,
+            int height,
+            Func<int, int, int> yOff,
+            Func<int, int, int> uOff,
+            byte[]? alphaPlane,
+            WebpOutput? target)
         {
-            for (int y = 0; y < height; y++)
+            _yPlane = yPlane;
+            _uPlane = uPlane;
+            _vPlane = vPlane;
+            _yStride = yStride;
+            _uvStride = uvStride;
+            _width = width;
+            _height = height;
+            _yOff = yOff;
+            _alphaPlane = alphaPlane;
+            _target = target;
+            _converter = Vp8ColorConverterSelector.Instance;
+            _bytesPerPixel = alphaPlane is null ? 3 : 4;
+            _rowBytes = width * _bytesPerPixel;
+            _chromaWidth = mbCols * 8;
+            _chromaHeight = mbRows * 8;
+            _uBase = uOff(0, 0);
+
+            // With a caller-provided destination there is no array at all: rows are written where they belong. Otherwise it is
+            // exactly width * height * bytesPerPixel bytes (callers, including tests, rely on Pixels.Length being exact), so a
+            // plain heap allocation, uninitialized because every byte of it is written.
+            _output = target is null
+                ? GC.AllocateUninitializedArray<byte>(checked((int)((long)width * height * _bytesPerPixel)))
+                : [];
+
+            // Two full-width scratch rows for the upsampled chroma, rented rather than allocated: at most 16383 bytes each, so
+            // they stay resident in L1 across the whole frame.
+            _uRow = WebpBufferPool.Shared.Rent(width);
+            _vRow = WebpBufferPool.Shared.Rent(width);
+
+            // Only rented when alpha is present with a converter that cannot splice it itself.
+            _rgbRow = alphaPlane is null || _converter is Sse2Vp8ColorConverter ? null : WebpBufferPool.Shared.Rent(width * 3);
+        }
+
+        /// <summary>Converts every line below the ones already converted and above <paramref name="endRow"/>.</summary>
+        public void ConvertTo(int endRow)
+        {
+            for (int y = _nextRow; y < endRow; y++)
             {
-                // Every output row interpolates between exactly two chroma rows: the one it sits closest to,
-                // and its neighbour on the side the output row leans toward (clamped at the plane edges,
-                // reproducing libwebp's edge replication). Resolving those once per row is what lets the
-                // upsampler and converter run as row kernels instead of per-pixel calls.
+                // Every output row interpolates between exactly two chroma rows: the one it sits closest to, and its neighbour
+                // on the side the output row leans toward (clamped at the plane edges, reproducing libwebp's edge replication).
+                // Resolving those once per row is what lets the upsampler and converter run as row kernels.
                 int nearRow = y >> 1;
-                int farRow = Clamp((y >> 1) + (((y & 1) == 1) ? 1 : -1), chromaHeight - 1);
+                int farRow = Clamp((y >> 1) + (((y & 1) == 1) ? 1 : -1), _chromaHeight - 1);
 
-                var uNear = uPlane.AsSpan(uBase + (nearRow * uvStride), chromaWidth);
-                var uFar = uPlane.AsSpan(uBase + (farRow * uvStride), chromaWidth);
-                var vNear = vPlane.AsSpan(uBase + (nearRow * uvStride), chromaWidth);
-                var vFar = vPlane.AsSpan(uBase + (farRow * uvStride), chromaWidth);
+                var uNear = _uPlane.AsSpan(_uBase + (nearRow * _uvStride), _chromaWidth);
+                var uFar = _uPlane.AsSpan(_uBase + (farRow * _uvStride), _chromaWidth);
+                var vNear = _vPlane.AsSpan(_uBase + (nearRow * _uvStride), _chromaWidth);
+                var vFar = _vPlane.AsSpan(_uBase + (farRow * _uvStride), _chromaWidth);
 
-                Vp8ChromaUpsampler.UpsampleRow(uNear, uFar, uRow, width, chromaWidth);
-                Vp8ChromaUpsampler.UpsampleRow(vNear, vFar, vRow, width, chromaWidth);
+                Vp8ChromaUpsampler.UpsampleRow(uNear, uFar, _uRow, _width, _chromaWidth);
+                Vp8ChromaUpsampler.UpsampleRow(vNear, vFar, _vRow, _width, _chromaWidth);
 
-                var yRow = yPlane.AsSpan(yOff(0, y), width);
-                var outputRow = target is { } destination ? destination.Row(y, rowBytes) : output.AsSpan(y * rowBytes, rowBytes);
+                var yRow = _yPlane.AsSpan(_yOff(0, y), _width);
+                var outputRow = _target is { } destination ? destination.Row(y, _rowBytes) : _output.AsSpan(y * _rowBytes, _rowBytes);
 
-                if (alphaPlane is null)
+                if (_alphaPlane is null)
                 {
-                    converter.ConvertRow(yRow, uRow, vRow, outputRow, width);
+                    _converter.ConvertRow(yRow, _uRow, _vRow, outputRow, _width);
                 }
-                else if (converter is Sse2Vp8ColorConverter sse2Converter)
+                else if (_converter is Sse2Vp8ColorConverter sse2Converter)
                 {
-                    sse2Converter.ConvertRowWithAlpha(yRow, uRow, vRow, alphaPlane.AsSpan(y * width, width), outputRow, width);
+                    sse2Converter.ConvertRowWithAlpha(yRow, _uRow, _vRow, _alphaPlane.AsSpan(y * _width, _width), outputRow, _width);
                 }
                 else
                 {
-                    converter.ConvertRow(yRow, uRow, vRow, rgbRow!.AsSpan(0, width * 3), width);
-                    SpliceAlphaRow(rgbRow, alphaPlane.AsSpan(y * width, width), outputRow, width);
+                    _converter.ConvertRow(yRow, _uRow, _vRow, _rgbRow!.AsSpan(0, _width * 3), _width);
+                    SpliceAlphaRow(_rgbRow, _alphaPlane.AsSpan(y * _width, _width), outputRow, _width);
                 }
             }
-        }
-        finally
-        {
-            WebpBufferPool.Shared.Return(uRow);
-            WebpBufferPool.Shared.Return(vRow);
 
-            if (rgbRow is not null)
+            _nextRow = Math.Max(_nextRow, endRow);
+        }
+
+        public Vp8DecodedFrame Finish() => new()
+        {
+            Width = _width,
+            Height = _height,
+            PixelFormat = _alphaPlane is null ? PixelFormat.Rgb24 : PixelFormat.Rgba32,
+            Pixels = _output,
+        };
+
+        public void Dispose()
+        {
+            WebpBufferPool.Shared.Return(_uRow);
+            WebpBufferPool.Shared.Return(_vRow);
+            if (_rgbRow is not null)
             {
-                WebpBufferPool.Shared.Return(rgbRow);
+                WebpBufferPool.Shared.Return(_rgbRow);
             }
         }
-
-        return new Vp8DecodedFrame
-        {
-            Width = width,
-            Height = height,
-            PixelFormat = alphaPlane is null ? PixelFormat.Rgb24 : PixelFormat.Rgba32,
-            Pixels = output,
-        };
     }
 
     /// <summary>Interleaves one already-converted RGB24 row with one alpha row into an RGBA32 row -- the per-row equivalent of what <c>WebpDecoder.InterleaveRgba</c> used to do over the whole image at once.</summary>
