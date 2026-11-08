@@ -49,7 +49,11 @@ internal sealed class DecodedFrame
         {
             foreach (var plane in planes)
             {
-                System.Buffers.ArrayPool<byte>.Shared.Return(plane);
+                // A grayscale plane doubling as the finished image belongs to the image pool, and goes back with StreamedOutput below.
+                if (!ReferenceEquals(plane, StreamedOutput))
+                {
+                    System.Buffers.ArrayPool<byte>.Shared.Return(plane);
+                }
             }
 
             StreamedPlanes = null;

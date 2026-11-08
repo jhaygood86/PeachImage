@@ -46,6 +46,9 @@ internal static class StreamingBaselineScan
         var buffers = new JpegCoefficientBuffer?[2][] { new JpegCoefficientBuffer?[componentCount], new JpegCoefficientBuffer?[componentCount] };
         var pending = new Task?[2];
 
+        bool grayIsOutput = colorSpace == JpegColorSpace.Grayscale && frameComponents.Length == 1
+            && frameComponents[0].ActualWidthInSamples == imageWidth && frameComponents[0].ActualHeightInSamples == imageHeight;
+
         // Work behind the decode runs on its own threads only when that cannot break the caller's limits: the decoding thread plus
         // a transform task plus a conversion task is three threads, so a lower cap, or a scheduler of the caller's own (which
         // may be bounded or may not run a task until asked), keeps everything on the calling thread.
@@ -60,7 +63,16 @@ internal static class StreamingBaselineScan
             for (int i = 0; i < componentCount; i++)
             {
                 var component = frameComponents[i];
-                planes[i] = ArrayPool<byte>.Shared.Rent(component.ActualWidthInSamples * component.ActualHeightInSamples);
+                if (grayIsOutput)
+                {
+                    // A grayscale plane of the image's own size, row for row, is already the finished image.
+                    planes[i] = ImageBufferPool.Shared.Rent(imageWidth * imageHeight);
+                }
+                else
+                {
+                    planes[i] = ArrayPool<byte>.Shared.Rent(component.ActualWidthInSamples * component.ActualHeightInSamples);
+                }
+
                 dequant[i] = DctKernelSelector.Inverse.PrepareDequantTable(component.QuantizationTable.Values);
 
                 int blocksWide = mcusAcross * component.BlocksPerMcuHorizontal;
@@ -70,7 +82,7 @@ internal static class StreamingBaselineScan
             }
 
             // Rows are converted behind the transforms when the frame's shape allows it.
-            if (colorSpace is JpegColorSpace.YCbCr or JpegColorSpace.Grayscale)
+            if (!grayIsOutput && colorSpace is JpegColorSpace.YCbCr or JpegColorSpace.Grayscale)
             {
                 int bytesPerPixel = colorSpace == JpegColorSpace.Grayscale ? 1 : 3;
                 convertedBuffer = ImageBufferPool.Shared.Rent(checked(imageWidth * imageHeight * bytesPerPixel));
@@ -141,7 +153,7 @@ internal static class StreamingBaselineScan
             Complete(ref pending[0]);
             Complete(ref pending[1]);
             Complete(ref lastConvert);
-            output = convertedBuffer;
+            output = grayIsOutput ? planes[0] : convertedBuffer;
             convertedBuffer = null;
             succeeded = true;
             return planes;
@@ -170,7 +182,16 @@ internal static class StreamingBaselineScan
 
                 foreach (var plane in planes)
                 {
-                    if (plane is not null)
+                    if (plane is null)
+                    {
+                        continue;
+                    }
+
+                    if (grayIsOutput)
+                    {
+                        ImageBufferPool.Shared.Return(plane);
+                    }
+                    else
                     {
                         ArrayPool<byte>.Shared.Return(plane);
                     }

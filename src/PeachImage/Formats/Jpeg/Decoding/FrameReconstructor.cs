@@ -44,6 +44,12 @@ internal static class FrameReconstructor
         {
             // Rows were upsampled and converted while the scan decoded; the image is already built.
             frame.StreamedOutput = null;
+            if (frame.StreamedPlanes is { Length: 1 } onlyPlane && ReferenceEquals(onlyPlane[0], finished))
+            {
+                // The grayscale plane was the image buffer; the image owns it now, so the frame must not return it as a plane.
+                frame.StreamedPlanes = null;
+            }
+
             return Image.FromBuffer(width, height, frame.ColorSpace == JpegColorSpace.Grayscale ? PixelFormat.Gray8 : PixelFormat.Rgb24, finished, owned: true);
         }
 
