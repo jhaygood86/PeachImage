@@ -33,6 +33,21 @@ internal static class WebpProfileHarness
     /// <summary>Runs <paramref name="args"/>[1] scenario for <paramref name="args"/>[2] iterations. Returns a process exit code.</summary>
     public static int Run(string[] args)
     {
+        if (args.Length >= 2 && args[1].Equals("hash", StringComparison.OrdinalIgnoreCase))
+        {
+            // Prints a full-pixel SHA-256 per scenario, so an optimization can be checked for bit-identical output.
+            foreach (var (name, asset) in Scenarios)
+            {
+                byte[] file = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Assets", asset));
+                using var s = new MemoryStream(file);
+                var img = WebpDecoder.Decode(s);
+                string hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(img.GetPixelSpan()))[..16];
+                Console.WriteLine($"{name}: {hash}");
+            }
+
+            return 0;
+        }
+
         if (args.Length < 2 || !Scenarios.TryGetValue(args[1], out string? assetName))
         {
             Console.Error.WriteLine($"usage: profile <{string.Join('|', Scenarios.Keys)}> [iterations]");

@@ -1,4 +1,6 @@
 ﻿using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8;
 
@@ -99,85 +101,147 @@ internal static class Vp8CoefficientDecoder
         int acQuant,
         Span<short> output)
     {
+        // Every offset below is built from a plane type in [0,3], a band in [0,7] and a context in [0,2];
+        // checking the table length once is what lets the per-bit probability reads skip bounds checks.
+        if (probabilities.Length != Vp8CoefficientProbabilities.FlatLength || output.Length < 16 || (uint)planeType > 3)
+        {
+            throw new ArgumentException("Invalid coefficient decode arguments.");
+        }
+
+        // The loop is deliberately lean: it keeps only the bit-reader state, the position, the context and two
+        // references live. Dequantization, the zigzag/band tables and the quantizers stay out of it (tables are
+        // constant data, the multiply is one vector op afterward), because with all of that live as well the
+        // JIT runs out of registers and spills the bit-reader state to the stack, which puts a store-forwarding
+        // round trip on every bool decode.
+        ref byte typeBase = ref Unsafe.Add(
+            ref MemoryMarshal.GetArrayDataReference(probabilities),
+            Vp8CoefficientProbabilities.FlatOffset(planeType, 0, 0));
+        ref short outputBase = ref MemoryMarshal.GetReference(output);
+        ReadOnlySpan<byte> bandOffsets = BandOffsets;
+        ReadOnlySpan<byte> zigZag = ZigZag;
+
+        var state = br.Load();
         int ctx = firstContext;
         int n = first;
+        int result = 16;
 
         while (n < 16)
         {
-            int band = Vp8CoefficientTrees.PositionToBand[n];
-            var p = ProbabilitiesFor(probabilities, planeType, band, ctx);
-            if (br.GetBit(p[0]) == 0)
+            ref byte p = ref Unsafe.Add(ref typeBase, bandOffsets[n] + (ctx * Vp8CoefficientProbabilities.NumProbabilities));
+            if (br.GetBit(ref state, p) == 0)
             {
-                return n;
+                result = n;
+                break;
             }
 
-            while (br.GetBit(p[1]) == 0)
+            bool reachedEnd = false;
+            while (br.GetBit(ref state, Unsafe.Add(ref p, 1)) == 0)
             {
                 n++;
                 if (n == 16)
                 {
-                    return 16;
+                    reachedEnd = true;
+                    break;
                 }
 
-                ctx = 0;
-                band = Vp8CoefficientTrees.PositionToBand[n];
-                p = ProbabilitiesFor(probabilities, planeType, band, ctx);
+                p = ref Unsafe.Add(ref typeBase, bandOffsets[n]);
+            }
+
+            if (reachedEnd)
+            {
+                break;
             }
 
             int magnitude;
             int nextCtx;
-            if (br.GetBit(p[2]) == 0)
+            if (br.GetBit(ref state, Unsafe.Add(ref p, 2)) == 0)
             {
                 magnitude = 1;
                 nextCtx = 1;
             }
             else
             {
-                magnitude = DecodeLargeValue(br, p);
+                magnitude = DecodeLargeValue(br, ref state, ref p);
                 nextCtx = 2;
             }
 
-            int value = br.GetFlag() ? -magnitude : magnitude;
-            int quant = n == 0 ? dcQuant : acQuant;
-            output[Vp8ZigZag.Order[n]] = (short)(value * quant);
+            Unsafe.Add(ref outputBase, zigZag[n]) = (short)(br.GetBit(ref state, 128) != 0 ? -magnitude : magnitude);
 
             n++;
             ctx = nextCtx;
         }
 
-        return 16;
+        br.Store(state);
+
+        if (result > first)
+        {
+            Dequantize(output, first == 0 ? dcQuant : 1, acQuant);
+        }
+
+        return result;
     }
 
-    /// <summary>The 11 token-tree node probabilities for one (plane type, band, context) triple.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ReadOnlySpan<byte> ProbabilitiesFor(byte[] probabilities, int planeType, int band, int ctx) =>
-        probabilities.AsSpan(
-            Vp8CoefficientProbabilities.FlatOffset(planeType, band, ctx),
-            Vp8CoefficientProbabilities.NumProbabilities);
+    /// <summary>
+    /// Scales a block's raw token values by their quantizer: <paramref name="dcQuant"/> for raster position 0 and
+    /// <paramref name="acQuant"/> for the rest. Truncating each product to 16 bits is what the per-coefficient
+    /// <c>(short)(value * quant)</c> this replaces did, and what a 16-bit low multiply does.
+    /// </summary>
+    private static void Dequantize(Span<short> block, int dcQuant, int acQuant)
+    {
+        ref short origin = ref MemoryMarshal.GetReference(block);
 
-    private static int DecodeLargeValue(Vp8BoolDecoder br, ReadOnlySpan<byte> p)
+        if (Vector128.IsHardwareAccelerated)
+        {
+            var low = Vector128.LoadUnsafe(ref origin);
+            var high = Vector128.LoadUnsafe(ref origin, 8);
+            var ac = Vector128.Create((short)acQuant);
+            var dc = Vector128.WithElement(ac, 0, (short)dcQuant);
+            (low * dc).StoreUnsafe(ref origin);
+            (high * ac).StoreUnsafe(ref origin, 8);
+            return;
+        }
+
+        Unsafe.Add(ref origin, 0) = (short)(Unsafe.Add(ref origin, 0) * dcQuant);
+        for (int i = 1; i < 16; i++)
+        {
+            Unsafe.Add(ref origin, i) = (short)(Unsafe.Add(ref origin, i) * acQuant);
+        }
+    }
+
+    /// <summary>Probability-table offset (band * 33) of each scan position 0..16, i.e. <c>PositionToBand</c> pre-multiplied by the 3 contexts x 11 probabilities per band.</summary>
+    private static ReadOnlySpan<byte> BandOffsets =>
+    [
+        0, 33, 66, 99, 198, 132, 165, 198, 198, 198, 198, 198, 198, 198, 198, 231,
+        0,
+    ];
+
+    /// <summary>Scan position to raster position, <see cref="Vp8ZigZag.Order"/> as constant data.</summary>
+    private static ReadOnlySpan<byte> ZigZag => [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int DecodeLargeValue(Vp8BoolDecoder br, ref Vp8BoolDecoder.State state, ref byte p)
     {
         int v;
-        if (br.GetBit(p[3]) == 0)
+        if (br.GetBit(ref state, Unsafe.Add(ref p, 3)) == 0)
         {
-            v = br.GetBit(p[4]) == 0 ? 2 : 3 + br.GetBit(p[5]);
+            v = br.GetBit(ref state, Unsafe.Add(ref p, 4)) == 0 ? 2 : 3 + br.GetBit(ref state, Unsafe.Add(ref p, 5));
         }
-        else if (br.GetBit(p[6]) == 0)
+        else if (br.GetBit(ref state, Unsafe.Add(ref p, 6)) == 0)
         {
-            if (br.GetBit(p[7]) == 0)
+            if (br.GetBit(ref state, Unsafe.Add(ref p, 7)) == 0)
             {
-                v = 5 + br.GetBit(159);
+                v = 5 + br.GetBit(ref state, 159);
             }
             else
             {
-                v = 7 + (2 * br.GetBit(165));
-                v += br.GetBit(145);
+                v = 7 + (2 * br.GetBit(ref state, 165));
+                v += br.GetBit(ref state, 145);
             }
         }
         else
         {
-            int bit1 = br.GetBit(p[8]);
-            int bit0 = br.GetBit(p[9 + bit1]);
+            int bit1 = br.GetBit(ref state, Unsafe.Add(ref p, 8));
+            int bit0 = br.GetBit(ref state, Unsafe.Add(ref p, 9 + bit1));
             int cat = (2 * bit1) + bit0;
             byte[] table = cat switch
             {
@@ -190,7 +254,7 @@ internal static class Vp8CoefficientDecoder
             v = 0;
             foreach (byte prob in table)
             {
-                v += v + br.GetBit(prob);
+                v += v + br.GetBit(ref state, prob);
             }
 
             v += 3 + (8 << cat);

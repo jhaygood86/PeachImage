@@ -1,6 +1,7 @@
 ﻿using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using PeachImage.Formats.Webp.Kernels;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8L;
@@ -90,7 +91,17 @@ internal static class Vp8LPredictorTransform
             case 8: Run<Average2TopLeftTopPredictor>(pixels, width, rowBase, xStart, runLength); return;
             case 9: Run<Average2TopTopRightPredictor>(pixels, width, rowBase, xStart, runLength); return;
             case 10: Run<Average4Predictor>(pixels, width, rowBase, xStart, runLength); return;
-            case 11: Run<SelectPredictor>(pixels, width, rowBase, xStart, runLength); return;
+            case 11:
+                if (Sse2.IsSupported)
+                {
+                    RunSelectSse2(pixels, width, rowBase, xStart, runLength);
+                }
+                else
+                {
+                    Run<SelectPredictor>(pixels, width, rowBase, xStart, runLength);
+                }
+
+                return;
             case 12: Run<ClampedAddSubtractFullPredictor>(pixels, width, rowBase, xStart, runLength); return;
             case 13: Run<ClampedAddSubtractHalfPredictor>(pixels, width, rowBase, xStart, runLength); return;
 
@@ -146,6 +157,50 @@ internal static class Vp8LPredictorTransform
 
             topLeft = top;
             top = topRight;
+        }
+    }
+
+    /// <summary>
+    /// Predictor 11 (the mode photographic lossless images use almost exclusively) with the whole recurrence
+    /// kept in vector registers. The output pixel feeds the next pixel's prediction, so the loop is a
+    /// latency chain, and the scalar form paid for it with GPR/XMM transfers and a SWAR add on every step.
+    /// Here the previous output never leaves its XMM register: <c>psadbw</c> measures both candidates'
+    /// distances to the top-left pixel at once, a compare mask picks left or top, and <c>paddb</c> adds the
+    /// residual. The same arrangement as libwebp's <c>PredictorAdd11_SSE2</c>; results are bit-identical to
+    /// <see cref="SelectScalar"/>.
+    /// </summary>
+    private static void RunSelectSse2(Span<uint> pixels, int width, int rowBase, int xStart, int runLength)
+    {
+        int start = rowBase + xStart;
+        if (xStart < 1 || runLength < 1 || rowBase < width || start + runLength > pixels.Length || xStart + runLength > width)
+        {
+            throw new WebpDecodingException("Internal error: VP8L predictor run is out of bounds.");
+        }
+
+        ref uint origin = ref MemoryMarshal.GetReference(pixels);
+        var left = Vector128.CreateScalar(Unsafe.Add(ref origin, start - 1));
+
+        for (int i = 0; i < runLength; i++)
+        {
+            ref uint current = ref Unsafe.Add(ref origin, start + i);
+            var top = Vector128.CreateScalar(Unsafe.Add(ref origin, start + i - width));
+            var topLeft = Vector128.CreateScalar(Unsafe.Add(ref origin, start + i - width - 1));
+
+            // [top, left] and [topLeft, topLeft] as 64-bit lanes (the upper 32 bits of each are zero), so
+            // psadbw yields |top - topLeft| in 32-bit lane 0 and |left - topLeft| in lane 2.
+            var operands = Sse2.UnpackLow(top.AsUInt64(), left.AsUInt64()).AsByte();
+            var reference = Sse2.UnpackLow(topLeft.AsUInt64(), topLeft.AsUInt64()).AsByte();
+            var sums = Sse2.SumAbsoluteDifferences(operands, reference).AsInt32();
+
+            var distanceToTop = Sse2.Shuffle(sums, 0x00);
+            var distanceToLeft = Sse2.Shuffle(sums, 0xAA);
+
+            // Select returns top unless left is strictly farther from the top-left pixel.
+            var pickLeft = Sse2.CompareGreaterThan(distanceToLeft, distanceToTop).AsUInt32();
+            var prediction = Vector128.ConditionalSelect(pickLeft, left, top);
+
+            left = Sse2.Add(prediction.AsByte(), Vector128.CreateScalar(current).AsByte()).AsUInt32();
+            current = left.ToScalar();
         }
     }
 
@@ -285,6 +340,18 @@ internal static class Vp8LPredictorTransform
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint Select(uint a, uint b, uint c)
     {
+        if (Sse2.IsSupported)
+        {
+            // psadbw is a horizontal sum of eight absolute byte differences in one instruction (what libwebp's
+            // SSE2 predictor 11 uses): lane 0 gets |a - c| summed over the four channels, lane 1 gets |b - c|.
+            // This sits on the loop-carried dependency chain (b is the previous output pixel), so the shorter
+            // latency is the point -- it replaces a max/min/sub/extract/fold sequence.
+            var sadOperands = Vector128.Create((ulong)a, (ulong)b).AsByte();
+            var sadReference = Vector128.Create((ulong)c, (ulong)c).AsByte();
+            var sums = Sse2.SumAbsoluteDifferences(sadOperands, sadReference).AsUInt64();
+            return sums.GetElement(1) <= sums.ToScalar() ? a : b;
+        }
+
         if (!Vector128.IsHardwareAccelerated)
         {
             return SelectScalar(a, b, c);

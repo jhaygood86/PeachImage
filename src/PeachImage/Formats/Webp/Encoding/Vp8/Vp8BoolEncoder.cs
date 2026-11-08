@@ -16,9 +16,9 @@ namespace PeachImage.Formats.Webp.Encoding.Vp8;
 /// <see cref="Decoding.Vp8.Vp8BoolDecoder"/> share the same range bias: both store <c>range</c> as the true
 /// range minus 1 (0..254 representing a true range of 1..255), and both compute
 /// <c>split = (range * probability) &gt;&gt; 8</c> against that biased value — so <c>split</c> here is exactly
-/// what <see cref="Decoding.Vp8.Vp8BoolDecoder.GetBit"/>'s local <c>split</c> variable is before its own +1
+/// what <see cref="Decoding.Vp8.Vp8BoolDecoder.GetBit(int)"/>'s local <c>split</c> variable is before its own +1
 /// adjustments, and the two sides' range/value bookkeeping line up term for term. See
-/// <see cref="Decoding.Vp8.Vp8BoolDecoder.GetBit"/>'s remarks for the algebra.
+/// <see cref="Decoding.Vp8.Vp8BoolDecoder.GetBit(int)"/>'s remarks for the algebra.
 /// </para>
 /// <para>
 /// The one piece with no decoder analogue is carry propagation in <see cref="Flush"/>: bytes equal to 0xFF are

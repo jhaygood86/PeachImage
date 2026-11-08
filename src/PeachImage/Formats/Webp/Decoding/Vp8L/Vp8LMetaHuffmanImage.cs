@@ -22,6 +22,9 @@ internal sealed class Vp8LMetaHuffmanImage
         _subsampleBits = subsampleBits;
     }
 
+    /// <summary>Mask of the in-tile column bits: the group can only change when <c>(x &amp; TileMask) == 0</c>.</summary>
+    public int TileMask => (1 << _subsampleBits) - 1;
+
     /// <summary>Which <see cref="Vp8LHuffmanGroup"/> index applies to the tile containing pixel (<paramref name="x"/>, <paramref name="y"/>).</summary>
     public int GetGroupIndex(int x, int y) => _groupIndexPerTile[(_tileXSize * (y >> _subsampleBits)) + (x >> _subsampleBits)];
 

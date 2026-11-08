@@ -25,6 +25,18 @@ internal sealed class Vp8LColorCache
     /// <summary>Records <paramref name="argb"/> at its hash slot (overwriting whatever was there before — a plain, non-chaining cache).</summary>
     public void Insert(uint argb) => _entries[Hash(argb)] = argb;
 
+    /// <summary>Inserts <c>pixels[start..end)</c> in order — the decoder defers inserts until a cache-index code actually needs the cache, which is equivalent because only a lookup can observe it.</summary>
+    public void InsertRange(uint[] pixels, int start, int end)
+    {
+        uint[] entries = _entries;
+        int shift = _hashShift;
+        for (int i = start; i < end; i++)
+        {
+            uint argb = pixels[i];
+            entries[(int)((argb * HashMultiplier) >> shift)] = argb;
+        }
+    }
+
     /// <summary>Returns the ARGB value stored at cache index <paramref name="index"/> (already decoded from the bitstream — not a hash lookup).</summary>
     public uint Lookup(int index) => _entries[index];
 

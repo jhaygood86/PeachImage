@@ -56,11 +56,21 @@ internal static class Vp8LPixelDecoder
         var pixels = rentFromPool ? WebpBufferPool.SharedUInt32.Rent((int)pixelCount) : new uint[pixelCount];
         var activeGroup = groups[0];
 
-        int col = 0;
-        int row = 0;
-        long pos = 0;
+        // The register-resident fast loop decodes everything except the last few bytes of the stream; the
+        // general loop below then finishes (and handles truncation) exactly as it always did.
+        var cursor = default(Vp8LPixelCursor);
+        Vp8LFastPixelLoop.Run(reader, pixels, width, (int)pixelCount, groups, metaImage, colorCache, colorCacheLimit, ref cursor);
 
-        while (pos < pixelCount)
+        int col = cursor.Col;
+        int row = cursor.Row;
+        long pos = cursor.Pos;
+        bool corrupt = cursor.Corrupt;
+        if (metaImage != null && pos < pixelCount)
+        {
+            activeGroup = groups[metaImage.GetGroupIndex(col, row)];
+        }
+
+        while (!corrupt && pos < pixelCount)
         {
             if (reader.IsOverBudget)
             {

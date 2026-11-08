@@ -609,8 +609,9 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         IVp8ColorConverter converter = Vp8ColorConverterSelector.Instance;
         int bytesPerPixel = alphaPlane is null ? 3 : 4;
         // Exactly width * height * bytesPerPixel bytes -- callers (including tests) rely on Pixels.Length
-        // being exact, so this is a plain heap allocation, not a pool rental.
-        byte[] output = new byte[(long)width * height * bytesPerPixel];
+        // being exact, so this is a plain heap allocation, not a pool rental. Uninitialized, because the row
+        // loop below writes every byte of it; zeroing 6 MB first is pure wasted bandwidth.
+        byte[] output = GC.AllocateUninitializedArray<byte>(checked((int)((long)width * height * bytesPerPixel)));
 
         int chromaWidth = mbCols * 8;
         int chromaHeight = mbRows * 8;
@@ -623,7 +624,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
 
         // Only rented when alpha is present -- see the type's remarks. Empty/unused in the common opaque case,
         // so that path allocates and touches nothing beyond what it always has.
-        byte[]? rgbRow = alphaPlane is null ? null : WebpBufferPool.Shared.Rent(width * 3);
+        byte[]? rgbRow = alphaPlane is null || converter is Sse2Vp8ColorConverter ? null : WebpBufferPool.Shared.Rent(width * 3);
 
         try
         {
@@ -650,9 +651,13 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                 {
                     converter.ConvertRow(yRow, uRow, vRow, output.AsSpan(y * width * 3, width * 3), width);
                 }
+                else if (converter is Sse2Vp8ColorConverter sse2Converter)
+                {
+                    sse2Converter.ConvertRowWithAlpha(yRow, uRow, vRow, alphaPlane.AsSpan(y * width, width), output.AsSpan(y * width * 4, width * 4), width);
+                }
                 else
                 {
-                    converter.ConvertRow(yRow, uRow, vRow, rgbRow.AsSpan(0, width * 3), width);
+                    converter.ConvertRow(yRow, uRow, vRow, rgbRow!.AsSpan(0, width * 3), width);
                     SpliceAlphaRow(rgbRow, alphaPlane.AsSpan(y * width, width), output.AsSpan(y * width * 4, width * 4), width);
                 }
             }

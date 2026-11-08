@@ -2,6 +2,7 @@
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8;
 
@@ -20,9 +21,9 @@ namespace PeachImage.Formats.Webp.Decoding.Vp8;
 /// </para>
 /// <para>
 /// Follows libwebp's <c>src/utils/bit_reader_inl_utils.h</c> rather than the RFC's reference decoder. The two
-/// differences that matter are both in <see cref="GetBit"/>: renormalization is a single count-leading-zeros
+/// differences that matter are both in <see cref="GetBit(int)"/>: renormalization is a single count-leading-zeros
 /// shift instead of a loop that doubles one bit at a time, and the byte supply is refilled 56 bits at a time
-/// instead of one byte at a time. See <see cref="GetBit"/>'s remarks for why that produces exactly the same bits
+/// instead of one byte at a time. See <see cref="GetBit(int)"/>'s remarks for why that produces exactly the same bits
 /// as the reference form. Reads past the end of this decoder's byte range synthesize zero bytes rather than
 /// throwing, per spec (a partition may be under-read near EOF by design of the entropy coder).
 /// </para>
@@ -137,7 +138,7 @@ internal sealed class Vp8BoolDecoder
 
     /// <summary>Pulls <see cref="RefillBits"/> fresh bits into the shift register, or falls back to the tail path near the end of the range.</summary>
     /// <remarks>
-    /// Kept out of <see cref="GetBit"/> so the hot path stays a single predictable branch. The 8-byte load is in
+    /// Kept out of <see cref="GetBit(int)"/> so the hot path stays a single predictable branch. The 8-byte load is in
     /// bounds because the constructor validated <c>_start + _length &lt;= _buffer.Length</c> and this path
     /// requires eight more bytes before the range's end — bounding it by <see cref="_length"/> rather than by the
     /// array is what matters, since running into the *next* partition would silently decode wrong bits rather
@@ -180,6 +181,97 @@ internal sealed class Vp8BoolDecoder
         ulong incoming = _pos < _length ? _buffer[_start + _pos++] : 0u;
         _value = incoming | (_value << 8);
         _bits += 8;
+    }
+
+    /// <summary>
+    /// The decoder's mutable state as a small value type, so a hot loop can keep it in registers: with the state
+    /// in fields of this object, every <see cref="GetBit(int)"/> loads and stores <c>_value</c>/<c>_bits</c>/<c>_range</c>
+    /// through memory, which puts a store-forwarding round trip on the loop-carried dependency of each bit.
+    /// Four fields is also what the JIT will promote to registers. Pair <see cref="Load"/> with
+    /// <see cref="Store"/>; the decoder must not be used directly in between.
+    /// </summary>
+    internal struct State
+    {
+        public ulong Value;
+        public int Bits;
+        public uint Range;
+        public int Pos;
+    }
+
+    /// <summary>Copies the decoder's state out for a register-resident run; see <see cref="State"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public State Load() => new() { Value = _value, Bits = _bits, Range = _range, Pos = _pos };
+
+    /// <summary>Writes back a state obtained from <see cref="Load"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Store(in State state)
+    {
+        _value = state.Value;
+        _bits = state.Bits;
+        _range = state.Range;
+        _pos = state.Pos;
+    }
+
+    /// <summary><see cref="GetBit(int)"/> against a <see cref="State"/> held by the caller. Bit-for-bit the same arithmetic.</summary>
+    /// <remarks>
+    /// The refill is inlined for the bulk case and only the rare end-of-range byte goes through a call that takes
+    /// and returns plain scalars. Passing <paramref name="state"/> itself to (or returning it from) a call would
+    /// make the caller's local address-exposed, and an address-exposed local lives on the stack instead of in
+    /// registers, which is exactly what this type exists to avoid.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int GetBit(ref State state, int probability)
+    {
+        uint range = state.Range;
+        if (state.Bits < 0)
+        {
+            if (state.Pos + (sizeof(ulong) - 1) < _length)
+            {
+                ulong incoming = BinaryPrimitives.ReadUInt64BigEndian(
+                    MemoryMarshal.CreateReadOnlySpan(ref _buffer[_start + state.Pos], sizeof(ulong)));
+                state.Pos += RefillBits >> 3;
+                state.Value = (incoming >> (64 - RefillBits)) | (state.Value << RefillBits);
+                state.Bits += RefillBits;
+            }
+            else
+            {
+                // Inline rather than a call: a call in the hot loop forces the register-resident state into
+                // callee-saved registers, and with this much live state the allocator spills it instead.
+                ulong tail = 0;
+                if (state.Pos < _length)
+                {
+                    tail = _buffer[_start + state.Pos++];
+                }
+
+                state.Value = tail | (state.Value << 8);
+                state.Bits += 8;
+            }
+        }
+
+        int pos = state.Bits;
+        uint split = (range * (uint)probability) >> 8;
+        uint value = (uint)(state.Value >> pos);
+
+        int bit;
+        if (value > split)
+        {
+            bit = 1;
+            range -= split;
+            state.Value -= (ulong)(split + 1) << pos;
+        }
+        else
+        {
+            bit = 0;
+            range = split + 1;
+        }
+
+        // range is in [1,255], so 7 - floor(log2(range)) is lzcnt(range) - 24: one op fewer on the dependency chain.
+        int shift = BitOperations.LeadingZeroCount(range) - 24;
+        range <<= shift;
+        state.Bits -= shift;
+        state.Range = range - 1;
+
+        return bit;
     }
 
     /// <summary>Reads a single bit with a fixed 50/50 probability (probability = 128).</summary>
