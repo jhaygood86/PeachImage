@@ -501,8 +501,8 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 | PNG 32bpp RGBA | 23.01 ms | 21.42 ms | 1.08× | 13 KB | 16 KB |
 | WebP lossless | 20.83 ms | 19.66 ms | 1.06× | 4.5 MB | 147 B |
 | WebP lossless + alpha | 25.66 ms | 20.08 ms | 1.28× | 4.5 MB | 147 B |
-| WebP lossy | 20.44 ms | 14.48 ms | 1.41× | 6.6 MB | 74 B |
-| WebP lossy + alpha | 22.99 ms | 14.50 ms | 1.59× | 10.5 MB | 110 B |
+| WebP lossy | 18.32 ms | 14.14 ms | 1.30× | 6.6 MB | 88 B |
+| WebP lossy + alpha | 19.56 ms | 14.57 ms | 1.34× | 10.5 MB | 94 B |
 
 The JPEG rows carry a wider error (about ±0.7 ms at 1080p) than the other formats in this run.
 
@@ -521,7 +521,7 @@ The JPEG rows carry a wider error (about ±0.7 ms at 1080p) than the other forma
 | JBIG2 | none (no shared build of jbig2dec) | 5.92 ms arithmetic / 3.04 ms MMR for 850x1100 | not implemented (decode-only) |
 | CCITT fax | libtiff | 2.47× (G4 TIFF), 3.66× (G3 TIFF) | not implemented (decode-only) |
 | JPEG XL | libjxl | 1.10×–1.71× | lossless 0.07×–0.31× (faster); lossy 1.14×–1.28× at effort 5, 0.69× vs. effort 7; lossless size within 2% of libjxl effort 3; lossy files within a few percent of libjxl effort 7 at equal SSIMULACRA2 |
-| Sdcb.SimdCodecs (managed) | SimdCodecs | JPEG 1.54×–2.10×; PNG 0.99×–1.08×; WebP 1.06×–1.59× | not measured |
+| Sdcb.SimdCodecs (managed) | SimdCodecs | JPEG 1.54×–2.10×; PNG 0.99×–1.08×; WebP 1.06×–1.34× | not measured |
 | Resize | SkiaSharp | — | Downscale: 1.24×–2.99×; Upscale: 1.67× (NearestNeighbor) or **0.23×–0.81×** (Bilinear/cubic family, faster than SkiaSharp) |
 
 Against SkiaSharp, JPEG decode beats it on every scenario, BMP and PNG are within or near target on most scenarios, and PNG
