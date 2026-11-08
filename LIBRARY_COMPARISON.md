@@ -499,8 +499,8 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 | JPEG 1080p, grayscale | 3.51 ms | 3.68 ms | 3.53 ms | 0.99× | 4.2 KB | 8.6 KB | 0.6 KB |
 | PNG 24bpp | 18.99 ms | 16.68 ms | 16.78 ms | 1.13× | 12.0 KB | 12.1 KB | 9.2 KB |
 | PNG 32bpp RGBA | 22.83 ms | 22.72 ms | 21.50 ms | 1.06× | 13.7 KB | 13.7 KB | 16.9 KB |
-| WebP lossless | 18.40 ms | 18.55 ms | 19.20 ms | 0.96× | 43.9 KB | 44.6 KB | 168 B |
-| WebP lossless + alpha | 23.40 ms | 23.22 ms | 20.21 ms | 1.16× | 43.2 KB | 43.8 KB | 188 B |
+| WebP lossless | 15.71 ms | 15.53 ms | 19.15 ms | 0.82× | 43.8 KB | 44.6 KB | 146 B |
+| WebP lossless + alpha | 19.62 ms | 19.41 ms | 20.08 ms | 0.98× | 43.1 KB | 43.9 KB | 166 B |
 | WebP lossy | 15.62 ms | 15.87 ms | 13.89 ms | 1.12× | 6.2 KB | 6.9 KB | 84 B |
 | WebP lossy + alpha | 16.16 ms | 16.60 ms | 14.29 ms | 1.13× | 12.8 KB | 13.6 KB | 94 B |
 
@@ -520,7 +520,7 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 | JBIG2 | none (no shared build of jbig2dec) | 5.92 ms arithmetic / 3.04 ms MMR for 850x1100 | not implemented (decode-only) |
 | CCITT fax | libtiff | 2.47× (G4 TIFF), 3.66× (G3 TIFF) | not implemented (decode-only) |
 | JPEG XL | libjxl | 1.10×–1.71× | lossless 0.07×–0.31× (faster); lossy 1.14×–1.28× at effort 5, 0.69× vs. effort 7; lossless size within 2% of libjxl effort 3; lossy files within a few percent of libjxl effort 7 at equal SSIMULACRA2 |
-| Sdcb.SimdCodecs (managed) | SimdCodecs | JPEG 0.91×–0.99×; PNG 1.06×–1.13×; WebP 0.96×–1.16× | not measured |
+| Sdcb.SimdCodecs (managed) | SimdCodecs | JPEG 0.91×–0.99×; PNG 1.06×–1.13×; WebP 0.82×–1.13× | not measured |
 | Resize | SkiaSharp | — | Downscale: 1.24×–2.99×; Upscale: 1.67× (NearestNeighbor) or **0.23×–0.81×** (Bilinear/cubic family, faster than SkiaSharp) |
 
 Against SkiaSharp, JPEG decode beats it on every scenario, BMP and PNG are within or near target on most scenarios, and PNG

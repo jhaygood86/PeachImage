@@ -105,6 +105,15 @@ internal static class Vp8LFastPixelLoop
     /// </summary>
     public static GroupView[]? CreateViews(Vp8LHuffmanGroup[] groups)
     {
+        // ReadSymbol reads a Vp8LHuffmanCode as a 32-bit word: Bits in the low byte, Value in the high half.
+        var probe = new Vp8LHuffmanCode { Bits = 0x5A, Value = 0xBEEF };
+        if (!BitConverter.IsLittleEndian
+            || Unsafe.SizeOf<Vp8LHuffmanCode>() != sizeof(uint)
+            || Unsafe.As<Vp8LHuffmanCode, uint>(ref probe) != 0xBEEF005A)
+        {
+            return null;
+        }
+
         var views = new GroupView[groups.Length];
         for (int i = 0; i < views.Length; i++)
         {
@@ -280,20 +289,24 @@ internal static class Vp8LFastPixelLoop
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int ReadSymbol(Vp8LHuffmanCode[] entries, ref Bits bits)
     {
+        // The entry is read as one 32-bit word (length in the low byte, symbol in the high half; see CreateViews) through an unsigned
+        // index. The lookup sits on the chain that every symbol of every pixel waits for (bits -> index -> load -> shift -> bits), so
+        // a sign extension, a separate address computation and two partial loads there cost a few cycles per symbol, which is
+        // most of what a pixel with four symbols costs.
         uint window = (uint)bits.Buffer;
-        int low = (int)(window & RootMask);
-        Vp8LHuffmanCode root = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(entries), low);
+        uint root = Unsafe.Add(ref Unsafe.As<Vp8LHuffmanCode, uint>(ref MemoryMarshal.GetArrayDataReference(entries)), (nuint)(window & RootMask));
+        int rootBits = (int)(root & 0xFF);
 
-        if (root.Bits <= Vp8LHuffmanTableBuilder.MainRootBits)
+        if (rootBits <= Vp8LHuffmanTableBuilder.MainRootBits)
         {
-            bits.Buffer >>= root.Bits;
-            bits.Count -= root.Bits;
-            return root.Value;
+            bits.Buffer >>= rootBits;
+            bits.Count -= rootBits;
+            return (int)(root >> 16);
         }
 
-        int extraBits = root.Bits - Vp8LHuffmanTableBuilder.MainRootBits;
+        int extraBits = rootBits - Vp8LHuffmanTableBuilder.MainRootBits;
         uint secondaryOffset = (window >> Vp8LHuffmanTableBuilder.MainRootBits) & ((1u << extraBits) - 1);
-        Vp8LHuffmanCode second = entries[low + root.Value + (int)secondaryOffset];
+        Vp8LHuffmanCode second = entries[(int)(window & RootMask) + (int)(root >> 16) + (int)secondaryOffset];
         int used = Vp8LHuffmanTableBuilder.MainRootBits + second.Bits;
         bits.Buffer >>= used;
         bits.Count -= used;
