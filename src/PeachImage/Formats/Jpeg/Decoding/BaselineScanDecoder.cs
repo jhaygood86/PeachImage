@@ -181,34 +181,8 @@ internal static class BaselineScanDecoder
         // ProgressiveScanDecoder relies on the same guarantee without ever clearing per-block either.
         var block = component.Coefficients.Block(blockX, blockY);
 
-        int diff = dcTable.DecodeDcDiff(entropy);
-        component.DcPredictor += diff;
-        block[0] = (short)component.DcPredictor;
-
-        int k = 1;
-        while (k <= 63)
-        {
-            var kind = acTable.DecodeAc(entropy, out int run, out int value);
-
-            if (kind == AcSymbolKind.EndOfBlock)
-            {
-                break;
-            }
-
-            if (kind == AcSymbolKind.ZeroRun16)
-            {
-                k += 16;
-                continue;
-            }
-
-            k += run;
-            if (k > 63)
-            {
-                throw new JpegDecodingException("Invalid JPEG AC coefficient run: index exceeds block size.");
-            }
-
-            block[ZigZag.ToNaturalOrder[k]] = (short)value;
-            k++;
-        }
+        int predictor = component.DcPredictor;
+        entropy.DecodeBaselineBlock(dcTable, acTable, ref predictor, block);
+        component.DcPredictor = predictor;
     }
 }

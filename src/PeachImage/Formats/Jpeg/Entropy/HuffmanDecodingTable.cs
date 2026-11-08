@@ -55,17 +55,16 @@ internal sealed class HuffmanDecodingTable
     // _fastLength above, resolving a whole AC run/size symbol *and* its magnitude in one lookup when both
     // fit within FastTableBits. _fastAcKind[i] == 0 (the default) means "no combined match" for every slot
     // this build never touches, so DecodeAc's fallback check needs no separate initialization pass.
-    private readonly byte[] _fastAcKind = new byte[FastTableSize];
-    private readonly byte[] _fastAcRun = new byte[FastTableSize];
-    private readonly short[] _fastAcValue = new short[FastTableSize];
-    private readonly byte[] _fastAcBits = new byte[FastTableSize];
+    // One packed word per slot so a symbol costs one load: bits 0-3 the total bits consumed (code + magnitude), bits 4-5 the
+    // AcSymbolKind, bits 8-11 the zero run, bits 16-31 the signed coefficient. Zero means "no combined match".
+    private readonly uint[] _fastAc = new uint[FastTableSize];
 
     // Same idea as _fastAc* above, for DC decode: a DC symbol is a bare magnitude size (no run nibble),
     // so this needs only a value + total-bits pair per slot, no separate "kind" byte — _fastDcBits[i] == 0
     // unambiguously means "no combined match" (a real match's bits is always >= 1, the shortest possible
     // Huffman code), the same sentinel convention _fastLength already uses above.
-    private readonly short[] _fastDcValue = new short[FastTableSize];
-    private readonly byte[] _fastDcBits = new byte[FastTableSize];
+    // Packed the same way: the signed difference in bits 8 and up, the total bits consumed in bits 0-7.
+    private readonly int[] _fastDc = new int[FastTableSize];
 
     private HuffmanDecodingTable(int[] minCode, int[] maxCode, int[] valPtr, byte[] values)
     {
@@ -181,13 +180,13 @@ internal sealed class HuffmanDecodingTable
     public AcSymbolKind DecodeAc(JpegEntropyReader reader, out int run, out int value)
     {
         int peeked = reader.PeekBits(FastTableBits);
-        byte kind = _fastAcKind[peeked];
-        if (kind != 0)
+        uint entry = _fastAc[peeked];
+        if (entry != 0)
         {
-            reader.ConsumeBits(_fastAcBits[peeked]);
-            run = _fastAcRun[peeked];
-            value = _fastAcValue[peeked];
-            return (AcSymbolKind)kind;
+            reader.ConsumeBits((int)(entry & 15));
+            run = (int)((entry >> 8) & 15);
+            value = (int)entry >> 16;
+            return (AcSymbolKind)((entry >> 4) & 3);
         }
 
         int runSize = Decode(reader);
@@ -214,15 +213,59 @@ internal sealed class HuffmanDecodingTable
     public int DecodeDcDiff(JpegEntropyReader reader)
     {
         int peeked = reader.PeekBits(FastTableBits);
-        byte bits = _fastDcBits[peeked];
-        if (bits != 0)
+        int entry = _fastDc[peeked];
+        if (entry != 0)
         {
-            reader.ConsumeBits(bits);
-            return _fastDcValue[peeked];
+            reader.ConsumeBits(entry & 0xFF);
+            return entry >> 8;
         }
 
         int size = Decode(reader);
         return reader.ReceiveExtend(size);
+    }
+
+    /// <summary>The packed AC fast table: see the field remarks. Indexed by the next <see cref="FastTableBits"/> bits.</summary>
+    internal uint[] FastAc => _fastAc;
+
+    /// <summary>The packed DC fast table: see the field remarks.</summary>
+    internal int[] FastDc => _fastDc;
+
+    /// <summary>The number of lookahead bits the fast tables are indexed by.</summary>
+    internal const int FastBits = FastTableBits;
+
+    /// <summary>
+    /// Decodes a Huffman symbol (the code only, no magnitude) from the top of <paramref name="buffer"/>, which holds
+    /// <paramref name="bitCount"/> bits (at least 16), and consumes the code.
+    /// </summary>
+    internal int DecodeSymbol(ref ulong buffer, ref int bitCount)
+    {
+        int peeked = (int)(buffer >> (64 - FastTableBits));
+        int fastLength = _fastLength[peeked];
+        if (fastLength != 0)
+        {
+            buffer <<= fastLength;
+            bitCount -= fastLength;
+            return _fastSymbol[peeked];
+        }
+
+        for (int length = FastTableBits + 1; length <= 16; length++)
+        {
+            int code = (int)(buffer >> (64 - length));
+            if (code <= _maxCode[length])
+            {
+                int index = _valPtr[length] + (code - _minCode[length]);
+                if ((uint)index >= (uint)_values.Length)
+                {
+                    break;
+                }
+
+                buffer <<= length;
+                bitCount -= length;
+                return _values[index];
+            }
+        }
+
+        throw new JpegDecodingException("Invalid Huffman code encountered while decoding entropy-coded data.");
     }
 
     private int DecodeSlow(JpegEntropyReader reader)
@@ -296,12 +339,11 @@ internal sealed class HuffmanDecodingTable
                     // run != 15 is EOB, not just the standard 0x00 — a malformed/adversarial DHT can legally
                     // assign size=0 to a run other than 0, and the fallback slow path already treats it as
                     // EOB regardless, so this fast table must match that, not assume only 0x00 means EOB.
-                    byte kind = (byte)(run == 15 ? AcSymbolKind.ZeroRun16 : AcSymbolKind.EndOfBlock);
+                    uint kind = (uint)(run == 15 ? AcSymbolKind.ZeroRun16 : AcSymbolKind.EndOfBlock);
                     int fillCount = 1 << (FastTableBits - length);
                     for (int fill = 0; fill < fillCount; fill++)
                     {
-                        _fastAcKind[codeBase | fill] = kind;
-                        _fastAcBits[codeBase | fill] = (byte)length;
+                        _fastAc[codeBase | fill] = (kind << 4) | (uint)length;
                     }
 
                     continue;
@@ -317,19 +359,16 @@ internal sealed class HuffmanDecodingTable
                 int magnitudeShift = FastTableBits - length - size;
                 int magnitudeCount = 1 << size;
                 int dontCareCount = 1 << magnitudeShift;
-                byte totalBits = (byte)(length + size);
+                uint totalBits = (uint)(length + size);
 
                 for (int magnitude = 0; magnitude < magnitudeCount; magnitude++)
                 {
                     short value = (short)JpegEntropyReader.ExtendSign(magnitude, size);
+                    uint packed = ((uint)(ushort)value << 16) | ((uint)run << 8) | ((uint)AcSymbolKind.Coefficient << 4) | totalBits;
                     int magnitudeBase = codeBase | (magnitude << magnitudeShift);
                     for (int dontCare = 0; dontCare < dontCareCount; dontCare++)
                     {
-                        int slot = magnitudeBase | dontCare;
-                        _fastAcKind[slot] = (byte)AcSymbolKind.Coefficient;
-                        _fastAcRun[slot] = (byte)run;
-                        _fastAcValue[slot] = value;
-                        _fastAcBits[slot] = totalBits;
+                        _fastAc[magnitudeBase | dontCare] = packed;
                     }
                 }
             }
@@ -367,8 +406,7 @@ internal sealed class HuffmanDecodingTable
                     // bits to read, the DC difference is exactly 0.
                     for (int fill = 0; fill < fillCount; fill++)
                     {
-                        _fastDcValue[codeBase | fill] = 0;
-                        _fastDcBits[codeBase | fill] = (byte)length;
+                        _fastDc[codeBase | fill] = length;
                     }
 
                     continue;
@@ -382,17 +420,15 @@ internal sealed class HuffmanDecodingTable
                 int magnitudeShift = FastTableBits - length - size;
                 int magnitudeCount = 1 << size;
                 int dontCareCount = 1 << magnitudeShift;
-                byte totalBits = (byte)(length + size);
+                int totalBits = length + size;
 
                 for (int magnitude = 0; magnitude < magnitudeCount; magnitude++)
                 {
-                    short value = (short)JpegEntropyReader.ExtendSign(magnitude, size);
+                    int value = JpegEntropyReader.ExtendSign(magnitude, size);
                     int magnitudeBase = codeBase | (magnitude << magnitudeShift);
                     for (int dontCare = 0; dontCare < dontCareCount; dontCare++)
                     {
-                        int slot = magnitudeBase | dontCare;
-                        _fastDcValue[slot] = value;
-                        _fastDcBits[slot] = totalBits;
+                        _fastDc[magnitudeBase | dontCare] = (value << 8) | totalBits;
                     }
                 }
             }
