@@ -51,6 +51,8 @@ internal static class Vp8LFastPixelLoop
         public readonly Vp8LHuffmanCode[] Alpha;
         public readonly Vp8LHuffmanCode[] Distance;
         public readonly bool Trivial;
+        public readonly bool AlphaIsConstant;
+        public readonly uint ConstantAlpha;
         public readonly uint TrivialArgb;
 
         public GroupView(Vp8LHuffmanGroup group)
@@ -63,13 +65,15 @@ internal static class Vp8LFastPixelLoop
 
             // A one-symbol code is built as a full root table of zero-length entries, so entry 0 says it all.
             Trivial = Red[0].Bits == 0 && Blue[0].Bits == 0 && Alpha[0].Bits == 0;
+            AlphaIsConstant = Alpha[0].Bits == 0;
+            ConstantAlpha = (uint)Alpha[0].Value << 24;
             TrivialArgb = Trivial ? ((uint)Alpha[0].Value << 24) | ((uint)Red[0].Value << 16) | Blue[0].Value : 0;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Deconstruct(
             out Vp8LHuffmanCode[] green, out Vp8LHuffmanCode[] red, out Vp8LHuffmanCode[] blue, out Vp8LHuffmanCode[] alpha,
-            out Vp8LHuffmanCode[] distance, out bool trivial, out uint trivialArgb)
+            out Vp8LHuffmanCode[] distance, out bool trivial, out uint trivialArgb, out bool alphaIsConstant, out uint constantAlpha)
         {
             green = Green;
             red = Red;
@@ -78,6 +82,8 @@ internal static class Vp8LFastPixelLoop
             distance = Distance;
             trivial = Trivial;
             trivialArgb = TrivialArgb;
+            alphaIsConstant = AlphaIsConstant;
+            constantAlpha = ConstantAlpha;
         }
 
         /// <summary>The unchecked root lookup below needs every root level to be a full 256-entry table.</summary>
@@ -151,13 +157,15 @@ internal static class Vp8LFastPixelLoop
         Vp8LHuffmanCode[] greenTable, redTable, blueTable, alphaTable, distanceTable;
         bool trivial;
         uint trivialArgb;
-        views[hasMeta ? metaImage!.GetGroupIndex(col, row) : 0].Deconstruct(out greenTable, out redTable, out blueTable, out alphaTable, out distanceTable, out trivial, out trivialArgb);
+        bool alphaIsConstant;
+        uint constantAlpha;
+        views[hasMeta ? metaImage!.GetGroupIndex(col, row) : 0].Deconstruct(out greenTable, out redTable, out blueTable, out alphaTable, out distanceTable, out trivial, out trivialArgb, out alphaIsConstant, out constantAlpha);
 
         while (pos < limit && bits.Pos <= safeEnd)
         {
             if (hasMeta && (col & tileMask) == 0)
             {
-                views[metaImage!.GetGroupIndex(col, row)].Deconstruct(out greenTable, out redTable, out blueTable, out alphaTable, out distanceTable, out trivial, out trivialArgb);
+                views[metaImage!.GetGroupIndex(col, row)].Deconstruct(out greenTable, out redTable, out blueTable, out alphaTable, out distanceTable, out trivial, out trivialArgb, out alphaIsConstant, out constantAlpha);
             }
 
             Refill(ref bits, data);
@@ -175,8 +183,11 @@ internal static class Vp8LFastPixelLoop
                     int red = ReadSymbol(redTable, ref bits);
                     Refill(ref bits, data);
                     int blue = ReadSymbol(blueTable, ref bits);
-                    int alpha = ReadSymbol(alphaTable, ref bits);
-                    argb = ((uint)alpha << 24) | ((uint)red << 16) | ((uint)code << 8) | (uint)blue;
+
+                    // Photographs are usually opaque: a one-symbol alpha code costs no bits, but reading it
+                    // would still put a table load and a shift on the bit-state dependency chain.
+                    uint alphaBits = alphaIsConstant ? constantAlpha : (uint)ReadSymbol(alphaTable, ref bits) << 24;
+                    argb = alphaBits | ((uint)red << 16) | ((uint)code << 8) | (uint)blue;
                 }
 
                 Unsafe.Add(ref pixelBase, pos++) = argb;
@@ -213,7 +224,7 @@ internal static class Vp8LFastPixelLoop
                         row++;
                     }
 
-                    views[metaImage!.GetGroupIndex(col, row)].Deconstruct(out greenTable, out redTable, out blueTable, out alphaTable, out distanceTable, out trivial, out trivialArgb);
+                    views[metaImage!.GetGroupIndex(col, row)].Deconstruct(out greenTable, out redTable, out blueTable, out alphaTable, out distanceTable, out trivial, out trivialArgb, out alphaIsConstant, out constantAlpha);
                 }
             }
             else if (code < colorCacheLimit)
