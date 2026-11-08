@@ -86,6 +86,41 @@ internal sealed class HuffmanDecodingTable
     /// <summary>Builds a decoding table from raw bit-length counts (16 entries, for lengths 1-16) and symbol values in code order.</summary>
     public static HuffmanDecodingTable Build(ReadOnlySpan<byte> counts, ReadOnlySpan<byte> values)
     {
+        // A table is immutable once built and about 11 KB, and nearly every JPEG ships one of a handful of standard tables, so a
+        // decode that meets a specification it has seen before reuses the table instead of rebuilding it.
+        uint hash = 2166136261;
+        foreach (byte b in counts)
+        {
+            hash = (hash ^ b) * 16777619;
+        }
+
+        foreach (byte b in values)
+        {
+            hash = (hash ^ b) * 16777619;
+        }
+
+        ref var slot = ref SharedTables[(int)((hash ^ (hash >> 15)) % SharedTableSlots)];
+        var cached = Volatile.Read(ref slot);
+        if (cached is not null && cached.Counts.AsSpan().SequenceEqual(counts) && cached.Table._values.AsSpan().SequenceEqual(values))
+        {
+            return cached.Table;
+        }
+
+        var table = BuildNew(counts, values);
+        Volatile.Write(ref slot, new SharedEntry(counts.ToArray(), table));
+        return table;
+    }
+
+    private const int SharedTableSlots = 64;
+
+    // Direct-mapped by specification hash; a collision simply replaces the older entry, which bounds the memory at 64 tables however
+    // many different specifications a hostile input offers.
+    private static readonly SharedEntry?[] SharedTables = new SharedEntry?[SharedTableSlots];
+
+    private sealed record SharedEntry(byte[] Counts, HuffmanDecodingTable Table);
+
+    private static HuffmanDecodingTable BuildNew(ReadOnlySpan<byte> counts, ReadOnlySpan<byte> values)
+    {
         var minCode = new int[17];
         var maxCode = new int[17];
         var valPtr = new int[17];

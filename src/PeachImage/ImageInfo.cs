@@ -77,4 +77,19 @@ public readonly record struct ImageInfo(
     bool HasPreview = false,
     ImageOrientation Orientation = ImageOrientation.Normal,
     bool HasLocation = false,
-    ExifLocation? ExifLocation = null);
+    ExifLocation? ExifLocation = null)
+{
+    /// <summary>
+    /// The bytes <see cref="ImageDecoder.DecodeInto(ReadOnlySpan{byte}, Span{byte}, out ImageMetadata, int)"/> needs for this image
+    /// (as <see cref="Image.Identify(Stream, DecoderOptions?)"/> reported it) under <paramref name="options"/>, which set the scale,
+    /// orientation and pixel format of the output. Rows sit <paramref name="rowStride"/> bytes apart, 0 meaning tightly packed; the last
+    /// row needs no padding.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="rowStride"/> is negative.</exception>
+    /// <exception cref="ArgumentException"><paramref name="rowStride"/> is less than one row, or the image is too large for a buffer.</exception>
+    public int GetRequiredBufferSize(DecoderOptions? options = null, int rowStride = 0)
+    {
+        (int width, int height, var format) = CallerBufferDecode.OutputLayout(this, options);
+        return CallerBufferDecode.RequiredSize(width, height, format, rowStride);
+    }
+}

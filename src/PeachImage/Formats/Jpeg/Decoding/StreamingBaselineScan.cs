@@ -37,7 +37,8 @@ internal static class StreamingBaselineScan
         JpegColorSpace colorSpace,
         int imageWidth,
         int imageHeight,
-        out byte[]? output)
+        out byte[]? output,
+        CallerOutput? target = null)
     {
         output = null;
         int componentCount = frameComponents.Length;
@@ -46,12 +47,14 @@ internal static class StreamingBaselineScan
         var buffers = new JpegCoefficientBuffer?[2][] { new JpegCoefficientBuffer?[componentCount], new JpegCoefficientBuffer?[componentCount] };
         var pending = new Task?[2];
 
-        bool grayIsOutput = colorSpace == JpegColorSpace.Grayscale && frameComponents.Length == 1
+        bool grayIsOutput = target is null && colorSpace == JpegColorSpace.Grayscale && frameComponents.Length == 1
             && frameComponents[0].ActualWidthInSamples == imageWidth && frameComponents[0].ActualHeightInSamples == imageHeight;
 
         // Work behind the decode runs on its own threads only when that cannot break the caller's limits: the decoding thread plus
         // a transform task plus a conversion task is three threads, so a lower cap, or a scheduler of the caller's own (which
         // may be bounded or may not run a task until asked), keeps everything on the calling thread.
+        // A grayscale frame's conversion is a plain row copy: one pass after the last transform costs less than a task per batch.
+        bool deferConversion = colorSpace == JpegColorSpace.Grayscale;
         bool overlap = parallel.Scheduler is null && parallel.EffectiveDegree >= 3;
         Task? lastConvert = null;
         StreamingRowConverter? converter = null;
@@ -84,13 +87,21 @@ internal static class StreamingBaselineScan
             // Rows are converted behind the transforms when the frame's shape allows it.
             if (!grayIsOutput && colorSpace is JpegColorSpace.YCbCr or JpegColorSpace.Grayscale)
             {
-                int bytesPerPixel = colorSpace == JpegColorSpace.Grayscale ? 1 : 3;
-                convertedBuffer = ImageBufferPool.Shared.Rent(checked(imageWidth * imageHeight * bytesPerPixel));
-                converter = StreamingRowConverter.TryCreate(frameComponents, planes, colorSpace, imageWidth, imageHeight, convertedBuffer);
-                if (converter is null)
+                if (target is not null)
                 {
-                    ImageBufferPool.Shared.Return(convertedBuffer);
-                    convertedBuffer = null;
+                    // The caller's memory takes the rows directly; nothing is rented for the output.
+                    converter = StreamingRowConverter.TryCreate(frameComponents, planes, colorSpace, imageWidth, imageHeight, null, target);
+                }
+                else
+                {
+                    int bytesPerPixel = colorSpace == JpegColorSpace.Grayscale ? 1 : 3;
+                    convertedBuffer = ImageBufferPool.Shared.Rent(checked(imageWidth * imageHeight * bytesPerPixel));
+                    converter = StreamingRowConverter.TryCreate(frameComponents, planes, colorSpace, imageWidth, imageHeight, convertedBuffer);
+                    if (converter is null)
+                    {
+                        ImageBufferPool.Shared.Return(convertedBuffer);
+                        convertedBuffer = null;
+                    }
                 }
             }
 
@@ -126,7 +137,10 @@ internal static class StreamingBaselineScan
                 if (!overlap)
                 {
                     Transform();
-                    converter?.ConvertReady(mcuRowsDone, parallel);
+                    if (!deferConversion)
+                    {
+                        converter?.ConvertReady(mcuRowsDone, parallel);
+                    }
                 }
                 else
                 {
@@ -134,7 +148,7 @@ internal static class StreamingBaselineScan
                     var transformTask = Task.Factory.StartNew(Transform, CancellationToken.None, TaskCreationOptions.None, scheduler);
                     pending[slot] = transformTask;
 
-                    if (converter is not null)
+                    if (converter is not null && !deferConversion)
                     {
                         // Converting rows needs every earlier transform finished (the previous conversion task stands for all of
                         // them) and this one; conversions also run one after another, since each continues where the last stopped.
@@ -153,6 +167,16 @@ internal static class StreamingBaselineScan
             Complete(ref pending[0]);
             Complete(ref pending[1]);
             Complete(ref lastConvert);
+            if (deferConversion)
+            {
+                converter?.ConvertReady(mcusDown, parallel);
+            }
+
+            if (target is not null)
+            {
+                target.Written = converter is not null;
+            }
+
             output = grayIsOutput ? planes[0] : convertedBuffer;
             convertedBuffer = null;
             succeeded = true;

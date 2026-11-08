@@ -24,7 +24,8 @@ internal sealed class StreamingRowConverter
     private readonly int[] _verticalRatio;
     private readonly int _width;
     private readonly int _height;
-    private readonly byte[] _output;
+    private readonly byte[]? _output;
+    private readonly CallerOutput? _target;
     private readonly bool _gray;
     private readonly IChromaUpsampler _upsampler;
     private readonly IColorConverter _converter;
@@ -33,8 +34,9 @@ internal sealed class StreamingRowConverter
 
     private StreamingRowConverter(
         ComponentDecodeState[] components, byte[][] planes, int[] horizontalRatio, int[] verticalRatio,
-        int width, int height, byte[] output, bool gray)
+        int width, int height, byte[]? output, CallerOutput? target, bool gray)
     {
+        _target = target;
         _components = components;
         _planes = planes;
         _horizontalRatio = horizontalRatio;
@@ -53,9 +55,10 @@ internal sealed class StreamingRowConverter
 
     /// <summary>
     /// Creates a converter writing into <paramref name="output"/> (<c>width * height</c> bytes for a grayscale frame,
-    /// <c>* 3</c> for YCbCr), or returns <see langword="null"/> when the frame's shape needs the whole-plane path.
+    /// <c>* 3</c> for YCbCr), or <paramref name="target"/> instead when the caller owns the memory (exactly one of the two is given),
+    /// or returns <see langword="null"/> when the frame's shape needs the whole-plane path.
     /// </summary>
-    public static StreamingRowConverter? TryCreate(ComponentDecodeState[] components, byte[][] planes, JpegColorSpace colorSpace, int width, int height, byte[] output)
+    public static StreamingRowConverter? TryCreate(ComponentDecodeState[] components, byte[][] planes, JpegColorSpace colorSpace, int width, int height, byte[]? output, CallerOutput? target = null)
     {
         bool gray = colorSpace == JpegColorSpace.Grayscale && components.Length == 1;
         if (!gray && !(colorSpace == JpegColorSpace.YCbCr && components.Length == 3))
@@ -107,7 +110,7 @@ internal sealed class StreamingRowConverter
             return null;
         }
 
-        return new StreamingRowConverter(components, planes, horizontalRatio, verticalRatio, width, height, output, gray);
+        return new StreamingRowConverter(components, planes, horizontalRatio, verticalRatio, width, height, output, target, gray);
     }
 
     /// <summary>
@@ -166,15 +169,21 @@ internal sealed class StreamingRowConverter
     {
         if (_gray)
         {
-            _planes[0].AsSpan(y * _components[0].ActualWidthInSamples, _width).CopyTo(_output.AsSpan(y * _width, _width));
+            _planes[0].AsSpan(y * _components[0].ActualWidthInSamples, _width).CopyTo(OutputRow(y, _width));
             return;
         }
 
         var yRow = RowOf(0, y, scratch.Row0, scratch);
         var cbRow = RowOf(1, y, scratch.Row1, scratch);
         var crRow = RowOf(2, y, scratch.Row2, scratch);
-        _converter.YCbCrToRgb(yRow, cbRow, crRow, _output.AsSpan(y * _width * 3, _width * 3), _width);
+        _converter.YCbCrToRgb(yRow, cbRow, crRow, OutputRow(y, _width * 3), _width);
     }
+
+    /// <summary>Row <paramref name="y"/> of the output: the rented buffer's packed row, or the caller's memory at its stride.</summary>
+    private unsafe Span<byte> OutputRow(int y, int rowBytes) =>
+        _target is { } target
+            ? new Span<byte>((byte*)target.Pointer + ((long)y * target.Stride), rowBytes)
+            : _output.AsSpan(y * rowBytes, rowBytes);
 
     /// <summary>Row <paramref name="y"/> of component <paramref name="index"/> at image resolution: a view of the plane when it is not subsampled, an upsampled row in <paramref name="buffer"/> otherwise.</summary>
     private ReadOnlySpan<byte> RowOf(int index, int y, byte[] buffer, Scratch scratch)

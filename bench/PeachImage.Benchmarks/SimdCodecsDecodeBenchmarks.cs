@@ -71,6 +71,20 @@ public class SimdCodecsDecodeBenchmarks
         return image.Width;
     }
 
+    // The caller-buffer path: one reused destination and decoder, like the SimdCodecs side.
+    private readonly ImageDecoder _decoder = new(new DecoderOptions { SkipMetadata = true });
+
+    private int PeachInto(byte[] file) => _decoder.DecodeInto(file, _rgba, out _).Width;
+
+    [Benchmark] [BenchmarkCategory("JPEG-1080p-420")]
+    public int PeachImageInto_Jpeg_1080p_420() => PeachInto(_jpeg1080p420);
+    [Benchmark] [BenchmarkCategory("JPEG-1080p-444")]
+    public int PeachImageInto_Jpeg_1080p_444() => PeachInto(_jpeg1080p444);
+    [Benchmark] [BenchmarkCategory("JPEG-12MP-420")]
+    public int PeachImageInto_Jpeg_12Mp_420() => PeachInto(_jpeg12Mp420);
+    [Benchmark] [BenchmarkCategory("JPEG-Gray")]
+    public int PeachImageInto_Jpeg_Gray() => PeachInto(_jpegGray);
+
     [Benchmark] [BenchmarkCategory("JPEG-1080p-420")]
     public int PeachImage_Jpeg_1080p_420() => Peach(_jpeg1080p420, s => JpegDecoder.Decode(s));
     [Benchmark(Baseline = true)] [BenchmarkCategory("JPEG-1080p-420")]

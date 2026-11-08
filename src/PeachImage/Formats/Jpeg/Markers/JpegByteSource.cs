@@ -9,7 +9,10 @@ namespace PeachImage.Formats.Jpeg.Markers;
 /// </summary>
 internal sealed class JpegByteSource(Stream stream)
 {
-    private readonly byte[] _buffer = new byte[65536];
+    private const int BufferSize = 65536;
+
+    // Rented rather than allocated: a decode builds one of these per stream, and the buffer is the largest allocation in a small decode.
+    private byte[] _buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(BufferSize);
     private int _bufferStart;
     private int _bufferEnd;
     private readonly byte[] _pending = new byte[2];
@@ -197,7 +200,19 @@ internal sealed class JpegByteSource(Stream stream)
     private bool Refill()
     {
         _bufferStart = 0;
-        _bufferEnd = stream.Read(_buffer, 0, _buffer.Length);
+        _bufferEnd = stream.Read(_buffer, 0, BufferSize);
         return _bufferEnd > 0;
+    }
+
+    /// <summary>Returns the read buffer to the pool. The source reads nothing more afterwards; calling it again is harmless.</summary>
+    public void Release()
+    {
+        var buffer = _buffer;
+        _buffer = [];
+        _bufferStart = _bufferEnd = 0;
+        if (buffer.Length != 0)
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 }
