@@ -96,8 +96,16 @@ internal static class WebpDecoder
         }
         else
         {
-            var container = WebpContainerReader.Read(stream, metadata, prelude, pendingHeader);
-            image = WebpBitstreamDecoder.Decode(container.Format, container.BitstreamData, container.AlphaData);
+            var container = WebpContainerReader.Read(stream, metadata, prelude, pendingHeader, pooledBitstream: true);
+            try
+            {
+                image = WebpBitstreamDecoder.Decode(container.Format, container.Bitstream, container.AlphaData);
+            }
+            finally
+            {
+                container.Release();
+            }
+
             isAnimated = false;
 
             if (container.CanvasWidth is { } canvasWidth && container.CanvasHeight is { } canvasHeight
@@ -141,9 +149,16 @@ internal static class WebpDecoder
             throw new InvalidOperationException("An animated WebP does not decode directly into a caller buffer.");
         }
 
-        var container = WebpContainerReader.Read(stream, metadata, prelude, pendingHeader);
-        var output = new Decoding.WebpOutput((nint)destination, stride, expected.Width, expected.Height, expected.PixelFormat);
-        Decoding.WebpBitstreamDecoder.DecodeInto(container.Format, container.BitstreamData, container.AlphaData, output);
+        var container = WebpContainerReader.Read(stream, metadata, prelude, pendingHeader, pooledBitstream: true);
+        try
+        {
+            var output = new Decoding.WebpOutput((nint)destination, stride, expected.Width, expected.Height, expected.PixelFormat);
+            Decoding.WebpBitstreamDecoder.DecodeInto(container.Format, container.Bitstream, container.AlphaData, output);
+        }
+        finally
+        {
+            container.Release();
+        }
 
         if (container.CanvasWidth is { } canvasWidth && container.CanvasHeight is { } canvasHeight
             && (expected.Width != canvasWidth || expected.Height != canvasHeight))

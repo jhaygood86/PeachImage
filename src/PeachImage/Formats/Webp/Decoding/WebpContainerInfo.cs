@@ -9,6 +9,26 @@ internal sealed class WebpContainerInfo
     /// <summary>The raw payload of the <c>VP8 </c>/<c>VP8L</c> chunk, untouched — handed to the matching bitstream decoder.</summary>
     public required byte[] BitstreamData { get; init; }
 
+    /// <summary>
+    /// How many bytes of <see cref="BitstreamData"/> are the payload: the whole array unless it was rented from a pool (and so may be longer).
+    /// </summary>
+    public int BitstreamLength { get; init; } = -1;
+
+    /// <summary>Whether <see cref="BitstreamData"/> was rented from <see cref="Internal.WebpBufferPool"/> and has to go back through <see cref="Release"/>.</summary>
+    public bool BitstreamIsPooled { get; init; }
+
+    /// <summary>The payload itself, exactly: <see cref="BitstreamData"/> trimmed to <see cref="BitstreamLength"/>.</summary>
+    public ReadOnlyMemory<byte> Bitstream => BitstreamData.AsMemory(0, BitstreamLength < 0 ? BitstreamData.Length : BitstreamLength);
+
+    /// <summary>Returns a rented bitstream buffer to its pool. The payload must not be read afterward.</summary>
+    public void Release()
+    {
+        if (BitstreamIsPooled)
+        {
+            Internal.WebpBufferPool.Shared.Return(BitstreamData);
+        }
+    }
+
     /// <summary>The raw payload of the <c>ALPH</c> chunk, if the file is extended-format lossy-with-alpha. Always <see langword="null"/> for lossless images (VP8L carries its own alpha).</summary>
     public byte[]? AlphaData { get; init; }
 

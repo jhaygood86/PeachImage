@@ -105,7 +105,7 @@ internal static class WebpContainerReader
     /// <see cref="WebpDecoder.Identify"/> so they can branch on <see cref="WebpContainerPrelude.HasAnimation"/>
     /// themselves without this method re-reading the RIFF header/VP8X chunk a second time.
     /// </summary>
-    internal static WebpContainerInfo Read(Stream stream, ImageMetadata metadata, WebpContainerPrelude prelude, WebpChunkHeader? pendingHeader, bool headerOnly = false)
+    internal static WebpContainerInfo Read(Stream stream, ImageMetadata metadata, WebpContainerPrelude prelude, WebpChunkHeader? pendingHeader, bool headerOnly = false, bool pooledBitstream = false)
     {
         if (prelude.HasAnimation)
         {
@@ -118,6 +118,8 @@ internal static class WebpContainerReader
         bool sawAnimationChunk = false;
         WebpBitstreamFormat? format = null;
         byte[]? imageBytes = null;
+        int imageLength = -1;
+        bool imagePooled = false;
         byte[]? alphaBytes = null;
 
         WebpChunkHeader? nextHeader = pendingHeader;
@@ -158,7 +160,17 @@ internal static class WebpContainerReader
                 case "VP8L":
                     RequireNoImageChunkYet(format);
                     format = WebpBitstreamFormat.Lossless;
-                    imageBytes = headerOnly ? WebpChunkReader.ReadPrefix(stream, chunkHeader.Size, HeaderPrefixLength) : WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
+                    if (!headerOnly && pooledBitstream && WebpChunkReader.TryReadPayloadPooled(stream, chunkHeader.Size) is { } rented)
+                    {
+                        imageBytes = rented;
+                        imageLength = (int)chunkHeader.Size;
+                        imagePooled = true;
+                    }
+                    else
+                    {
+                        imageBytes = headerOnly ? WebpChunkReader.ReadPrefix(stream, chunkHeader.Size, HeaderPrefixLength) : WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
+                    }
+
                     break;
 
                 case "ALPH":
@@ -193,6 +205,7 @@ internal static class WebpContainerReader
 
         if (sawAnimationChunk)
         {
+            ReleasePooled(imageBytes, imagePooled);
             throw AnimatedFileException();
         }
 
@@ -204,6 +217,7 @@ internal static class WebpContainerReader
         bool isExtended = canvasWidth is not null;
         if (isExtended && format == WebpBitstreamFormat.Lossy && hasAlphaFlag && alphaBytes is null)
         {
+            ReleasePooled(imageBytes, imagePooled);
             throw new WebpDecodingException("WebP file's VP8X header declares alpha but no ALPH chunk was found.");
         }
 
@@ -217,10 +231,20 @@ internal static class WebpContainerReader
         {
             Format = format.Value,
             BitstreamData = imageBytes,
+            BitstreamLength = imageLength,
+            BitstreamIsPooled = imagePooled,
             AlphaData = effectiveAlpha,
             CanvasWidth = canvasWidth,
             CanvasHeight = canvasHeight,
         };
+    }
+
+    private static void ReleasePooled(byte[]? buffer, bool pooled)
+    {
+        if (pooled && buffer is not null)
+        {
+            Internal.WebpBufferPool.Shared.Return(buffer);
+        }
     }
 
     private static WebpDecodingException AnimatedFileException() =>
