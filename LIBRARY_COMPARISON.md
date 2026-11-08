@@ -78,10 +78,10 @@ quality 85.
 
 | Scenario | PeachImage | SkiaSharp | Ratio |
 |---|---:|---:|---:|
-| 1080p, 4:2:0 | 8.21 ms | 9.47 ms | 0.87× |
-| 1080p, 4:4:4 | 9.69 ms | 11.51 ms | 0.84× |
-| 1080p, Grayscale | 4.71 ms | 6.01 ms | 0.78× |
-| 12MP, 4:2:0 | 48.50 ms | 56.56 ms | 0.86× |
+| 1080p, 4:2:0 | 4.66 ms | 9.68 ms | 0.48× |
+| 1080p, 4:4:4 | 5.46 ms | 11.57 ms | 0.47× |
+| 1080p, Grayscale | 3.61 ms | 5.90 ms | 0.61× |
+| 12MP, 4:2:0 | 27.42 ms | 56.95 ms | 0.48× |
 
 ### Encode
 
@@ -119,11 +119,11 @@ substitute, so encode has no baseline.
 
 | Scenario | PeachImage | SkiaSharp | Ratio |
 |---|---:|---:|---:|
-| 24bpp Truecolor | 17.72 ms | 16.87 ms | 1.05× |
-| 32bpp RGBA | 23.32 ms | 21.84 ms | 1.07× |
-| 48bpp (16-bit) Truecolor | 4.64 ms | 3.43 ms | 1.35× |
-| 8bpp Grayscale | 8.56 ms | 9.40 ms | **0.91×** |
-| Interlaced (Adam7) Truecolor | 26.25 ms | 26.91 ms | **0.98×** |
+| 24bpp Truecolor | 17.42 ms | 16.98 ms | 1.03× |
+| 32bpp RGBA | 23.33 ms | 21.80 ms | 1.07× |
+| 48bpp (16-bit) Truecolor | 4.53 ms | 3.42 ms | 1.33× |
+| 8bpp Grayscale | 8.79 ms | 9.47 ms | **0.93×** |
+| Interlaced (Adam7) Truecolor | 25.67 ms | 27.21 ms | **0.94×** |
 
 ### Encode
 
@@ -181,16 +181,16 @@ SkiaSharp's WebP codec is libwebp itself, so it also serves as the reference-cod
 
 | Scenario | PeachImage | SkiaSharp | Ratio | Allocated |
 |---|---:|---:|---:|---:|
-| Lossless, Photographic | 42.43 ms | 23.79 ms | **1.78×** | 12.5 MB |
-| Lossy, Photographic | 28.72 ms | 14.25 ms | **2.02×** | 14.6 MB |
-| Lossless, Graphic (flat color) | 0.69 ms | 0.34 ms | **2.00×** | 1.04 MB |
-| Lossy, Alpha | 31.28 ms | 19.65 ms | **1.59×** | 18.5 MB |
-| Lossless, Alpha | 43.02 ms | 25.53 ms | **1.68×** | 12.5 MB |
-| Small image (32×24) | 14.05 µs | 11.86 µs | 1.18× | 45 KB |
-| Animated, all frames (24×, 320×240) | 0.81 ms | 4.17 ms | **0.19×** | 1.22 MB |
+| Lossless, Photographic | 17.97 ms | 23.83 ms | **0.75×** | 8.4 MB |
+| Lossy, Photographic | 15.84 ms | 14.17 ms | 1.12× | 8.4 MB |
+| Lossless, Graphic (flat color) | 0.49 ms | 0.33 ms | 1.46× | 1.05 MB |
+| Lossy, Alpha | 16.44 ms | 19.19 ms | **0.86×** | 8.4 MB |
+| Lossless, Alpha | 22.51 ms | 25.22 ms | **0.89×** | 8.4 MB |
+| Small image (32×24) | 11.14 µs | 12.33 µs | **0.90×** | 6.2 KB |
+| Animated, all frames (24×, 320×240) | 0.67 ms | 4.16 ms | **0.16×** | 358 KB |
 
 The animated scenario is the strongest result in this whole document: PeachImage decodes it roughly
-**5.2× faster** than SkiaSharp. SkiaSharp pays fixed per-call native marshaling overhead on every one of the 24
+**6.2× faster** than SkiaSharp. SkiaSharp pays fixed per-call native marshaling overhead on every one of the 24
 `GetPixels` calls, while PeachImage's decode is pure managed code with lower fixed per-frame cost
 (`WebpFrameCompositor`/`GifFrameCompositor` reuse one persistent canvas in place rather than
 allocating a fresh one per frame). GIF's animated decode remains far slower in relative terms (see
@@ -509,11 +509,11 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 
 | Format | Baseline | Decode | Encode |
 |---|---|---|---|
-| JPEG | SkiaSharp | 0.78×–0.87× | 1.20×–1.41× |
+| JPEG | SkiaSharp | 0.47×–0.61× | 1.20×–1.41× |
 | BMP | SkiaSharp | 0.41×–1.12× | no baseline (PeachImage-only) |
 | GIF | SkiaSharp | **2.31×–6.28×** (animated 6.28×, static 2.31×–3.99×) | no baseline (PeachImage-only) |
-| PNG | SkiaSharp | 0.91×–1.35× | 0.45×–1.42× |
-| WebP | SkiaSharp (libwebp) | 0.19×–2.02× (animated **0.19×**, static 1.18×–2.02×) | 1.04×–1.35× lossless (0.15× small-image outlier), 0.32× lossy |
+| PNG | SkiaSharp | 0.93×–1.33× | 0.45×–1.42× |
+| WebP | SkiaSharp (libwebp) | 0.16×–1.46× (animated **0.16×**, static 0.75×–1.46×) | 1.04×–1.35× lossless (0.15× small-image outlier), 0.32× lossy |
 | AVIF | libavif / dav1d | **2.25×–5.72×** | implemented, throughput not measured here |
 | TIFF | libtiff | 1.76× (LZW), 6.9× (uncompressed/PackBits) | not implemented (decode-only) |
 | JPEG 2000 | OpenJPEG | 1.62×–1.82× | not implemented (decode-only) |
@@ -524,8 +524,9 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 | Resize | SkiaSharp | — | Downscale: 1.24×–2.99×; Upscale: 1.67× (NearestNeighbor) or **0.23×–0.81×** (Bilinear/cubic family, faster than SkiaSharp) |
 
 Against SkiaSharp, JPEG decode beats it on every scenario, BMP and PNG are within or near target on most scenarios, and PNG
-truecolor/RGBA encode and BMP 32bpp decode are well ahead. WebP static decode and GIF decode are the furthest from the 10%
-target; WebP's *animated* decode is the best result in this document (SkiaSharp's fixed per-frame native marshaling overhead
+truecolor/RGBA encode and BMP 32bpp decode are well ahead. GIF decode is the furthest from the 10% target, and WebP static
+decode now beats SkiaSharp (libwebp) on most scenarios, with lossy photographic (1.12×) and the tiny flat-color graphic (1.46×) the
+exceptions; WebP's *animated* decode is the best result in this document (SkiaSharp's fixed per-frame native marshaling overhead
 losing to PeachImage's managed loop), while GIF's animated decode is the worst (its LZW loop dominates). Against the
 reference native codecs, PeachImage is 1.1×–2× slower on JPEG XL, JPEG 2000 and LZW TIFF decode, much further behind on AV1
 and on the memory-bound uncompressed/PackBits TIFF paths, but faster than libjxl at equal effort on lossless JPEG XL encode.
