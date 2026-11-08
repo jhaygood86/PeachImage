@@ -44,12 +44,18 @@ internal static class Vp8LHuffmanTableBuilder
 
     private const int MaxAllowedCodeLength = WebpDecodingLimits.MaxHuffmanCodeLength;
 
+    /// <summary>Alphabets up to this size (every one but a large colour cache's green alphabet) use stack scratch while a table is built.</summary>
+    internal const int StackAlphabetSize = 512;
+
     /// <summary>
     /// Builds a table for <paramref name="codeLengths"/> (one entry per symbol; 0 = symbol unused). Throws
     /// <see cref="WebpDecodingException"/> if the lengths don't form a valid canonical Huffman tree (Kraft
     /// inequality violated, over-subscribed table, or every length is zero).
     /// </summary>
-    public static Vp8LHuffmanTable Build(ReadOnlySpan<int> codeLengths, int rootBits)
+    /// <param name="codeLengths">One code length per symbol.</param>
+    /// <param name="rootBits">The root level width.</param>
+    /// <param name="pooled">Rent the table from the shared array pool; the caller then owes <see cref="Vp8LHuffmanTable.Release"/>.</param>
+    public static Vp8LHuffmanTable Build(ReadOnlySpan<int> codeLengths, int rootBits, bool pooled = false)
     {
         int totalSize = BuildInternal(codeLengths, rootBits, null);
         if (totalSize <= 0)
@@ -57,10 +63,20 @@ internal static class Vp8LHuffmanTableBuilder
             throw new WebpDecodingException("Invalid VP8L Huffman code: code lengths do not form a valid canonical Huffman tree.");
         }
 
-        var entries = new Vp8LHuffmanCode[totalSize];
+        Vp8LHuffmanCode[] entries;
+        if (pooled)
+        {
+            entries = System.Buffers.ArrayPool<Vp8LHuffmanCode>.Shared.Rent(totalSize);
+            Array.Clear(entries, 0, totalSize);
+        }
+        else
+        {
+            entries = new Vp8LHuffmanCode[totalSize];
+        }
+
         BuildInternal(codeLengths, rootBits, entries);
 
-        return new Vp8LHuffmanTable { Entries = entries, RootBits = rootBits };
+        return new Vp8LHuffmanTable { Entries = entries, RootBits = rootBits, IsPooled = pooled };
     }
 
     /// <summary>
@@ -103,7 +119,8 @@ internal static class Vp8LHuffmanTableBuilder
             offset[length + 1] = offset[length] + count[length];
         }
 
-        var sorted = new int[alphabetSize];
+        // Symbols in code order. Needed only while the table is built, so it lives on the stack for every alphabet but a large colour cache.
+        Span<int> sorted = alphabetSize <= StackAlphabetSize ? stackalloc int[StackAlphabetSize] : new int[alphabetSize];
         for (int symbol = 0; symbol < alphabetSize; symbol++)
         {
             int length = codeLengths[symbol];

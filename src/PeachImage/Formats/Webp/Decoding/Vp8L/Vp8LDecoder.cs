@@ -114,6 +114,7 @@ internal static class Vp8LDecoder
             }
 
             pipeline?.Dispose();
+            stream.Release();
             WebpBufferPool.SharedUInt32.Return(stream.Pixels);
         }
     }

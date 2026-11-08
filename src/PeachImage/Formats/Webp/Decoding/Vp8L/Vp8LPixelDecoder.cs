@@ -25,7 +25,15 @@ internal static class Vp8LPixelDecoder
     public static uint[] DecodeImageStream(Vp8LBitReader reader, int width, int height, bool allowRecursion, bool rentFromPool = false)
     {
         var stream = new Vp8LPixelStream(reader, width, height, allowRecursion, rentFromPool);
-        stream.DecodeUntil(stream.PixelCount);
+        try
+        {
+            stream.DecodeUntil(stream.PixelCount);
+        }
+        finally
+        {
+            stream.Release();
+        }
+
         return stream.Pixels;
     }
 }
@@ -86,6 +94,15 @@ internal sealed class Vp8LPixelStream
 
         PixelCount = (int)pixelCount;
         Pixels = rentFromPool ? WebpBufferPool.SharedUInt32.Rent(PixelCount) : new uint[pixelCount];
+    }
+
+    /// <summary>Returns the Huffman tables to the pool. Call once the stream is fully decoded; decoding must not resume afterward.</summary>
+    public void Release()
+    {
+        foreach (var group in _groups)
+        {
+            group.Release();
+        }
     }
 
     /// <summary>The decoded ARGB pixels. When rented from the pool the array may be longer than <see cref="PixelCount"/>.</summary>
