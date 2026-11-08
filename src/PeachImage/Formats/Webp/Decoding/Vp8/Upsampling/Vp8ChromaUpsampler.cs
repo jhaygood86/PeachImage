@@ -70,10 +70,10 @@ internal static class Vp8ChromaUpsampler
         int pairCount = (width + 1) / 2;
         int c = 0;
 
-        if (Sse2.IsSupported && nearRow.Length >= chromaWidth && farRow.Length >= chromaWidth && destination.Length >= width)
+        if (Vector128.IsHardwareAccelerated && nearRow.Length >= chromaWidth && farRow.Length >= chromaWidth && destination.Length >= width)
         {
-            // Column 0 clamps its left neighbour, so it is peeled; the vector loop then handles eight chroma
-            // columns (sixteen output pixels) per step wherever every neighbour read and every output byte is in range.
+            // Column 0 clamps its left neighbour, so it is peeled; the vector loops then handle whole groups of chroma
+            // columns wherever every neighbour read and every output byte is in range.
             if (pairCount > 1)
             {
                 UpsamplePair(nearRow, farRow, destination, width, lastColumn, 0);
@@ -83,32 +83,59 @@ internal static class Vp8ChromaUpsampler
             ref byte nearRef = ref MemoryMarshal.GetReference(nearRow);
             ref byte farRef = ref MemoryMarshal.GetReference(farRow);
             ref byte dstRef = ref MemoryMarshal.GetReference(destination);
-            var zero = Vector128<byte>.Zero;
-            var eight = Vector128.Create((ushort)8);
 
+            if (Avx2.IsSupported)
+            {
+                // Sixteen chroma columns (thirty-two output pixels) per step. Packs and unpacks work within each 128-bit half, so
+                // the half holding columns c..c+7 and the half holding c+8..c+15 each interleave their own even and odd results,
+                // which leaves the thirty-two bytes in output order.
+                var wideEight = Vector256.Create((ushort)8);
+                while (c + 16 <= lastColumn && (2 * (c + 16)) <= width)
+                {
+                    var nearPrevious = Widen16(ref nearRef, c - 1);
+                    var nearCurrent = Widen16(ref nearRef, c);
+                    var nearNext = Widen16(ref nearRef, c + 1);
+                    var farPrevious = Widen16(ref farRef, c - 1);
+                    var farCurrent = Widen16(ref farRef, c);
+                    var farNext = Widen16(ref farRef, c + 1);
+
+                    var shared = Avx2.Add(
+                        Avx2.Add(Avx2.ShiftLeftLogical(nearCurrent, 3), nearCurrent),
+                        Avx2.Add(Avx2.Add(Avx2.ShiftLeftLogical(farCurrent, 1), farCurrent), wideEight));
+
+                    var even = Avx2.ShiftRightLogical(
+                        Avx2.Add(Avx2.Add(shared, Avx2.Add(Avx2.ShiftLeftLogical(nearPrevious, 1), nearPrevious)), farPrevious), 4);
+                    var odd = Avx2.ShiftRightLogical(
+                        Avx2.Add(Avx2.Add(shared, Avx2.Add(Avx2.ShiftLeftLogical(nearNext, 1), nearNext)), farNext), 4);
+
+                    var evenBytes = Avx2.PackUnsignedSaturate(even.AsInt16(), even.AsInt16());
+                    var oddBytes = Avx2.PackUnsignedSaturate(odd.AsInt16(), odd.AsInt16());
+                    Avx2.UnpackLow(evenBytes, oddBytes).StoreUnsafe(ref dstRef, (nuint)(2 * c));
+
+                    c += 16;
+                }
+            }
+
+            // Eight chroma columns (sixteen output pixels) per step in portable 128-bit vectors: x86 without AVX2, ARM64 and WASM.
+            var eight = Vector128.Create((ushort)8);
+            var interleave = Vector128.Create((byte)0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15);
             while (c + 8 <= lastColumn && (2 * (c + 8)) <= width)
             {
-                var nearPrevious = Widen8(ref nearRef, c - 1, zero);
-                var nearCurrent = Widen8(ref nearRef, c, zero);
-                var nearNext = Widen8(ref nearRef, c + 1, zero);
-                var farPrevious = Widen8(ref farRef, c - 1, zero);
-                var farCurrent = Widen8(ref farRef, c, zero);
-                var farNext = Widen8(ref farRef, c + 1, zero);
+                var nearPrevious = Widen8(ref nearRef, c - 1);
+                var nearCurrent = Widen8(ref nearRef, c);
+                var nearNext = Widen8(ref nearRef, c + 1);
+                var farPrevious = Widen8(ref farRef, c - 1);
+                var farCurrent = Widen8(ref farRef, c);
+                var farNext = Widen8(ref farRef, c + 1);
 
                 // 9 * near + 3 * far + 8, shared by the even and odd output of each column.
-                var shared = Sse2.Add(
-                    Sse2.Add(Sse2.ShiftLeftLogical(nearCurrent, 3), nearCurrent),
-                    Sse2.Add(Sse2.Add(Sse2.ShiftLeftLogical(farCurrent, 1), farCurrent), eight));
+                var shared = (nearCurrent << 3) + nearCurrent + (farCurrent << 1) + farCurrent + eight;
 
-                var even = Sse2.ShiftRightLogical(
-                    Sse2.Add(Sse2.Add(shared, Sse2.Add(Sse2.ShiftLeftLogical(nearPrevious, 1), nearPrevious)), farPrevious), 4);
-                var odd = Sse2.ShiftRightLogical(
-                    Sse2.Add(Sse2.Add(shared, Sse2.Add(Sse2.ShiftLeftLogical(nearNext, 1), nearNext)), farNext), 4);
+                var even = Vector128.ShiftRightLogical(shared + (nearPrevious << 1) + nearPrevious + farPrevious, 4);
+                var odd = Vector128.ShiftRightLogical(shared + (nearNext << 1) + nearNext + farNext, 4);
 
-                // Every lane is at most 255, so the saturating pack is exact; interleave even/odd back into pixel order.
-                var evenBytes = Sse2.PackUnsignedSaturate(even.AsInt16(), even.AsInt16());
-                var oddBytes = Sse2.PackUnsignedSaturate(odd.AsInt16(), odd.AsInt16());
-                Sse2.UnpackLow(evenBytes, oddBytes).StoreUnsafe(ref dstRef, (nuint)(2 * c));
+                // Every lane is at most 255, so the narrowing is exact; the shuffle interleaves even/odd back into pixel order.
+                Vector128.Shuffle(Vector128.Narrow(even, odd), interleave).StoreUnsafe(ref dstRef, (nuint)(2 * c));
 
                 c += 8;
             }
@@ -120,9 +147,13 @@ internal static class Vp8ChromaUpsampler
         }
     }
 
+    /// <summary>Loads sixteen consecutive samples starting at <paramref name="index"/> and widens them to 16-bit lanes.</summary>
+    private static Vector256<ushort> Widen16(ref byte row, int index) =>
+        Avx2.ConvertToVector256Int16(Vector128.LoadUnsafe(ref row, (nuint)index)).AsUInt16();
+
     /// <summary>Loads eight consecutive samples starting at <paramref name="index"/> and widens them to 16-bit lanes.</summary>
-    private static Vector128<ushort> Widen8(ref byte row, int index, Vector128<byte> zero) =>
-        Sse2.UnpackLow(Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref row, index))).AsByte(), zero).AsUInt16();
+    private static Vector128<ushort> Widen8(ref byte row, int index) =>
+        Vector128.WidenLower(Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref row, index))).AsByte());
 
     /// <summary>The two output pixels (even then odd) sharing chroma column <paramref name="c"/>, with edge clamping.</summary>
     private static void UpsamplePair(ReadOnlySpan<byte> nearRow, ReadOnlySpan<byte> farRow, Span<byte> destination, int width, int lastColumn, int c)

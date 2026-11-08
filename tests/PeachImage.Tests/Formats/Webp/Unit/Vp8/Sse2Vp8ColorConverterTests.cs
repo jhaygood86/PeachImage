@@ -63,6 +63,12 @@ public class Sse2Vp8ColorConverterTests
     [InlineData(31)]
     [InlineData(32)]
     [InlineData(33)]
+    [InlineData(63)]
+    [InlineData(64)]
+    [InlineData(65)]
+    [InlineData(95)]
+    [InlineData(96)]
+    [InlineData(97)]
     [InlineData(100)]
     public void MatchesTheScalarTier_AtEveryRowLength(int width)
     {
@@ -93,8 +99,13 @@ public class Sse2Vp8ColorConverterTests
     [InlineData(15)]
     [InlineData(16)]
     [InlineData(17)]
+    [InlineData(31)]
+    [InlineData(32)]
+    [InlineData(33)]
     [InlineData(47)]
     [InlineData(64)]
+    [InlineData(65)]
+    [InlineData(97)]
     public void WithAlpha_MatchesScalarConversionPlusTheAlphaPlane(int width)
     {
         if (!Sse2Vp8ColorConverter.IsSupported)

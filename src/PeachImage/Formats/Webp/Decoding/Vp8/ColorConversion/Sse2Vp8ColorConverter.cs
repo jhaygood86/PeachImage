@@ -50,6 +50,43 @@ internal sealed class Sse2Vp8ColorConverter : IVp8ColorConverter
             Vector128<byte> shuffle1Red = RgbShuffle[3], shuffle1Green = RgbShuffle[4], shuffle1Blue = RgbShuffle[5];
             Vector128<byte> shuffle2Red = RgbShuffle[6], shuffle2Green = RgbShuffle[7], shuffle2Blue = RgbShuffle[8];
 
+            if (Avx2.IsSupported)
+            {
+                // Thirty-two pixels at a time. The 128-bit shuffle tables are repeated in both halves, which shuffle independently, so
+                // each half produces the three output runs of its sixteen pixels and the halves are recombined into 32-byte stores.
+                var wideRed0 = Vector256.Create(shuffle0Red, shuffle0Red);
+                var wideGreen0 = Vector256.Create(shuffle0Green, shuffle0Green);
+                var wideBlue0 = Vector256.Create(shuffle0Blue, shuffle0Blue);
+                var wideRed1 = Vector256.Create(shuffle1Red, shuffle1Red);
+                var wideGreen1 = Vector256.Create(shuffle1Green, shuffle1Green);
+                var wideBlue1 = Vector256.Create(shuffle1Blue, shuffle1Blue);
+                var wideRed2 = Vector256.Create(shuffle2Red, shuffle2Red);
+                var wideGreen2 = Vector256.Create(shuffle2Green, shuffle2Green);
+                var wideBlue2 = Vector256.Create(shuffle2Blue, shuffle2Blue);
+
+                for (; x + (2 * Lanes) <= width; x += 2 * Lanes)
+                {
+                    Convert32(
+                        Vector256.LoadUnsafe(ref yRef, (nuint)x),
+                        Vector256.LoadUnsafe(ref uRef, (nuint)x),
+                        Vector256.LoadUnsafe(ref vRef, (nuint)x),
+                        out var wideRed,
+                        out var wideGreen,
+                        out var wideBlue);
+
+                    var run0 = Avx2.Shuffle(wideRed, wideRed0) | Avx2.Shuffle(wideGreen, wideGreen0) | Avx2.Shuffle(wideBlue, wideBlue0);
+                    var run1 = Avx2.Shuffle(wideRed, wideRed1) | Avx2.Shuffle(wideGreen, wideGreen1) | Avx2.Shuffle(wideBlue, wideBlue1);
+                    var run2 = Avx2.Shuffle(wideRed, wideRed2) | Avx2.Shuffle(wideGreen, wideGreen2) | Avx2.Shuffle(wideBlue, wideBlue2);
+
+                    // Low halves hold the runs of pixels 0-15, high halves those of pixels 16-31: output order is run0, run1, run2 of the
+                    // low half, then the same of the high half.
+                    ref byte wideDst = ref Unsafe.Add(ref outRef, x * 3);
+                    Avx2.Permute2x128(run0, run1, 0x20).StoreUnsafe(ref wideDst);
+                    Avx2.Permute2x128(run2, run0, 0x30).StoreUnsafe(ref wideDst, 32);
+                    Avx2.Permute2x128(run1, run2, 0x31).StoreUnsafe(ref wideDst, 64);
+                }
+            }
+
             for (; x + Lanes <= width; x += Lanes)
             {
                 Convert16(
@@ -88,6 +125,40 @@ internal sealed class Sse2Vp8ColorConverter : IVp8ColorConverter
         ref byte outRef = ref MemoryMarshal.GetReference(rgba);
 
         int x = 0;
+        if (Avx2.IsSupported)
+        {
+            for (; x + (2 * Lanes) <= width; x += 2 * Lanes)
+            {
+                Convert32(
+                    Vector256.LoadUnsafe(ref yRef, (nuint)x),
+                    Vector256.LoadUnsafe(ref uRef, (nuint)x),
+                    Vector256.LoadUnsafe(ref vRef, (nuint)x),
+                    out var wideRed,
+                    out var wideGreen,
+                    out var wideBlue);
+
+                var wideAlpha = Vector256.LoadUnsafe(ref aRef, (nuint)x);
+
+                // Unpacks work within each 128-bit half, so the halves (pixels 0-15 and 16-31) stay apart and the quarters are
+                // put in memory order by the 128-bit permutes below.
+                var redGreenLow = Avx2.UnpackLow(wideRed, wideGreen).AsUInt16();
+                var redGreenHigh = Avx2.UnpackHigh(wideRed, wideGreen).AsUInt16();
+                var blueAlphaLow = Avx2.UnpackLow(wideBlue, wideAlpha).AsUInt16();
+                var blueAlphaHigh = Avx2.UnpackHigh(wideBlue, wideAlpha).AsUInt16();
+
+                var pixels0 = Avx2.UnpackLow(redGreenLow, blueAlphaLow).AsByte();
+                var pixels1 = Avx2.UnpackHigh(redGreenLow, blueAlphaLow).AsByte();
+                var pixels2 = Avx2.UnpackLow(redGreenHigh, blueAlphaHigh).AsByte();
+                var pixels3 = Avx2.UnpackHigh(redGreenHigh, blueAlphaHigh).AsByte();
+
+                ref byte wideDst = ref Unsafe.Add(ref outRef, x * 4);
+                Avx2.Permute2x128(pixels0, pixels1, 0x20).StoreUnsafe(ref wideDst);
+                Avx2.Permute2x128(pixels2, pixels3, 0x20).StoreUnsafe(ref wideDst, 32);
+                Avx2.Permute2x128(pixels0, pixels1, 0x31).StoreUnsafe(ref wideDst, 64);
+                Avx2.Permute2x128(pixels2, pixels3, 0x31).StoreUnsafe(ref wideDst, 96);
+            }
+        }
+
         for (; x + Lanes <= width; x += Lanes)
         {
             Convert16(
@@ -140,6 +211,53 @@ internal sealed class Sse2Vp8ColorConverter : IVp8ColorConverter
         red = Sse2.PackUnsignedSaturate(redLow, redHigh);
         green = Sse2.PackUnsignedSaturate(greenLow, greenHigh);
         blue = Sse2.PackUnsignedSaturate(blueLow, blueHigh);
+    }
+
+    /// <summary>Converts 32 pixels to planar R, G and B bytes, in pixel order (the in-half packs keep each half's sixteen pixels together).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Convert32(
+        Vector256<byte> y,
+        Vector256<byte> u,
+        Vector256<byte> v,
+        out Vector256<byte> red,
+        out Vector256<byte> green,
+        out Vector256<byte> blue)
+    {
+        var zero = Vector256<byte>.Zero;
+        Convert16Wide(Avx2.UnpackLow(zero, y).AsUInt16(), Avx2.UnpackLow(zero, u).AsUInt16(), Avx2.UnpackLow(zero, v).AsUInt16(), out var redLow, out var greenLow, out var blueLow);
+        Convert16Wide(Avx2.UnpackHigh(zero, y).AsUInt16(), Avx2.UnpackHigh(zero, u).AsUInt16(), Avx2.UnpackHigh(zero, v).AsUInt16(), out var redHigh, out var greenHigh, out var blueHigh);
+
+        // Low unpacks hold pixels 0-7 | 16-23 and high unpacks 8-15 | 24-31, so packing low then high puts 0-15 in the lower half and 16-31 in the upper.
+        red = Avx2.PackUnsignedSaturate(redLow, redHigh);
+        green = Avx2.PackUnsignedSaturate(greenLow, greenHigh);
+        blue = Avx2.PackUnsignedSaturate(blueLow, blueHigh);
+    }
+
+    /// <summary><see cref="Convert8"/> over sixteen 16-bit lanes.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Convert16Wide(
+        Vector256<ushort> y16,
+        Vector256<ushort> u16,
+        Vector256<ushort> v16,
+        out Vector256<short> red,
+        out Vector256<short> green,
+        out Vector256<short> blue)
+    {
+        var luma = Avx2.MultiplyHigh(y16, Vector256.Create((ushort)Vp8ScalarColorConverter.YCoefficient));
+        var vToRed = Avx2.MultiplyHigh(v16, Vector256.Create((ushort)Vp8ScalarColorConverter.VToRed));
+        var uToGreen = Avx2.MultiplyHigh(u16, Vector256.Create((ushort)Vp8ScalarColorConverter.UToGreen));
+        var vToGreen = Avx2.MultiplyHigh(v16, Vector256.Create((ushort)Vp8ScalarColorConverter.VToGreen));
+        var uToBlue = Avx2.MultiplyHigh(u16, Vector256.Create((ushort)Vp8ScalarColorConverter.UToBlue));
+
+        var r = Avx2.SubtractSaturate(Avx2.AddSaturate(luma, vToRed), Vector256.Create((ushort)-Vp8ScalarColorConverter.RedBias));
+        var g = Avx2.SubtractSaturate(
+            Avx2.SubtractSaturate(Avx2.AddSaturate(luma, Vector256.Create((ushort)Vp8ScalarColorConverter.GreenBias)), uToGreen),
+            vToGreen);
+        var b = Avx2.SubtractSaturate(Avx2.AddSaturate(luma, uToBlue), Vector256.Create((ushort)-Vp8ScalarColorConverter.BlueBias));
+
+        red = Avx2.ShiftRightLogical(r, 6).AsInt16();
+        green = Avx2.ShiftRightLogical(g, 6).AsInt16();
+        blue = Avx2.ShiftRightLogical(b, 6).AsInt16();
     }
 
     /// <summary>Converts 8 pixels whose samples are already scaled to <c>s &lt;&lt; 8</c>; results are the scalar tier's values after <c>&gt;&gt; 6</c>, before the 0..255 clamp.</summary>

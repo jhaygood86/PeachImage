@@ -52,6 +52,53 @@ public class Vp8ChromaUpsamplerRowTests
         }
     }
 
+    /// <summary>
+    /// Rows long enough for the wide vector loops (sixteen chroma columns at a time) to run, with widths that end exactly on, one short
+    /// of and one past a loop step, so the hand-over to the narrower loops and the scalar tail is exercised too.
+    /// </summary>
+    [Theory]
+    [InlineData(17)]
+    [InlineData(18)]
+    [InlineData(33)]
+    [InlineData(34)]
+    [InlineData(40)]
+    [InlineData(49)]
+    [InlineData(64)]
+    [InlineData(65)]
+    [InlineData(100)]
+    [InlineData(241)]
+    public void UpsampleRow_MatchesPerPixelSample_OnRowsLongEnoughForTheWideLoops(int chromaWidth)
+    {
+        const int ChromaHeight = 5;
+        var random = new Random(chromaWidth);
+        int stride = chromaWidth + 3;
+
+        byte[] plane = new byte[stride * ChromaHeight];
+        random.NextBytes(plane);
+
+        foreach (int width in new[] { (2 * chromaWidth) - 1, 2 * chromaWidth })
+        {
+            for (int outY = 0; outY < 2 * ChromaHeight; outY++)
+            {
+                int nearRow = outY >> 1;
+                int farRow = Clamp((outY >> 1) + (((outY & 1) == 1) ? 1 : -1), ChromaHeight - 1);
+
+                byte[] actual = new byte[width];
+                Vp8ChromaUpsampler.UpsampleRow(
+                    plane.AsSpan(nearRow * stride, chromaWidth),
+                    plane.AsSpan(farRow * stride, chromaWidth),
+                    actual,
+                    width,
+                    chromaWidth);
+
+                for (int x = 0; x < width; x++)
+                {
+                    Assert.Equal(Vp8ChromaUpsampler.Sample(plane, stride, chromaWidth, ChromaHeight, x, outY), actual[x]);
+                }
+            }
+        }
+    }
+
     /// <summary>Constant chroma must upsample to that same constant everywhere — the rounding has to be exact, not merely close.</summary>
     [Theory]
     [InlineData(0)]
