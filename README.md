@@ -483,4 +483,5 @@ benchmark project only — never referenced by the shipped library). See
 ## License
 
 MIT — see [LICENSE](LICENSE). One algorithm's numerical structure (the AAN fast DCT/IDCT butterfly wiring)
-was referenced from libjpeg-turbo during implementation; see [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
+was referenced from libjpeg-turbo during implementation, and parts of the WebP codec were transcribed from libwebp's
+BSD-licensed source; see [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
