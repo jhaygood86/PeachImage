@@ -274,6 +274,56 @@ internal sealed class Vp8BoolDecoder
         return bit;
     }
 
+    /// <summary>
+    /// <see cref="GetBit(ref State, int)"/> for a bit the caller uses as a number rather than to choose a code
+    /// path: returns <c>-1</c> for a 1 bit and <c>0</c> for a 0 bit, computed without a branch. A branch on an
+    /// effectively random bit (token signs, extra magnitude bits) is a mispredict about half the time; as
+    /// arithmetic the same bit costs a couple of extra cycles instead. Same arithmetic, same bits consumed.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int GetMask(ref State state, int probability)
+    {
+        uint range = state.Range;
+        if (state.Bits < 0)
+        {
+            if (state.Pos + (sizeof(ulong) - 1) < _length)
+            {
+                ulong incoming = BinaryPrimitives.ReadUInt64BigEndian(
+                    MemoryMarshal.CreateReadOnlySpan(ref _buffer[_start + state.Pos], sizeof(ulong)));
+                state.Pos += RefillBits >> 3;
+                state.Value = (incoming >> (64 - RefillBits)) | (state.Value << RefillBits);
+                state.Bits += RefillBits;
+            }
+            else
+            {
+                ulong tail = 0;
+                if (state.Pos < _length)
+                {
+                    tail = _buffer[_start + state.Pos++];
+                }
+
+                state.Value = tail | (state.Value << 8);
+                state.Bits += 8;
+            }
+        }
+
+        int pos = state.Bits;
+        uint split = (range * (uint)probability) >> 8;
+        uint value = (uint)(state.Value >> pos);
+
+        // Both operands are below 2^16, so the sign of (split - value) says whether value > split.
+        int mask = (int)(split - value) >> 31;
+        range = (uint)(((int)(split + 1) & ~mask) | ((int)(range - split) & mask));
+        state.Value -= ((ulong)(split + 1) << pos) & (ulong)(long)mask;
+
+        int shift = BitOperations.LeadingZeroCount(range) - 24;
+        range <<= shift;
+        state.Bits -= shift;
+        state.Range = range - 1;
+
+        return mask;
+    }
+
     /// <summary>Reads a single bit with a fixed 50/50 probability (probability = 128).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool GetFlag() => GetBit(128) != 0;

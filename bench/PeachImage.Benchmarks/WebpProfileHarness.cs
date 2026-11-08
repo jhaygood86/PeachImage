@@ -33,6 +33,37 @@ internal static class WebpProfileHarness
     /// <summary>Runs <paramref name="args"/>[1] scenario for <paramref name="args"/>[2] iterations. Returns a process exit code.</summary>
     public static int Run(string[] args)
     {
+        if (args.Length >= 2 && args[1].Equals("bool", StringComparison.OrdinalIgnoreCase))
+        {
+            // Raw bool-decoder throughput on a random stream with a mid probability, branching on every bit.
+            var rng = new Random(1);
+            byte[] data = new byte[1 << 22];
+            rng.NextBytes(data);
+            int prob = args.Length >= 3 ? int.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture) : 128;
+            foreach (int round in new[] { 0, 1, 2 })
+            {
+                var br = new PeachImage.Formats.Webp.Decoding.Vp8.Vp8BoolDecoder(data, 0, data.Length);
+                var st = br.Load();
+                int ones = 0;
+                var sw = Stopwatch.StartNew();
+                for (int i = 0; i < 20_000_000; i++)
+                {
+                    if (br.GetBit(ref st, prob) != 0)
+                    {
+                        ones += 3;
+                    }
+                    else
+                    {
+                        ones ^= 1;
+                    }
+                }
+
+                Console.WriteLine($"prob {prob}: {sw.Elapsed.TotalMilliseconds * 1e6 / 20_000_000:F2} ns/decode (ones={ones})");
+            }
+
+            return 0;
+        }
+
         if (args.Length >= 2 && args[1].Equals("hash", StringComparison.OrdinalIgnoreCase))
         {
             // Prints a full-pixel SHA-256 per scenario, so an optimization can be checked for bit-identical output.

@@ -165,7 +165,9 @@ internal static class Vp8CoefficientDecoder
                 nextCtx = 2;
             }
 
-            Unsafe.Add(ref outputBase, zigZag[n]) = (short)(br.GetBit(ref state, 128) != 0 ? -magnitude : magnitude);
+            // Branch-free sign: a token's sign is a coin flip, so branching on it mispredicts about half the time.
+            int signMask = br.GetMask(ref state, 128);
+            Unsafe.Add(ref outputBase, zigZag[n]) = (short)((magnitude ^ signMask) - signMask);
 
             n++;
             ctx = nextCtx;
@@ -224,24 +226,24 @@ internal static class Vp8CoefficientDecoder
         int v;
         if (br.GetBit(ref state, Unsafe.Add(ref p, 3)) == 0)
         {
-            v = br.GetBit(ref state, Unsafe.Add(ref p, 4)) == 0 ? 2 : 3 + br.GetBit(ref state, Unsafe.Add(ref p, 5));
+            v = br.GetBit(ref state, Unsafe.Add(ref p, 4)) == 0 ? 2 : 3 - br.GetMask(ref state, Unsafe.Add(ref p, 5));
         }
         else if (br.GetBit(ref state, Unsafe.Add(ref p, 6)) == 0)
         {
             if (br.GetBit(ref state, Unsafe.Add(ref p, 7)) == 0)
             {
-                v = 5 + br.GetBit(ref state, 159);
+                v = 5 - br.GetMask(ref state, 159);
             }
             else
             {
-                v = 7 + (2 * br.GetBit(ref state, 165));
-                v += br.GetBit(ref state, 145);
+                v = 7 - (2 * br.GetMask(ref state, 165));
+                v -= br.GetMask(ref state, 145);
             }
         }
         else
         {
-            int bit1 = br.GetBit(ref state, Unsafe.Add(ref p, 8));
-            int bit0 = br.GetBit(ref state, Unsafe.Add(ref p, 9 + bit1));
+            int bit1 = -br.GetMask(ref state, Unsafe.Add(ref p, 8));
+            int bit0 = -br.GetMask(ref state, Unsafe.Add(ref p, 9 + bit1));
             int cat = (2 * bit1) + bit0;
             byte[] table = cat switch
             {
@@ -254,7 +256,7 @@ internal static class Vp8CoefficientDecoder
             v = 0;
             foreach (byte prob in table)
             {
-                v += v + br.GetBit(ref state, prob);
+                v += v - br.GetMask(ref state, prob);
             }
 
             v += 3 + (8 << cat);
