@@ -195,10 +195,11 @@ internal static class Vp8LPredictorTransform
     /// <summary>
     /// Predictor 11 (the mode photographic lossless images use almost exclusively) with the whole recurrence
     /// kept in vector registers. The output pixel feeds the next pixel's prediction, so the loop is a
-    /// latency chain, and the scalar form paid for it with GPR/XMM transfers and a SWAR add on every step.
-    /// Here the previous output never leaves its XMM register: <c>psadbw</c> measures both candidates'
-    /// distances to the top-left pixel at once, a compare mask picks left or top, and <c>paddb</c> adds the
-    /// residual. The same arrangement as libwebp's <c>PredictorAdd11_SSE2</c>; results are bit-identical to
+    /// latency chain, and everything that does not depend on the previous output is kept off it. What does:
+    /// one <c>psadbw</c> (the previous output against the top-left pixel), a compare against the distance of
+    /// the top pixel (which does not depend on it), and a select between the two candidate sums
+    /// <c>residual + left</c> and <c>residual + top</c>, both of which are formed while the distance is being
+    /// measured. The same arrangement as libwebp's <c>PredictorAdd11_SSE2</c>; results are bit-identical to
     /// <see cref="SelectScalar"/>.
     /// </summary>
     private static void RunSelectSse2(Span<uint> pixels, int width, int rowBase, int xStart, int runLength)
@@ -210,29 +211,26 @@ internal static class Vp8LPredictorTransform
         }
 
         ref uint origin = ref MemoryMarshal.GetReference(pixels);
-        var left = Vector128.CreateScalar(Unsafe.Add(ref origin, start - 1));
+        var left = Vector128.CreateScalar(Unsafe.Add(ref origin, start - 1)).AsByte();
 
         for (int i = 0; i < runLength; i++)
         {
             ref uint current = ref Unsafe.Add(ref origin, start + i);
-            var top = Vector128.CreateScalar(Unsafe.Add(ref origin, start + i - width));
-            var topLeft = Vector128.CreateScalar(Unsafe.Add(ref origin, start + i - width - 1));
+            var top = Vector128.CreateScalar(Unsafe.Add(ref origin, start + i - width)).AsByte();
+            var topLeft = Vector128.CreateScalar(Unsafe.Add(ref origin, start + i - width - 1)).AsByte();
+            var residual = Vector128.CreateScalar(current).AsByte();
 
-            // [top, left] and [topLeft, topLeft] as 64-bit lanes (the upper 32 bits of each are zero), so
-            // psadbw yields |top - topLeft| in 32-bit lane 0 and |left - topLeft| in lane 2.
-            var operands = Sse2.UnpackLow(top.AsUInt64(), left.AsUInt64()).AsByte();
-            var reference = Sse2.UnpackLow(topLeft.AsUInt64(), topLeft.AsUInt64()).AsByte();
-            var sums = Sse2.SumAbsoluteDifferences(operands, reference).AsInt32();
-
-            var distanceToTop = Sse2.Shuffle(sums, 0x00);
-            var distanceToLeft = Sse2.Shuffle(sums, 0xAA);
+            // Sum of absolute channel differences, in 32-bit lane 0 (the other bytes are zero and cancel).
+            var distanceToTop = Sse2.SumAbsoluteDifferences(top, topLeft).AsInt32();
+            var distanceToLeft = Sse2.SumAbsoluteDifferences(left, topLeft).AsInt32();
 
             // Select returns top unless left is strictly farther from the top-left pixel.
-            var pickLeft = Sse2.CompareGreaterThan(distanceToLeft, distanceToTop).AsUInt32();
-            var prediction = Vector128.ConditionalSelect(pickLeft, left, top);
+            var pickLeft = Sse2.CompareGreaterThan(distanceToLeft, distanceToTop).AsByte();
+            var withLeft = Sse2.Add(residual, left);
+            var withTop = Sse2.Add(residual, top);
 
-            left = Sse2.Add(prediction.AsByte(), Vector128.CreateScalar(current).AsByte()).AsUInt32();
-            current = left.ToScalar();
+            left = Vector128.ConditionalSelect(pickLeft, withLeft, withTop);
+            current = left.AsUInt32().ToScalar();
         }
     }
 

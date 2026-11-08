@@ -152,41 +152,37 @@ internal static class Vp8LFastPixelLoop
         int tileMask = hasMeta ? metaImage!.TileMask : 0;
         ref uint pixelBase = ref MemoryMarshal.GetArrayDataReference(pixels);
 
-        // The active group's tables live in locals: GroupView has more fields than the JIT will promote to
-        // registers, so reading them through a struct would be a memory load per symbol.
-        Vp8LHuffmanCode[] greenTable, redTable, blueTable, alphaTable, distanceTable;
-        bool trivial;
-        uint trivialArgb;
-        bool alphaIsConstant;
-        uint constantAlpha;
-        views[hasMeta ? metaImage!.GetGroupIndex(col, row) : 0].Deconstruct(out greenTable, out redTable, out blueTable, out alphaTable, out distanceTable, out trivial, out trivialArgb, out alphaIsConstant, out constantAlpha);
+        // The active group is one reference into the views: its tables are loaded where they are used. Those loads do not depend on
+        // the bit state, so they overlap the symbol chain, and holding nine group fields in registers instead left the bit state
+        // spilling once a pixel needed all four colour codes.
+        ref Vp8LFastPixelLoop.GroupView group = ref views[hasMeta ? metaImage!.GetGroupIndex(col, row) : 0];
 
         while (pos < limit && bits.Pos <= safeEnd)
         {
             if (hasMeta && (col & tileMask) == 0)
             {
-                views[metaImage!.GetGroupIndex(col, row)].Deconstruct(out greenTable, out redTable, out blueTable, out alphaTable, out distanceTable, out trivial, out trivialArgb, out alphaIsConstant, out constantAlpha);
+                group = ref views[metaImage!.GetGroupIndex(col, row)];
             }
 
             Refill(ref bits, data);
-            int code = ReadSymbol(greenTable, ref bits);
+            int code = ReadSymbol(group.Green, ref bits);
 
             if (code < NumLiteralCodes)
             {
                 uint argb;
-                if (trivial)
+                if (group.Trivial)
                 {
-                    argb = trivialArgb | ((uint)code << 8);
+                    argb = group.TrivialArgb | ((uint)code << 8);
                 }
                 else
                 {
-                    int red = ReadSymbol(redTable, ref bits);
+                    int red = ReadSymbol(group.Red, ref bits);
                     Refill(ref bits, data);
-                    int blue = ReadSymbol(blueTable, ref bits);
+                    int blue = ReadSymbol(group.Blue, ref bits);
 
                     // Photographs are usually opaque: a one-symbol alpha code costs no bits, but reading it
                     // would still put a table load and a shift on the bit-state dependency chain.
-                    uint alphaBits = alphaIsConstant ? constantAlpha : (uint)ReadSymbol(alphaTable, ref bits) << 24;
+                    uint alphaBits = group.AlphaIsConstant ? group.ConstantAlpha : (uint)ReadSymbol(group.Alpha, ref bits) << 24;
                     argb = alphaBits | ((uint)red << 16) | ((uint)code << 8) | (uint)blue;
                 }
 
@@ -201,7 +197,7 @@ internal static class Vp8LFastPixelLoop
             {
                 int length = ReadPrefixValue(code - NumLiteralCodes, ref bits);
                 Refill(ref bits, data);
-                int distanceSymbol = ReadSymbol(distanceTable, ref bits);
+                int distanceSymbol = ReadSymbol(group.Distance, ref bits);
                 Refill(ref bits, data);
                 int distanceCode = ReadPrefixValue(distanceSymbol, ref bits);
                 int distance = Vp8LBackwardReferenceTables.PlaneCodeToDistance(width, distanceCode);
@@ -224,7 +220,7 @@ internal static class Vp8LFastPixelLoop
                         row++;
                     }
 
-                    views[metaImage!.GetGroupIndex(col, row)].Deconstruct(out greenTable, out redTable, out blueTable, out alphaTable, out distanceTable, out trivial, out trivialArgb, out alphaIsConstant, out constantAlpha);
+                    group = ref views[metaImage!.GetGroupIndex(col, row)];
                 }
             }
             else if (code < colorCacheLimit)
