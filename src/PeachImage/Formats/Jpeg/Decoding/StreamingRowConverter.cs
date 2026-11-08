@@ -30,6 +30,7 @@ internal sealed class StreamingRowConverter
     private readonly IChromaUpsampler _upsampler;
     private readonly IColorConverter _converter;
     private readonly int _widestSource;
+    private Scratch? _sequentialScratch;
     private int _nextRow;
 
     private StreamingRowConverter(
@@ -134,12 +135,34 @@ internal sealed class StreamingRowConverter
 
         _nextRow = end;
 
+        // Calls come one at a time, so a sequential call can reuse one scratch for the whole decode and needs no delegates at all.
+        if (end - start < RowParallel.MinRowsForParallel || parallel.IsSequential)
+        {
+            var scratch = _sequentialScratch ??= new Scratch(_widestSource);
+            for (int y = start; y < end; y++)
+            {
+                ConvertRow(y, scratch);
+            }
+
+            return;
+        }
+
+        ConvertRowsParallel(start, end, parallel);
+    }
+
+    private void ConvertRowsParallel(int start, int end, ParallelSettings parallel) =>
         RowParallel.For<Scratch>(
             end - start,
             () => new Scratch(_widestSource),
             (offset, scratch) => ConvertRow(start + offset, scratch),
             scratch => scratch.Return(),
             parallel);
+
+    /// <summary>Returns the scratch rows a sequential conversion kept. The converter converts nothing afterward.</summary>
+    public void Release()
+    {
+        _sequentialScratch?.Return();
+        _sequentialScratch = null;
     }
 
     private bool IsReady(int y, int mcuRowsDone)

@@ -62,7 +62,7 @@ internal static class FrameDecoder
             {
                 case JpegMarker.Sof0 or JpegMarker.Sof1 or JpegMarker.Sof2:
                 {
-                    var frameHeader = JpegFrameHeader.Parse(ReadSegment(markerReader), isProgressive: marker == JpegMarker.Sof2);
+                    var frameHeader = JpegFrameHeader.Parse(ReadSegmentScratch(markerReader, source), isProgressive: marker == JpegMarker.Sof2);
                     ThrowIfDimensionsExceedLimits(frameHeader);
                     var (colorSpace, isAdobeInverted) = ColorSpaceResolver.Resolve(frameHeader.Components.Length, adobe);
                     return (frameHeader, colorSpace, isAdobeInverted, orientation);
@@ -229,7 +229,7 @@ internal static class FrameDecoder
             switch (marker)
             {
                 case JpegMarker.Dqt:
-                    foreach (var table in JpegQuantizationTable.ParseAll(ReadSegment(markerReader)))
+                    foreach (var table in JpegQuantizationTable.ParseAll(ReadSegmentScratch(markerReader, source)))
                     {
                         quantTables[table.Id] = table;
                     }
@@ -237,7 +237,7 @@ internal static class FrameDecoder
                     break;
 
                 case JpegMarker.Dht:
-                    foreach (var spec in JpegHuffmanTableSpec.ParseAll(ReadSegment(markerReader)))
+                    foreach (var spec in JpegHuffmanTableSpec.ParseAll(ReadSegmentScratch(markerReader, source)))
                     {
                         (spec.TableClass == 0 ? dcHuffmanSpecs : acHuffmanSpecs)[spec.Id] = spec;
 
@@ -249,7 +249,7 @@ internal static class FrameDecoder
 
                 case JpegMarker.Dri:
                 {
-                    var payload = ReadSegment(markerReader);
+                    var payload = ReadSegmentScratch(markerReader, source);
                     if (payload.Length != 2)
                     {
                         throw new JpegDecodingException("Invalid DRI segment length.");
@@ -469,7 +469,7 @@ internal static class FrameDecoder
         for (int i = 0; i < scanHeader.Components.Length; i++)
         {
             var scanComponent = scanHeader.Components[i];
-            scanComponents[i] = Array.Find(components, c => c.Frame.Id == scanComponent.ComponentSelector)
+            scanComponents[i] = FindComponent(components, scanComponent.ComponentSelector)
                 ?? throw new JpegDecodingException($"Scan references undefined component id {scanComponent.ComponentSelector}.");
 
             if (needsDc)
@@ -622,7 +622,7 @@ internal static class FrameDecoder
 
         foreach (var component in components)
         {
-            if (!Array.Exists(scanComponents, c => ReferenceEquals(c, component)) || !quantTables.ContainsKey(component.Frame.QuantizationTableId))
+            if (!ContainsReference(scanComponents, component) || !quantTables.ContainsKey(component.Frame.QuantizationTableId))
             {
                 return false;
             }
@@ -682,6 +682,41 @@ internal static class FrameDecoder
     // Placeholder assigned at construction time and always overwritten once every DQT segment in the
     // stream has been seen (immediately after the marker-parsing loop above finishes); never used as-is.
     private static readonly JpegQuantizationTable UnresolvedQuantizationTable = new() { Id = 0, Values = new ushort[64] };
+
+    private static ComponentDecodeState? FindComponent(ComponentDecodeState[] components, byte id)
+    {
+        foreach (var component in components)
+        {
+            if (component.Frame.Id == id)
+            {
+                return component;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool ContainsReference(ComponentDecodeState[] components, ComponentDecodeState component)
+    {
+        foreach (var candidate in components)
+        {
+            if (ReferenceEquals(candidate, component))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Reads a segment that is parsed straight away (not kept) into the source's reusable scratch instead of a new array.</summary>
+    private static Span<byte> ReadSegmentScratch(JpegMarkerReader markerReader, JpegByteSource source)
+    {
+        int length = markerReader.ReadSegmentLength();
+        var payload = source.Scratch(length);
+        markerReader.ReadSegmentBytes(payload);
+        return payload;
+    }
 
     private static byte[] ReadSegment(JpegMarkerReader markerReader)
     {

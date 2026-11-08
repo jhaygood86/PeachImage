@@ -108,7 +108,7 @@ internal static class FrameReconstructor
             cropped = Rent(actualWidth * actualHeight, rented);
 
             var dequant = scaleDenominator == 1
-                ? DctKernelSelector.Inverse.PrepareDequantTable(component.QuantizationTable.Values)
+                ? DequantTableCache.Get(component.QuantizationTable.Values)
                 : ScaledInverseDct.PrepareDequantTable(component.QuantizationTable.Values, blockSize);
 
             InverseTransformBlockRows(component.Coefficients, 0, component.Coefficients.BlocksHigh, dequant, cropped, actualWidth, actualHeight, blockSize, scaleDenominator, parallel);
@@ -178,63 +178,111 @@ internal static class FrameReconstructor
         // row ranges of `cropped` (see blockTop below), so this is safe to run concurrently; the 8x8 scratch
         // buffer for boundary blocks is rented per RowParallel partition via the TLocal hook, so concurrent
         // partitions never share one scratch buffer and no per-block-row allocation is added.
+        // The streaming scan transforms a handful of block rows at a time on one thread; building the delegates and closures the
+        // parallel form needs for every such call is most of what a decode allocates, so the sequential case is a plain loop.
+        if (blockRowCount < RowParallel.MinRowsForParallel || parallel.IsSequential)
+        {
+            byte[] scratchBuffer = ArrayPool<byte>.Shared.Rent(64);
+            try
+            {
+                for (int rowInBuffer = 0; rowInBuffer < blockRowCount; rowInBuffer++)
+                {
+                    TransformBlockRow(coefficients, firstBlockRow, rowInBuffer, dequant, cropped, actualWidth, actualHeight, blockSize, scaleDenominator, scratchBuffer);
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(scratchBuffer);
+            }
+
+            return;
+        }
+
+        InverseTransformBlockRowsParallel(coefficients, firstBlockRow, blockRowCount, dequant, cropped, actualWidth, actualHeight, blockSize, scaleDenominator, parallel);
+    }
+
+    private static void InverseTransformBlockRowsParallel(
+        JpegCoefficientBuffer coefficients,
+        int firstBlockRow,
+        int blockRowCount,
+        float[] dequant,
+        byte[] cropped,
+        int actualWidth,
+        int actualHeight,
+        int blockSize,
+        int scaleDenominator,
+        ParallelSettings parallel)
+    {
         RowParallel.For<byte[]>(
             blockRowCount,
             () => ArrayPool<byte>.Shared.Rent(64),
-            (rowInBuffer, scratchBuffer) =>
+            (rowInBuffer, scratchBuffer) => TransformBlockRow(coefficients, firstBlockRow, rowInBuffer, dequant, cropped, actualWidth, actualHeight, blockSize, scaleDenominator, scratchBuffer),
+            scratchBuffer => ArrayPool<byte>.Shared.Return(scratchBuffer),
+            parallel);
+    }
+
+    /// <summary>Dequantizes and inverse-transforms block row <paramref name="rowInBuffer"/> of <paramref name="coefficients"/>; the rows of one call write disjoint parts of <paramref name="cropped"/>.</summary>
+    private static void TransformBlockRow(
+        JpegCoefficientBuffer coefficients,
+        int firstBlockRow,
+        int rowInBuffer,
+        float[] dequant,
+        byte[] cropped,
+        int actualWidth,
+        int actualHeight,
+        int blockSize,
+        int scaleDenominator,
+        byte[] scratchBuffer)
+    {
+        int blockTop = (firstBlockRow + rowInBuffer) * blockSize;
+        if (blockTop >= actualHeight)
         {
-            int blockTop = (firstBlockRow + rowInBuffer) * blockSize;
-            if (blockTop >= actualHeight)
+            return;
+        }
+
+        var scratch = scratchBuffer.AsSpan(0, 64);
+        int rowsInBlock = Math.Min(blockSize, actualHeight - blockTop);
+
+        for (int bx = 0; bx < coefficients.BlocksWide; bx++)
+        {
+            int blockLeft = bx * blockSize;
+            if (blockLeft >= actualWidth)
             {
-                return;
+                break;
             }
 
-            var scratch = scratchBuffer.AsSpan(0, 64);
-            int rowsInBlock = Math.Min(blockSize, actualHeight - blockTop);
+            var block = coefficients.Block(bx, rowInBuffer);
 
-            for (int bx = 0; bx < coefficients.BlocksWide; bx++)
+            if (rowsInBlock == blockSize && blockLeft + blockSize <= actualWidth)
             {
-                int blockLeft = bx * blockSize;
-                if (blockLeft >= actualWidth)
+                int outOffset = (blockTop * actualWidth) + blockLeft;
+                if (scaleDenominator == 1)
                 {
-                    break;
-                }
-
-                var block = coefficients.Block(bx, rowInBuffer);
-
-                if (rowsInBlock == blockSize && blockLeft + blockSize <= actualWidth)
-                {
-                    int outOffset = (blockTop * actualWidth) + blockLeft;
-                    if (scaleDenominator == 1)
-                    {
-                        DctKernelSelector.Inverse.Transform(block, dequant, cropped.AsSpan(outOffset), actualWidth);
-                    }
-                    else
-                    {
-                        ScaledInverseDct.Transform(block, dequant, cropped.AsSpan(outOffset), actualWidth, blockSize);
-                    }
+                    DctKernelSelector.Inverse.Transform(block, dequant, cropped.AsSpan(outOffset), actualWidth);
                 }
                 else
                 {
-                    int colsInBlock = Math.Min(blockSize, actualWidth - blockLeft);
-                    if (scaleDenominator == 1)
-                    {
-                        DctKernelSelector.Inverse.Transform(block, dequant, scratch, outputStride: 8);
-                    }
-                    else
-                    {
-                        ScaledInverseDct.Transform(block, dequant, scratch, blockSize, blockSize);
-                    }
-
-                    for (int y = 0; y < rowsInBlock; y++)
-                    {
-                        scratch.Slice(y * blockSize, colsInBlock).CopyTo(cropped.AsSpan(((blockTop + y) * actualWidth) + blockLeft, colsInBlock));
-                    }
+                    ScaledInverseDct.Transform(block, dequant, cropped.AsSpan(outOffset), actualWidth, blockSize);
                 }
             }
-        },
-            scratchBuffer => ArrayPool<byte>.Shared.Return(scratchBuffer),
-            parallel);
+            else
+            {
+                int colsInBlock = Math.Min(blockSize, actualWidth - blockLeft);
+                if (scaleDenominator == 1)
+                {
+                    DctKernelSelector.Inverse.Transform(block, dequant, scratch, outputStride: 8);
+                }
+                else
+                {
+                    ScaledInverseDct.Transform(block, dequant, scratch, blockSize, blockSize);
+                }
+
+                for (int y = 0; y < rowsInBlock; y++)
+                {
+                    scratch.Slice(y * blockSize, colsInBlock).CopyTo(cropped.AsSpan(((blockTop + y) * actualWidth) + blockLeft, colsInBlock));
+                }
+            }
+        }
     }
 
     private static byte[] Rent(int size, List<byte[]> rented)

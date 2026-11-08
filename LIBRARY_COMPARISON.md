@@ -493,10 +493,10 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 
 | Scenario | Load | Into | SimdCodecs | Ratio | Load alloc | Into alloc | SimdCodecs alloc |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| JPEG 1080p, 4:2:0 | 4.02 ms | 4.08 ms | 4.37 ms | 0.92× | 29.5 KB | 29.9 KB | 1.2 KB |
-| JPEG 1080p, 4:4:4 | 5.10 ms | 4.85 ms | 5.57 ms | 0.92× | 51.3 KB | 51.8 KB | 1.2 KB |
-| JPEG 12MP, 4:2:0 | 25.90 ms | 27.01 ms | 24.86 ms | 1.04× | 69.4 KB | 69.8 KB | 1.3 KB |
-| JPEG 1080p, grayscale | 3.68 ms | 3.46 ms | 3.21 ms | 1.15× | 16.2 KB | 20.7 KB | 0.6 KB |
+| JPEG 1080p, 4:2:0 | 4.08 ms | 4.16 ms | 4.29 ms | 0.95× | 5.9 KB | 6.2 KB | 1.2 KB |
+| JPEG 1080p, 4:4:4 | 5.05 ms | 4.98 ms | 5.52 ms | 0.91× | 5.9 KB | 6.2 KB | 1.2 KB |
+| JPEG 12MP, 4:2:0 | 23.80 ms | 23.70 ms | 25.22 ms | 0.94× | 6.0 KB | 6.4 KB | 1.3 KB |
+| JPEG 1080p, grayscale | 3.51 ms | 3.68 ms | 3.53 ms | 0.99× | 4.2 KB | 8.6 KB | 0.6 KB |
 | PNG 24bpp | 18.99 ms | 16.68 ms | 16.78 ms | 1.13× | 12.0 KB | 12.1 KB | 9.2 KB |
 | PNG 32bpp RGBA | 22.83 ms | 22.72 ms | 21.50 ms | 1.06× | 13.7 KB | 13.7 KB | 16.9 KB |
 | WebP lossless | 18.40 ms | 18.55 ms | 19.20 ms | 0.96× | 43.9 KB | 44.6 KB | 168 B |
@@ -520,7 +520,7 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 | JBIG2 | none (no shared build of jbig2dec) | 5.92 ms arithmetic / 3.04 ms MMR for 850x1100 | not implemented (decode-only) |
 | CCITT fax | libtiff | 2.47× (G4 TIFF), 3.66× (G3 TIFF) | not implemented (decode-only) |
 | JPEG XL | libjxl | 1.10×–1.71× | lossless 0.07×–0.31× (faster); lossy 1.14×–1.28× at effort 5, 0.69× vs. effort 7; lossless size within 2% of libjxl effort 3; lossy files within a few percent of libjxl effort 7 at equal SSIMULACRA2 |
-| Sdcb.SimdCodecs (managed) | SimdCodecs | JPEG 0.92×–1.15×; PNG 1.06×–1.13×; WebP 0.96×–1.16× | not measured |
+| Sdcb.SimdCodecs (managed) | SimdCodecs | JPEG 0.91×–0.99×; PNG 1.06×–1.13×; WebP 0.96×–1.16× | not measured |
 | Resize | SkiaSharp | — | Downscale: 1.24×–2.99×; Upscale: 1.67× (NearestNeighbor) or **0.23×–0.81×** (Bilinear/cubic family, faster than SkiaSharp) |
 
 Against SkiaSharp, JPEG decode beats it on every scenario, BMP and PNG are within or near target on most scenarios, and PNG

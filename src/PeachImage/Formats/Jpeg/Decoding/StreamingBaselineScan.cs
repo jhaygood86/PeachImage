@@ -45,7 +45,6 @@ internal static class StreamingBaselineScan
         var planes = new byte[componentCount][];
         var dequant = new float[componentCount][];
         var buffers = new JpegCoefficientBuffer?[2][] { new JpegCoefficientBuffer?[componentCount], new JpegCoefficientBuffer?[componentCount] };
-        var pending = new Task?[2];
 
         bool grayIsOutput = target is null && colorSpace == JpegColorSpace.Grayscale && frameComponents.Length == 1
             && frameComponents[0].ActualWidthInSamples == imageWidth && frameComponents[0].ActualHeightInSamples == imageHeight;
@@ -56,8 +55,8 @@ internal static class StreamingBaselineScan
         // A grayscale frame's conversion is a plain row copy: one pass after the last transform costs less than a task per batch.
         bool deferConversion = colorSpace == JpegColorSpace.Grayscale;
         bool overlap = parallel.Scheduler is null && parallel.EffectiveDegree >= 3;
-        Task? lastConvert = null;
         StreamingRowConverter? converter = null;
+        BatchWorker? worker = null;
         byte[]? convertedBuffer = null;
         bool succeeded = false;
 
@@ -76,7 +75,7 @@ internal static class StreamingBaselineScan
                     planes[i] = ArrayPool<byte>.Shared.Rent(component.ActualWidthInSamples * component.ActualHeightInSamples);
                 }
 
-                dequant[i] = DctKernelSelector.Inverse.PrepareDequantTable(component.QuantizationTable.Values);
+                dequant[i] = DequantTableCache.Get(component.QuantizationTable.Values);
 
                 int blocksWide = mcusAcross * component.BlocksPerMcuHorizontal;
                 int rows = component.BlocksPerMcuVertical * BatchMcuRows;
@@ -105,6 +104,11 @@ internal static class StreamingBaselineScan
                 }
             }
 
+            if (overlap)
+            {
+                worker = new BatchWorker(frameComponents, buffers, dequant, planes, deferConversion ? null : converter);
+            }
+
             BaselineScanDecoder.BeginScan(scanComponents);
 
             int batch = 0;
@@ -113,7 +117,7 @@ internal static class StreamingBaselineScan
                 int slot = batch & 1;
 
                 // The buffers of this slot were last used two batches ago: wait for their transform, then reuse them.
-                Complete(ref pending[slot]);
+                worker?.WaitForTransforms(batch - 1);
                 var slotBuffers = buffers[slot];
                 for (int i = 0; i < componentCount; i++)
                 {
@@ -129,44 +133,23 @@ internal static class StreamingBaselineScan
                 int mcuEnd = Math.Min(mcuY + BatchMcuRows, mcusDown);
                 BaselineScanDecoder.DecodeBatch(entropy, scanComponents, dcTables, acTables, restart, mcusAcross, mcuY, mcuEnd);
 
-                int firstMcuRow = mcuY;
                 int mcuRowCount = mcuEnd - mcuY;
-                int mcuRowsDone = mcuEnd;
-                void Transform() => TransformBatch(frameComponents, slotBuffers, dequant, planes, firstMcuRow, mcuRowCount);
 
-                if (!overlap)
+                if (worker is null)
                 {
-                    Transform();
+                    TransformBatch(frameComponents, slotBuffers, dequant, planes, mcuY, mcuRowCount);
                     if (!deferConversion)
                     {
-                        converter?.ConvertReady(mcuRowsDone, parallel);
+                        converter?.ConvertReady(mcuEnd, parallel);
                     }
                 }
                 else
                 {
-                    var scheduler = TaskScheduler.Default;
-                    var transformTask = Task.Factory.StartNew(Transform, CancellationToken.None, TaskCreationOptions.None, scheduler);
-                    pending[slot] = transformTask;
-
-                    if (converter is not null && !deferConversion)
-                    {
-                        // Converting rows needs every earlier transform finished (the previous conversion task stands for all of
-                        // them) and this one; conversions also run one after another, since each continues where the last stopped.
-                        var conversionConverter = converter;
-                        Task[] prerequisites = lastConvert is null ? [transformTask] : [transformTask, lastConvert];
-                        lastConvert = Task.Factory.ContinueWhenAll(
-                            prerequisites,
-                            _ => conversionConverter.ConvertReady(mcuRowsDone, new ParallelSettings(1, null)),
-                            CancellationToken.None,
-                            TaskContinuationOptions.None,
-                            scheduler);
-                    }
+                    worker.Enqueue(slot, mcuY, mcuRowCount, mcuEnd);
                 }
             }
 
-            Complete(ref pending[0]);
-            Complete(ref pending[1]);
-            Complete(ref lastConvert);
+            worker?.Finish();
             if (deferConversion)
             {
                 converter?.ConvertReady(mcusDown, parallel);
@@ -187,17 +170,7 @@ internal static class StreamingBaselineScan
             if (!succeeded)
             {
                 // A transform still running reads these buffers and writes these planes: let it finish before they go back.
-                foreach (var task in new[] { pending[0], pending[1], lastConvert })
-                {
-                    try
-                    {
-                        task?.GetAwaiter().GetResult();
-                    }
-                    catch (Exception)
-                    {
-                        // The failure being propagated is the decode's own; a transform failure behind it adds nothing.
-                    }
-                }
+                worker?.Abort();
 
                 if (convertedBuffer is not null)
                 {
@@ -222,6 +195,9 @@ internal static class StreamingBaselineScan
                 }
             }
 
+            // Every task that could still use the converter has finished by now, on both the success and the failure path.
+            converter?.Release();
+
             foreach (var slotBuffers in buffers)
             {
                 foreach (var buffer in slotBuffers)
@@ -232,10 +208,249 @@ internal static class StreamingBaselineScan
         }
     }
 
-    private static void Complete(ref Task? task)
+    /// <summary>
+    /// Runs the inverse transforms of batches, and the conversion of their rows, on the thread pool while the calling thread
+    /// entropy-decodes the next batches. Each batch's transform is queued as soon as it is decoded; conversion follows behind, one batch
+    /// after another, once every transform up to that batch has finished. It replaces a task and a continuation per batch with
+    /// preallocated pool work items and a small ring of batch descriptors, so the only allocations are the worker and its few items.
+    /// </summary>
+    private sealed class BatchWorker
     {
-        task?.GetAwaiter().GetResult();
-        task = null;
+        private const int RingSize = 4;
+
+        private readonly object _gate = new();
+        private readonly (int Slot, int FirstMcuRow, int McuRowCount, int McuRowsDone)[] _ring = new (int, int, int, int)[RingSize];
+        private readonly bool[] _transformDone = new bool[RingSize];
+        private readonly TransformWork[] _transformItems = new TransformWork[RingSize];
+        private readonly ConvertWork _convertItem;
+        private readonly ComponentDecodeState[] _components;
+        private readonly JpegCoefficientBuffer?[][] _buffers;
+        private readonly float[][] _dequant;
+        private readonly byte[][] _planes;
+        private readonly StreamingRowConverter? _converter;
+
+        // Batches enqueued, the leading run of batches whose transforms have all finished (transforms of different batches may finish in
+        // any order), and batches converted. A ring entry is free once its batch is converted (with no converter, once it is part of the
+        // finished run). `_pending` counts queued items that have not finished.
+        private int _tail;
+        private int _transformed;
+        private int _converted;
+        private int _pending;
+        private bool _convertQueued;
+        private Exception? _error;
+
+        public BatchWorker(
+            ComponentDecodeState[] components,
+            JpegCoefficientBuffer?[][] buffers,
+            float[][] dequant,
+            byte[][] planes,
+            StreamingRowConverter? converter)
+        {
+            _components = components;
+            _buffers = buffers;
+            _dequant = dequant;
+            _planes = planes;
+            _converter = converter;
+
+            for (int i = 0; i < RingSize; i++)
+            {
+                _transformItems[i] = new TransformWork(this, i);
+            }
+
+            _convertItem = new ConvertWork(this);
+        }
+
+        /// <summary>Hands a decoded batch over; its transform is queued at once.</summary>
+        public void Enqueue(int slot, int firstMcuRow, int mcuRowCount, int mcuRowsDone)
+        {
+            int index;
+            lock (_gate)
+            {
+                ThrowIfFailed();
+                while (_tail - FreedUpTo == RingSize)
+                {
+                    Monitor.Wait(_gate);
+                    ThrowIfFailed();
+                }
+
+                index = _tail % RingSize;
+                _ring[index] = (slot, firstMcuRow, mcuRowCount, mcuRowsDone);
+                _transformDone[index] = false;
+                _tail++;
+                _pending++;
+            }
+
+            ThreadPool.UnsafeQueueUserWorkItem(_transformItems[index], preferLocal: false);
+        }
+
+        /// <summary>Blocks until at least <paramref name="count"/> batches have been inverse-transformed (so their coefficient buffers are free again).</summary>
+        public void WaitForTransforms(int count)
+        {
+            if (count <= 0)
+            {
+                return;
+            }
+
+            lock (_gate)
+            {
+                while (_transformed < count && _error is null)
+                {
+                    Monitor.Wait(_gate);
+                }
+
+                ThrowIfFailed();
+            }
+        }
+
+        /// <summary>Waits for every enqueued batch to be transformed and converted, and rethrows a failure of either step.</summary>
+        public void Finish()
+        {
+            lock (_gate)
+            {
+                while (_pending > 0 || FreedUpTo < _tail)
+                {
+                    if (_error is not null && _pending == 0)
+                    {
+                        break;
+                    }
+
+                    Monitor.Wait(_gate);
+                }
+
+                ThrowIfFailed();
+            }
+        }
+
+        /// <summary>Waits for queued work to stop touching the decode's buffers without reporting a failure: the decode's own failure is the one being propagated.</summary>
+        public void Abort()
+        {
+            lock (_gate)
+            {
+                _error ??= new OperationCanceledException();
+                while (_pending > 0)
+                {
+                    Monitor.Wait(_gate);
+                }
+            }
+        }
+
+        /// <summary>How many batches no longer need their ring entry: converted ones, or with no converter, transformed ones.</summary>
+        private int FreedUpTo => _converter is null ? _transformed : _converted;
+
+        private void ThrowIfFailed()
+        {
+            if (_error is { } error && error is not OperationCanceledException)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
+            }
+        }
+
+        private void RunTransform(int index)
+        {
+            (int Slot, int FirstMcuRow, int McuRowCount, int McuRowsDone) batch;
+            lock (_gate)
+            {
+                batch = _ring[index];
+            }
+
+            Exception? failure = null;
+            if (_error is null)
+            {
+                try
+                {
+                    TransformBatch(_components, _buffers[batch.Slot], _dequant, _planes, batch.FirstMcuRow, batch.McuRowCount);
+                }
+                catch (Exception exception)
+                {
+                    failure = exception;
+                }
+            }
+
+            bool queueConvert = false;
+            lock (_gate)
+            {
+                if (failure is not null)
+                {
+                    _error ??= failure;
+                }
+
+                _transformDone[index] = true;
+                while (_transformed < _tail && _transformDone[_transformed % RingSize])
+                {
+                    _transformed++;
+                }
+
+                if (_converter is not null && !_convertQueued && _converted < _transformed && _error is null)
+                {
+                    _convertQueued = true;
+                    _pending++;
+                    queueConvert = true;
+                }
+
+                _pending--;
+                Monitor.PulseAll(_gate);
+            }
+
+            if (queueConvert)
+            {
+                ThreadPool.UnsafeQueueUserWorkItem(_convertItem, preferLocal: false);
+            }
+        }
+
+        private void RunConvert()
+        {
+            while (true)
+            {
+                int mcuRowsDone;
+                lock (_gate)
+                {
+                    if (_error is not null || _converted >= _transformed)
+                    {
+                        _convertQueued = false;
+                        _pending--;
+                        Monitor.PulseAll(_gate);
+                        return;
+                    }
+
+                    mcuRowsDone = _ring[_converted % RingSize].McuRowsDone;
+                }
+
+                try
+                {
+                    // Conversions run one after another, since each continues where the last stopped; the batch is only taken once its
+                    // transform and every earlier one are done.
+                    _converter!.ConvertReady(mcuRowsDone, new ParallelSettings(1, null));
+                }
+                catch (Exception exception)
+                {
+                    lock (_gate)
+                    {
+                        _error ??= exception;
+                        _convertQueued = false;
+                        _pending--;
+                        Monitor.PulseAll(_gate);
+                    }
+
+                    return;
+                }
+
+                lock (_gate)
+                {
+                    _converted++;
+                    Monitor.PulseAll(_gate);
+                }
+            }
+        }
+
+        private sealed class TransformWork(BatchWorker owner, int index) : IThreadPoolWorkItem
+        {
+            public void Execute() => owner.RunTransform(index);
+        }
+
+        private sealed class ConvertWork(BatchWorker owner) : IThreadPoolWorkItem
+        {
+            public void Execute() => owner.RunConvert();
+        }
     }
 
     private static void TransformBatch(
