@@ -106,6 +106,11 @@ public class SimdCodecsDecodeBenchmarks
     public int SimdCodecs_Jpeg_Gray() => Simd(_jpegGray);
 
     [Benchmark] [BenchmarkCategory("PNG-24bpp")]
+    public int PeachImageInto_Png_24bpp() => PeachInto(_png24);
+    [Benchmark] [BenchmarkCategory("PNG-32bpp-RGBA")]
+    public int PeachImageInto_Png_32bpp() => PeachInto(_png32);
+
+    [Benchmark] [BenchmarkCategory("PNG-24bpp")]
     public int PeachImage_Png_24bpp() => Peach(_png24, s => PngDecoder.Decode(s));
     [Benchmark(Baseline = true)] [BenchmarkCategory("PNG-24bpp")]
     public int SimdCodecs_Png_24bpp() => Simd(_png24);
@@ -116,20 +121,28 @@ public class SimdCodecsDecodeBenchmarks
     public int SimdCodecs_Png_32bpp() => Simd(_png32);
 
     [Benchmark] [BenchmarkCategory("WebP-Lossy")]
+    public int PeachImageInto_Webp_Lossy() => PeachInto(_webpLossy);
+    [Benchmark] [BenchmarkCategory("WebP-Lossy")]
     public int PeachImage_Webp_Lossy() => Peach(_webpLossy, s => WebpDecoder.Decode(s));
     [Benchmark(Baseline = true)] [BenchmarkCategory("WebP-Lossy")]
     public int SimdCodecs_Webp_Lossy() => Simd(_webpLossy);
 
+    [Benchmark] [BenchmarkCategory("WebP-Lossless")]
+    public int PeachImageInto_Webp_Lossless() => PeachInto(_webpLossless);
     [Benchmark] [BenchmarkCategory("WebP-Lossless")]
     public int PeachImage_Webp_Lossless() => Peach(_webpLossless, s => WebpDecoder.Decode(s));
     [Benchmark(Baseline = true)] [BenchmarkCategory("WebP-Lossless")]
     public int SimdCodecs_Webp_Lossless() => Simd(_webpLossless);
 
     [Benchmark] [BenchmarkCategory("WebP-Lossy-Alpha")]
+    public int PeachImageInto_Webp_LossyAlpha() => PeachInto(_webpLossyAlpha);
+    [Benchmark] [BenchmarkCategory("WebP-Lossy-Alpha")]
     public int PeachImage_Webp_LossyAlpha() => Peach(_webpLossyAlpha, s => WebpDecoder.Decode(s));
     [Benchmark(Baseline = true)] [BenchmarkCategory("WebP-Lossy-Alpha")]
     public int SimdCodecs_Webp_LossyAlpha() => Simd(_webpLossyAlpha);
 
+    [Benchmark] [BenchmarkCategory("WebP-Lossless-Alpha")]
+    public int PeachImageInto_Webp_LosslessAlpha() => PeachInto(_webpLosslessAlpha);
     [Benchmark] [BenchmarkCategory("WebP-Lossless-Alpha")]
     public int PeachImage_Webp_LosslessAlpha() => Peach(_webpLosslessAlpha, s => WebpDecoder.Decode(s));
     [Benchmark(Baseline = true)] [BenchmarkCategory("WebP-Lossless-Alpha")]

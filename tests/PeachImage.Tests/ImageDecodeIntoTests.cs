@@ -1,4 +1,6 @@
 using PeachImage.Formats.Jpeg;
+using PeachImage.Formats.Png;
+using PeachImage.Formats.Webp;
 
 namespace PeachImage.Tests;
 
@@ -53,6 +55,102 @@ public class ImageDecodeIntoTests
 
         Assert.Equal(expected.PixelFormat, info.PixelFormat);
         Assert.Equal(expected.Metadata.Profiles.Count, metadata.Profiles.Count);
+        for (int y = 0; y < expected.Height; y++)
+        {
+            Assert.True(expected.GetRowSpan(y).SequenceEqual(buffer.AsSpan(y * stride, rowBytes)), $"row {y}");
+            if (y < expected.Height - 1)
+            {
+                Assert.All(buffer.AsSpan((y * stride) + rowBytes, padding).ToArray(), b => Assert.Equal(0xAB, b));
+            }
+        }
+    }
+
+    public static TheoryData<PixelFormat, bool, int> PngCases() => new()
+    {
+        { PixelFormat.Rgb24, false, 0 },
+        { PixelFormat.Rgb24, true, 0 },
+        { PixelFormat.Rgb24, false, 11 },
+        { PixelFormat.Rgba32, false, 0 },
+        { PixelFormat.Rgba32, true, 6 },
+        { PixelFormat.Gray8, false, 0 },
+        { PixelFormat.Gray8, true, 3 },
+        { PixelFormat.Gray16, false, 0 },
+        { PixelFormat.Rgb48, false, 5 },
+        { PixelFormat.Rgba64, true, 0 },
+    };
+
+    [Theory]
+    [MemberData(nameof(PngCases))]
+    public void Png_DecodesIntoTheCallersBuffer_ExactlyAsLoadDoes(PixelFormat format, bool interlace, int padding)
+    {
+        using var source = Image.Create(37, 23, format);
+        var pixels = source.GetPixelSpan();
+        for (int i = 0; i < pixels.Length; i++)
+        {
+            pixels[i] = (byte)((i * 13) ^ (i >> 2));
+        }
+
+        using var encoded = new MemoryStream();
+        source.Save(encoded, "png", new PngEncoderOptions { Interlace = interlace });
+        byte[] file = encoded.ToArray();
+
+        using var expected = Image.Load(file);
+        int rowBytes = expected.Width * expected.PixelFormat.GetBytesPerPixel();
+        int stride = rowBytes + padding;
+        byte[] buffer = new byte[(stride * (expected.Height - 1)) + rowBytes];
+        Array.Fill(buffer, (byte)0xAB);
+        var info = Image.DecodeInto(file, buffer, out _, padding == 0 ? 0 : stride);
+
+        Assert.Equal(expected.PixelFormat, info.PixelFormat);
+        for (int y = 0; y < expected.Height; y++)
+        {
+            Assert.True(expected.GetRowSpan(y).SequenceEqual(buffer.AsSpan(y * stride, rowBytes)), $"row {y}");
+            if (y < expected.Height - 1)
+            {
+                Assert.All(buffer.AsSpan((y * stride) + rowBytes, padding).ToArray(), b => Assert.Equal(0xAB, b));
+            }
+        }
+    }
+
+    public static TheoryData<bool, bool, int, int, int> WebpCases() => new()
+    {
+        { true, false, 61, 37, 0 },
+        { true, false, 61, 37, 9 },
+        { true, true, 48, 33, 0 },
+        { true, true, 48, 33, 5 },
+        { false, false, 61, 37, 0 },
+        { false, false, 61, 37, 7 },
+        { false, true, 40, 29, 0 },
+        { false, true, 40, 29, 3 },
+        { true, false, 1, 1, 0 },
+        { false, false, 1, 1, 0 },
+    };
+
+    [Theory]
+    [MemberData(nameof(WebpCases))]
+    public void Webp_DecodesIntoTheCallersBuffer_ExactlyAsLoadDoes(bool lossy, bool alpha, int width, int height, int padding)
+    {
+        var format = alpha ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
+        using var source = Image.Create(width, height, format);
+        var pixels = source.GetPixelSpan();
+        var random = new Random((width * 17) + height);
+        for (int i = 0; i < pixels.Length; i++)
+        {
+            pixels[i] = (byte)Math.Clamp(((i / 3) % 241) + random.Next(-20, 21), 0, 255);
+        }
+
+        using var encoded = new MemoryStream();
+        source.Save(encoded, "webp", new WebpEncoderOptions { Lossless = !lossy });
+        byte[] file = encoded.ToArray();
+
+        using var expected = Image.Load(file);
+        int rowBytes = expected.Width * expected.PixelFormat.GetBytesPerPixel();
+        int stride = rowBytes + padding;
+        byte[] buffer = new byte[(stride * (expected.Height - 1)) + rowBytes];
+        Array.Fill(buffer, (byte)0xAB);
+        var info = Image.DecodeInto(file, buffer, out _, padding == 0 ? 0 : stride);
+
+        Assert.Equal(expected.PixelFormat, info.PixelFormat);
         for (int y = 0; y < expected.Height; y++)
         {
             Assert.True(expected.GetRowSpan(y).SequenceEqual(buffer.AsSpan(y * stride, rowBytes)), $"row {y}");

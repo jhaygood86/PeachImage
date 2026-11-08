@@ -96,13 +96,16 @@ internal static class WebpContainerReader
         return Read(stream, metadata, prelude, pendingHeader);
     }
 
+    /// <summary>Bytes of a bitstream chunk a header-only read keeps: more than either bitstream header (VP8 frame tag + start code + size, VP8L signature + size) needs.</summary>
+    private const int HeaderPrefixLength = 32;
+
     /// <summary>
     /// Continues a non-animated read from an already-parsed <paramref name="prelude"/>/<paramref name="pendingHeader"/>
     /// (i.e. an already-consumed <see cref="ReadPrelude"/> call) — used by <see cref="WebpDecoder.Decode"/> and
     /// <see cref="WebpDecoder.Identify"/> so they can branch on <see cref="WebpContainerPrelude.HasAnimation"/>
     /// themselves without this method re-reading the RIFF header/VP8X chunk a second time.
     /// </summary>
-    internal static WebpContainerInfo Read(Stream stream, ImageMetadata metadata, WebpContainerPrelude prelude, WebpChunkHeader? pendingHeader)
+    internal static WebpContainerInfo Read(Stream stream, ImageMetadata metadata, WebpContainerPrelude prelude, WebpChunkHeader? pendingHeader, bool headerOnly = false)
     {
         if (prelude.HasAnimation)
         {
@@ -149,17 +152,18 @@ internal static class WebpContainerReader
                 case "VP8 ":
                     RequireNoImageChunkYet(format);
                     format = WebpBitstreamFormat.Lossy;
-                    imageBytes = WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
+                    imageBytes = headerOnly ? WebpChunkReader.ReadPrefix(stream, chunkHeader.Size, HeaderPrefixLength) : WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
                     break;
 
                 case "VP8L":
                     RequireNoImageChunkYet(format);
                     format = WebpBitstreamFormat.Lossless;
-                    imageBytes = WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
+                    imageBytes = headerOnly ? WebpChunkReader.ReadPrefix(stream, chunkHeader.Size, HeaderPrefixLength) : WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
                     break;
 
                 case "ALPH":
-                    alphaBytes = WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
+                    // A header-only read needs to know the plane exists, not what is in it.
+                    alphaBytes = headerOnly ? WebpChunkReader.ReadPrefix(stream, chunkHeader.Size, 0) : WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
                     break;
 
                 case "ICCP":

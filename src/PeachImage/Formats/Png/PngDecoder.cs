@@ -69,4 +69,11 @@ internal static class PngDecoder
         result.HasAlpha = hasAlpha;
         return result;
     }
+
+    /// <summary>Decodes into memory the caller owns, rows <paramref name="stride"/> bytes apart, in the format the file decodes to (returned).</summary>
+    public static unsafe PixelFormat DecodeInto(Stream stream, DecoderOptions? options, byte* destination, int stride, out ImageMetadata metadata)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        return PngImageDecoder.DecodeInto(stream, options as PngDecoderOptions, options?.SkipMetadata == true, destination, stride, out metadata);
+    }
 }

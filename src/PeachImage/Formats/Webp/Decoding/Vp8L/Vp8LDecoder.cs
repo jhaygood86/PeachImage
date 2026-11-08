@@ -25,7 +25,12 @@ internal static class Vp8LDecoder
     private const byte Signature = 0x2F;
 
     /// <summary>Decodes a full top-level VP8L image chunk (5-byte header + transforms + pixel stream) into an <see cref="Image"/>.</summary>
-    public static Image Decode(ReadOnlyMemory<byte> vp8LBytes)
+    public static Image Decode(ReadOnlyMemory<byte> vp8LBytes) => DecodeStill(vp8LBytes, null)!;
+
+    /// <summary>Decodes a full top-level VP8L image chunk straight into <paramref name="output"/>'s memory; no <see cref="Image"/> exists.</summary>
+    public static void DecodeInto(ReadOnlyMemory<byte> vp8LBytes, WebpOutput output) => DecodeStill(vp8LBytes, output);
+
+    private static Image? DecodeStill(ReadOnlyMemory<byte> vp8LBytes, WebpOutput? output)
     {
         var (data, offset, end) = GetBounds(vp8LBytes);
 
@@ -41,6 +46,9 @@ internal static class Vp8LDecoder
         reader.ReadBits(3); // version_number -- always 0, nothing to branch on.
 
         ValidateDimensions(width, height);
+        var pixelFormat = alphaIsUsed ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
+        int bytesPerPixel = alphaIsUsed ? 4 : 3;
+        output?.Validate(width, height, pixelFormat);
 
         // The pixel stream is decoded a batch of rows at a time and each batch goes through the inverse
         // transforms and the byte conversion straight away, while it is still in cache.
@@ -52,9 +60,10 @@ internal static class Vp8LDecoder
 
         try
         {
-            var pixelFormat = alphaIsUsed ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
-            int bytesPerPixel = alphaIsUsed ? 4 : 3;
-            packed = ImageBufferPool.Shared.Rent(checked(width * height * bytesPerPixel));
+            if (output is null)
+            {
+                packed = ImageBufferPool.Shared.Rent(checked(width * height * bytesPerPixel));
+            }
 
             for (int rowsDone = 0; rowsDone < height;)
             {
@@ -65,11 +74,35 @@ internal static class Vp8LDecoder
                     ? stream.Pixels.AsSpan(rowsDone * width, (rowsEnd - rowsDone) * width)
                     : pipeline.Process(stream.Pixels, transformXsize, rowsDone, rowsEnd);
 
-                Vp8LPixelPacker.Pack(rows, packed.AsSpan(rowsDone * width * bytesPerPixel), alphaIsUsed);
+                if (output is { } target)
+                {
+                    int rowBytes = width * bytesPerPixel;
+                    if (target.Stride == rowBytes)
+                    {
+                        Vp8LPixelPacker.Pack(rows, target.Row(rowsDone, rowBytes * (rowsEnd - rowsDone)), alphaIsUsed);
+                    }
+                    else
+                    {
+                        for (int row = rowsDone; row < rowsEnd; row++)
+                        {
+                            Vp8LPixelPacker.Pack(rows.Slice((row - rowsDone) * width, width), target.Row(row, rowBytes), alphaIsUsed);
+                        }
+                    }
+                }
+                else
+                {
+                    Vp8LPixelPacker.Pack(rows, packed.AsSpan(rowsDone * width * bytesPerPixel), alphaIsUsed);
+                }
+
                 rowsDone = rowsEnd;
             }
 
-            var image = Image.FromBuffer(width, height, pixelFormat, packed, owned: true);
+            if (output is not null)
+            {
+                return null;
+            }
+
+            var image = Image.FromBuffer(width, height, pixelFormat, packed!, owned: true);
             packed = null;
             return image;
         }

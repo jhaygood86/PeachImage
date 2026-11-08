@@ -45,6 +45,21 @@ internal static class WebpChunkReader
         return data;
     }
 
+    /// <summary>Reads only the first <paramref name="prefixLength"/> bytes of a chunk's payload (all of it when shorter) and skips the rest, including the pad byte.</summary>
+    public static byte[] ReadPrefix(Stream stream, uint size, int prefixLength)
+    {
+        int take = (int)Math.Min(size, (uint)prefixLength);
+        byte[] data = new byte[take];
+        if (take > 0 && stream.ReadAtLeast(data, take, throwOnEndOfStream: false) != take)
+        {
+            throw new WebpDecodingException("Truncated WebP chunk.");
+        }
+
+        WebpStreamHelpers.SkipForward(stream, size - (uint)take);
+        SkipPadding(stream, size);
+        return data;
+    }
+
     /// <summary>Discards a chunk's payload without materializing it (including the trailing pad byte if <paramref name="size"/> is odd).</summary>
     public static void SkipPayload(Stream stream, uint size)
     {

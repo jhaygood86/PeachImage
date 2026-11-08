@@ -10,7 +10,22 @@ namespace PeachImage.Formats.Png.Decoding;
 /// <summary>Top-level PNG decode orchestrator: metadata chunks, a streaming (no-buffering) pixel decode, then trailing chunks.</summary>
 internal static class PngImageDecoder
 {
-    public static Image Decode(Stream stream, PngDecoderOptions? options, Action<Image>? previewAvailable = null, PixelFormat? targetPixelFormat = null, bool skipMetadata = false)
+    public static unsafe Image Decode(Stream stream, PngDecoderOptions? options, Action<Image>? previewAvailable = null, PixelFormat? targetPixelFormat = null, bool skipMetadata = false) =>
+        DecodeCore(stream, options, previewAvailable, targetPixelFormat, skipMetadata, null, 0, out _, out _)!;
+
+    /// <summary>
+    /// Decodes into memory the caller owns: <paramref name="destination"/> receives each row at <paramref name="destinationStride"/>
+    /// bytes, in the format the image decodes to (returned). No preview and no format conversion apply here.
+    /// </summary>
+    public static unsafe PixelFormat DecodeInto(Stream stream, PngDecoderOptions? options, bool skipMetadata, byte* destination, int destinationStride, out ImageMetadata metadata)
+    {
+        DecodeCore(stream, options, null, null, skipMetadata, destination, destinationStride, out metadata, out var format);
+        return format;
+    }
+
+    private static unsafe Image? DecodeCore(
+        Stream stream, PngDecoderOptions? options, Action<Image>? previewAvailable, PixelFormat? targetPixelFormat, bool skipMetadata,
+        byte* destination, int destinationStride, out ImageMetadata resultMetadata, out PixelFormat resultFormat)
     {
         PngChunkReader.ReadSignature(stream);
         var header = PngHeaderReader.ReadIhdr(stream);
@@ -52,10 +67,13 @@ internal static class PngImageDecoder
         bool gammaCorrectionActive = fileGamma is not null && options?.ScreenGamma is > 0;
         var sampleLut = PngSampleLut.Build(header.BitDepth, fileGamma, options?.ScreenGamma);
 
-        Image image;
+        Image? image = null;
         try
         {
-            image = Image.Create(header.Width, header.Height, outputFormat);
+            if (destination == null)
+            {
+                image = Image.Create(header.Width, header.Height, outputFormat);
+            }
         }
         catch (OverflowException ex)
         {
@@ -65,18 +83,20 @@ internal static class PngImageDecoder
             throw new PngDecodingException($"PNG dimensions {header.Width}x{header.Height} at pixel format {outputFormat} require too large an allocation to decode.", ex);
         }
 
+        resultMetadata = image?.Metadata ?? new ImageMetadata();
+        resultFormat = outputFormat;
         foreach (var profile in metadata.Profiles)
         {
-            image.Metadata.Profiles.Add(profile);
+            resultMetadata.Profiles.Add(profile);
         }
 
-        image.Metadata.HorizontalResolution = metadata.HorizontalResolution;
-        image.Metadata.VerticalResolution = metadata.VerticalResolution;
+        resultMetadata.HorizontalResolution = metadata.HorizontalResolution;
+        resultMetadata.VerticalResolution = metadata.VerticalResolution;
 
         var idatStream = new PngIdatStream(stream);
         idatStream.BeginChunk(chunkHeader);
 
-        DecodePixels(idatStream, header, palette, grayOrRgbTrnsKey, sampleLut.Span, is16BitOutput, gammaCorrectionActive, outputFormat, image, header.IsInterlaced ? previewAvailable : null, targetPixelFormat);
+        DecodePixels(idatStream, header, palette, grayOrRgbTrnsKey, sampleLut.Span, is16BitOutput, gammaCorrectionActive, outputFormat, image, destination, destinationStride, header.IsInterlaced ? previewAvailable : null, targetPixelFormat);
 
         idatStream.DrainToNextChunk();
         var nextHeader = idatStream.PendingNonIdatHeader!.Value;
@@ -100,7 +120,7 @@ internal static class PngImageDecoder
         return image;
     }
 
-    private static void DecodePixels(Stream idatStream, PngHeader header, PngPalette? palette, ushort[]? grayOrRgbTrnsKey, ReadOnlySpan<ushort> sampleLut, bool is16BitOutput, bool gammaCorrectionActive, PixelFormat outputFormat, Image image, Action<Image>? previewAvailable, PixelFormat? targetPixelFormat)
+    private static unsafe void DecodePixels(Stream idatStream, PngHeader header, PngPalette? palette, ushort[]? grayOrRgbTrnsKey, ReadOnlySpan<ushort> sampleLut, bool is16BitOutput, bool gammaCorrectionActive, PixelFormat outputFormat, Image? image, byte* destination, int destinationStride, Action<Image>? previewAvailable, PixelFormat? targetPixelFormat)
     {
         using var zlib = new ZLibStream(idatStream, CompressionMode.Decompress);
 
@@ -184,7 +204,9 @@ internal static class PngImageDecoder
                     }
 
                     int destY = pass.StartY + (y * pass.StrideY);
-                    var destRow = image.GetRowSpan(destY);
+                    var destRow = image is not null
+                        ? image.GetRowSpan(destY)
+                        : new Span<byte>(destination + ((long)destY * destinationStride), header.Width * destBpp);
                     if (pass.StrideX == 1)
                     {
                         sourceRow.CopyTo(destRow);
@@ -222,7 +244,7 @@ internal static class PngImageDecoder
 
             if (previewAvailable is not null && passIndex < lastPassIndex)
             {
-                EmitPreview(image, passIndex, destBpp, targetPixelFormat, previewAvailable);
+                EmitPreview(image!, passIndex, destBpp, targetPixelFormat, previewAvailable);
             }
         }
     }

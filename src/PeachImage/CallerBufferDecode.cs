@@ -1,4 +1,6 @@
 using PeachImage.Formats.Jpeg;
+using PeachImage.Formats.Png;
+using PeachImage.Formats.Webp;
 using PeachImage.Formats.Shared.Metadata;
 using PeachImage.Formats.Shared.Orientation;
 using PeachImage.Formats.Shared.Scaling;
@@ -35,11 +37,11 @@ internal static class CallerBufferDecode
             return false;
         }
 
-        if (IsNativeJpeg(codec, header, options))
+        if (IsNative(codec, header, options))
         {
             fixed (byte* pointer = destination)
             {
-                info = DecodeJpegNatively(seekable, codec, header, options, pointer, rowStride, out metadata);
+                info = DecodeNatively(seekable, codec, header, options, pointer, rowStride, out metadata);
             }
 
             return true;
@@ -83,16 +85,16 @@ internal static class CallerBufferDecode
         return true;
     }
 
-    // A full-size JPEG in its natural pixel format, with nothing that needs the image as a whole afterwards.
-    private static bool IsNativeJpeg(IImageCodec codec, ImageInfo header, DecoderOptions? options) =>
-        codec == JpegCodec.Instance
+    // A full-size JPEG or PNG in its natural pixel format, with nothing that needs the image as a whole afterwards.
+    private static bool IsNative(IImageCodec codec, ImageInfo header, DecoderOptions? options) =>
+        (codec == JpegCodec.Instance || codec == PngCodec.Instance || (codec == WebpCodec.Instance && !header.IsAnimated))
         && options is not IFormatSelectingOptions
         && options?.PreviewAvailable is null
         && !DecodeScale.IsRequested(options)
         && (options?.ApplyOrientation != true || header.Orientation == ImageOrientation.Normal)
         && (options?.TargetPixelFormat is null || options.TargetPixelFormat == header.PixelFormat);
 
-    private static unsafe ImageInfo DecodeJpegNatively(
+    private static unsafe ImageInfo DecodeNatively(
         Stream stream, IImageCodec codec, ImageInfo header, DecoderOptions? options, byte* destination, int rowStride, out ImageMetadata metadata)
     {
         bool skipMetadata = options?.SkipMetadata == true;
@@ -108,7 +110,20 @@ internal static class CallerBufferDecode
         }
 
         int stride = rowStride == 0 ? header.Width * header.PixelFormat.GetBytesPerPixel() : rowStride;
-        var format = JpegDecoder.DecodeInto(stream, options, destination, stride, out metadata);
+        PixelFormat format;
+        if (codec == JpegCodec.Instance)
+        {
+            format = JpegDecoder.DecodeInto(stream, options, destination, stride, out metadata);
+        }
+        else if (codec == PngCodec.Instance)
+        {
+            format = PngDecoder.DecodeInto(stream, options, destination, stride, out metadata);
+        }
+        else
+        {
+            format = WebpDecoder.DecodeInto(stream, destination, stride, header, out metadata);
+        }
+
         metadata.ApplyExifResolution();
         if (skipMetadata)
         {
