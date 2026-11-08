@@ -154,7 +154,17 @@ internal static class WebpContainerReader
                 case "VP8 ":
                     RequireNoImageChunkYet(format);
                     format = WebpBitstreamFormat.Lossy;
-                    imageBytes = headerOnly ? WebpChunkReader.ReadPrefix(stream, chunkHeader.Size, HeaderPrefixLength) : WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
+                    if (!headerOnly && pooledBitstream && WebpChunkReader.TryReadPayloadPooled(stream, chunkHeader.Size) is { } rentedLossy)
+                    {
+                        imageBytes = rentedLossy;
+                        imageLength = (int)chunkHeader.Size;
+                        imagePooled = true;
+                    }
+                    else
+                    {
+                        imageBytes = headerOnly ? WebpChunkReader.ReadPrefix(stream, chunkHeader.Size, HeaderPrefixLength) : WebpChunkReader.ReadPayload(stream, chunkHeader.Size);
+                    }
+
                     break;
 
                 case "VP8L":

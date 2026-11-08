@@ -501,8 +501,8 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 | PNG 32bpp RGBA | 22.83 ms | 22.72 ms | 21.50 ms | 1.06× | 13.7 KB | 13.7 KB | 16.9 KB |
 | WebP lossless | 18.40 ms | 18.55 ms | 19.20 ms | 0.96× | 43.9 KB | 44.6 KB | 168 B |
 | WebP lossless + alpha | 23.40 ms | 23.22 ms | 20.21 ms | 1.16× | 43.2 KB | 43.8 KB | 188 B |
-| WebP lossy | 15.93 ms | 15.61 ms | 14.35 ms | 1.11× | 677 KB | 678 KB | 88 B |
-| WebP lossy + alpha | 16.44 ms | 16.52 ms | 14.39 ms | 1.14× | 699 KB | 700 KB | 177 B |
+| WebP lossy | 15.62 ms | 15.87 ms | 13.89 ms | 1.12× | 6.2 KB | 6.9 KB | 84 B |
+| WebP lossy + alpha | 16.16 ms | 16.60 ms | 14.29 ms | 1.13× | 12.8 KB | 13.6 KB | 94 B |
 
 
 ## Summary

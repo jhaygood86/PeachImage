@@ -25,6 +25,10 @@ namespace PeachImage.Formats.Webp.Decoding.Vp8;
 /// </remarks>
 internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
 {
+    private const int MbSegmentMask = 3;
+    private const int MbIsI4x4 = 4;
+    private const int MbInnerFilter = 8;
+
     public static Vp8FrameDecoder Instance { get; } = new Vp8FrameDecoder();
 
     public Vp8DecodedFrame Decode(ReadOnlyMemory<byte> vp8Bytes, byte[]? alphaPlane) => DecodeInto(vp8Bytes, alphaPlane, null);
@@ -37,13 +41,22 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
     {
         // Vp8BoolDecoder/Vp8Partitions need a real byte[] (a ref struct can't be an array element, so the
         // partitions need a persistent array reference, not a Span) -- but vp8Bytes is already array-backed
-        // exactly once, by WebpChunkReader.ReadPayload, so recover that array directly via
-        // MemoryMarshal.TryGetArray instead of unconditionally re-copying it with ToArray().
-        byte[] data = MemoryMarshal.TryGetArray(vp8Bytes, out ArraySegment<byte> segment) && segment.Offset == 0 && segment.Count == segment.Array!.Length
-            ? segment.Array
-            : vp8Bytes.ToArray();
+        // by the container reader, so recover that array directly via MemoryMarshal.TryGetArray instead of
+        // copying it. The array may be longer than the chunk (it can come from a pool): dataLength is the chunk.
+        byte[] data;
+        int dataLength;
+        if (MemoryMarshal.TryGetArray(vp8Bytes, out ArraySegment<byte> segment) && segment.Offset == 0)
+        {
+            data = segment.Array!;
+            dataLength = segment.Count;
+        }
+        else
+        {
+            data = vp8Bytes.ToArray();
+            dataLength = data.Length;
+        }
 
-        Vp8FrameHeader frameHeader = Vp8FrameHeader.Parse(data);
+        Vp8FrameHeader frameHeader = Vp8FrameHeader.Parse(data.AsSpan(0, dataLength));
 
         var partition0 = new Vp8BoolDecoder(data, frameHeader.HeaderByteLength, frameHeader.FirstPartitionLength);
 
@@ -55,7 +68,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
 
         int numPartitions = 1 << (int)partition0.GetValue(2);
         int partition0End = frameHeader.HeaderByteLength + frameHeader.FirstPartitionLength;
-        Vp8BoolDecoder[] coefficientPartitions = Vp8Partitions.Build(data, partition0End, numPartitions);
+        Vp8BoolDecoder[] coefficientPartitions = Vp8Partitions.Build(data, dataLength, partition0End, numPartitions);
 
         Vp8QuantIndices quantIndices = Vp8QuantIndices.Parse(partition0);
         Vp8QuantMatrix[] quantMatrices = Vp8Dequantizer.Resolve(quantIndices, segmentHeader);
@@ -79,6 +92,10 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         byte[] uPlane = WebpBufferPool.Shared.Rent(uvStride * uvPaddedHeight);
         byte[] vPlane = WebpBufferPool.Shared.Rent(uvStride * uvPaddedHeight);
 
+        // What the loop filter needs to know about each macroblock, one byte each: segment in the low two bits, then the
+        // 4x4-mode and inner-edge flags. Every entry is written before the filter reads it.
+        byte[] mbInfo = WebpBufferPool.Shared.Rent(mbCols * mbRows);
+
         try
         {
             InitializeBorders(yPlane, yStride, yPaddedHeight);
@@ -88,19 +105,21 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
             int YOff(int x, int y) => ((y + 1) * yStride) + x + 1;
             int UOff(int x, int y) => ((y + 1) * uvStride) + x + 1;
 
+            // Passing a local function where a delegate is expected builds a new delegate each time, so the ones the per-macroblock and
+            // per-row calls take are made once.
+            Func<int, int, int> yOffset = YOff;
+            Func<int, int, int> uOffset = UOff;
+
             var modeDecoder = new Vp8ModeDecoder(mbCols, segmentHeader, useSkipProbability, skipFalseProbability);
             var coeffContext = new Vp8TokenContext(mbCols);
             var modes = new Vp8MacroblockModes();
 
-            var segmentAtMb = new int[mbCols * mbRows];
-            var isI4x4AtMb = new bool[mbCols * mbRows];
-            var innerFilterAtMb = new bool[mbCols * mbRows];
 
             Span<short> coeffs = stackalloc short[25 * 16];
             Span<byte> aboveRight = stackalloc byte[4];
 
             using var writer = new RgbRowWriter(
-                yPlane, yStride, uPlane, vPlane, uvStride, mbCols, mbRows, frameHeader.Width, frameHeader.Height, YOff, UOff, alphaPlane, output);
+                yPlane, yStride, uPlane, vPlane, uvStride, mbCols, mbRows, frameHeader.Width, frameHeader.Height, yOffset, uOffset, alphaPlane, output);
 
             for (int mbY = 0; mbY < mbRows; mbY++)
             {
@@ -137,12 +156,10 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                     }
 
                     int mbIndex = (mbY * mbCols) + mbX;
-                    segmentAtMb[mbIndex] = modes.Segment;
-                    isI4x4AtMb[mbIndex] = modes.IsI4x4;
 
                     // f_inner = is_i4x4 || !skip, where "skip" is the *effective* skip (no residual at all).
                     bool effectiveSkip = !anyNonZero;
-                    innerFilterAtMb[mbIndex] = modes.IsI4x4 || !effectiveSkip;
+                    mbInfo[mbIndex] = (byte)(modes.Segment | (modes.IsI4x4 ? MbIsI4x4 : 0) | (modes.IsI4x4 || !effectiveSkip ? MbInnerFilter : 0));
 
                     int yOrigin = YOff(mbX * 16, mbY * 16);
 
@@ -165,7 +182,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                     }
                     else
                     {
-                        ComputeAboveRight(yPlane, yStride, YOff, mbX, mbY, mbCols, hasAbove, aboveRight);
+                        ComputeAboveRight(yPlane, yStride, yOffset, mbX, mbY, mbCols, hasAbove, aboveRight);
 
                         for (int n = 0; n < 16; n++)
                         {
@@ -219,7 +236,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                 {
                     ApplyLoopFilterRow(
                         mbY - 1, yPlane, yStride, uPlane, vPlane, uvStride, mbCols,
-                        loopFilterHeader, filterStrengths, segmentAtMb, isI4x4AtMb, innerFilterAtMb, YOff, UOff);
+                        loopFilterHeader, filterStrengths, mbInfo, yOffset, uOffset);
                     writer.ConvertTo(Math.Min(((mbY - 1) * 16) + 8, frameHeader.Height));
                 }
             }
@@ -227,7 +244,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
             // The last row has nothing after it to wait for.
             ApplyLoopFilterRow(
                 mbRows - 1, yPlane, yStride, uPlane, vPlane, uvStride, mbCols,
-                loopFilterHeader, filterStrengths, segmentAtMb, isI4x4AtMb, innerFilterAtMb, YOff, UOff);
+                loopFilterHeader, filterStrengths, mbInfo, yOffset, uOffset);
             writer.ConvertTo(frameHeader.Height);
             return writer.Finish();
         }
@@ -236,6 +253,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
             WebpBufferPool.Shared.Return(yPlane);
             WebpBufferPool.Shared.Return(uPlane);
             WebpBufferPool.Shared.Return(vPlane);
+            WebpBufferPool.Shared.Return(mbInfo);
         }
     }
 
@@ -338,9 +356,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
         int mbCols,
         Vp8LoopFilterHeader header,
         Vp8FilterStrength[,] filterStrengths,
-        int[] segmentAtMb,
-        bool[] isI4x4AtMb,
-        bool[] innerFilterAtMb,
+        byte[] mbInfo,
         Func<int, int, int> yOff,
         Func<int, int, int> uOff)
     {
@@ -353,13 +369,14 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
             for (int mbX = 0; mbX < mbCols; mbX++)
             {
                 int mbIndex = (mbY * mbCols) + mbX;
-                Vp8FilterStrength strength = filterStrengths[segmentAtMb[mbIndex], isI4x4AtMb[mbIndex] ? 1 : 0];
+                byte info = mbInfo[mbIndex];
+                Vp8FilterStrength strength = filterStrengths[info & MbSegmentMask, (info & MbIsI4x4) != 0 ? 1 : 0];
                 if (!strength.IsFilteringEnabled)
                 {
                     continue;
                 }
 
-                bool inner = innerFilterAtMb[mbIndex];
+                bool inner = (info & MbInnerFilter) != 0;
                 int yOrigin = yOff(mbX * 16, mbY * 16);
 
                 if (header.Simple)

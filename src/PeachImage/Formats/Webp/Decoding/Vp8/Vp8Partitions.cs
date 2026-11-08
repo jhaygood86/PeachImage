@@ -11,11 +11,12 @@ namespace PeachImage.Formats.Webp.Decoding.Vp8;
 internal static class Vp8Partitions
 {
     /// <summary>
-    /// Builds the coefficient-partition decoders. <paramref name="data"/> is the full VP8 chunk;
+    /// Builds the coefficient-partition decoders. <paramref name="data"/> holds the full VP8 chunk in its first
+    /// <paramref name="dataLength"/> bytes (the array may be longer: it can be rented from a pool);
     /// <paramref name="partition0End"/> is the byte offset immediately after partition 0 (where the optional
     /// 3-byte-little-endian partition size table, if any, begins).
     /// </summary>
-    public static Vp8BoolDecoder[] Build(byte[] data, int partition0End, int partitionCount)
+    public static Vp8BoolDecoder[] Build(byte[] data, int dataLength, int partition0End, int partitionCount)
     {
         if (partitionCount < 1 || partitionCount > WebpDecodingLimits.MaxVp8Partitions)
         {
@@ -23,7 +24,7 @@ internal static class Vp8Partitions
         }
 
         int sizeTableBytes = 3 * (partitionCount - 1);
-        if (partition0End + sizeTableBytes > data.Length)
+        if (partition0End + sizeTableBytes > dataLength)
         {
             throw new WebpDecodingException("VP8 coefficient partition size table exceeds the available chunk data.");
         }
@@ -37,7 +38,7 @@ internal static class Vp8Partitions
             int size = data[sizeTablePos] | (data[sizeTablePos + 1] << 8) | (data[sizeTablePos + 2] << 16);
             sizeTablePos += 3;
 
-            if (dataPos + size > data.Length)
+            if (dataPos + size > dataLength)
             {
                 throw new WebpDecodingException("VP8 coefficient partition size exceeds the available chunk data.");
             }
@@ -47,7 +48,7 @@ internal static class Vp8Partitions
         }
 
         // The last partition consumes whatever bytes remain in the chunk.
-        int lastSize = data.Length - dataPos;
+        int lastSize = dataLength - dataPos;
         partitions[partitionCount - 1] = new Vp8BoolDecoder(data, dataPos, lastSize);
 
         return partitions;
