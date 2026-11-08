@@ -10,12 +10,8 @@ namespace PeachImage.Formats.Webp.Decoding.Vp8L;
 /// </summary>
 internal static class Vp8LPixelDecoder
 {
-    private const int NumLiteralCodes = 256;
-    private const int NumLengthCodes = 24;
-    private const int LengthCodeLimit = NumLiteralCodes + NumLengthCodes;
-
     /// <summary>
-    /// Decodes one VP8L pixel stream. <paramref name="rentFromPool"/> should only ever be set by the single
+    /// Decodes one VP8L pixel stream in full. <paramref name="rentFromPool"/> should only ever be set by the single
     /// top-level (<paramref name="allowRecursion"/><c>: true</c>) caller for the image's real, potentially
     /// large pixel buffer — <see cref="WebpBufferPool.SharedUInt32"/> exists precisely because that one buffer
     /// is the dominant source of large-object-heap churn in VP8L decode; every recursive sub-image call here
@@ -27,6 +23,46 @@ internal static class Vp8LPixelDecoder
     /// on the array's own <c>.Length</c>, and are responsible for returning it to the pool once done.
     /// </summary>
     public static uint[] DecodeImageStream(Vp8LBitReader reader, int width, int height, bool allowRecursion, bool rentFromPool = false)
+    {
+        var stream = new Vp8LPixelStream(reader, width, height, allowRecursion, rentFromPool);
+        try
+        {
+            stream.DecodeUntil(stream.PixelCount);
+        }
+        finally
+        {
+            stream.Release();
+        }
+
+        return stream.Pixels;
+    }
+}
+
+/// <summary>
+/// A VP8L pixel stream that can be decoded incrementally: <see cref="DecodeUntil"/> advances the decode to at
+/// least a given pixel position and can be called again to continue. That is what lets the top-level decoder run
+/// the inverse transforms over a few rows at a time while they are still in cache, instead of making a pass over
+/// the whole image per transform.
+/// </summary>
+internal sealed class Vp8LPixelStream
+{
+    private const int NumLiteralCodes = 256;
+    private const int NumLengthCodes = 24;
+    private const int LengthCodeLimit = NumLiteralCodes + NumLengthCodes;
+
+    private readonly Vp8LBitReader _reader;
+    private readonly int _width;
+    private readonly Vp8LHuffmanGroup[] _groups;
+    private readonly Vp8LFastPixelLoop.GroupView[]? _views;
+    private readonly Vp8LMetaHuffmanImage? _metaImage;
+    private readonly Vp8LColorCache? _colorCache;
+    private readonly int _colorCacheLimit;
+
+    private Vp8LPixelCursor _cursor;
+    private bool _finished;
+
+    /// <summary>Reads the stream's color-cache declaration and Huffman codes and rents/allocates the pixel buffer. Pixels are decoded by <see cref="DecodeUntil"/>.</summary>
+    public Vp8LPixelStream(Vp8LBitReader reader, int width, int height, bool allowRecursion, bool rentFromPool)
     {
         if (width <= 0 || height <= 0)
         {
@@ -49,23 +85,79 @@ internal static class Vp8LPixelDecoder
             }
         }
 
-        var groups = Vp8LMetaHuffmanImage.ReadGroups(reader, width, height, colorCacheBits, allowRecursion, out var metaImage);
-        var colorCache = colorCacheBits > 0 ? new Vp8LColorCache(colorCacheBits) : null;
-        int colorCacheLimit = LengthCodeLimit + (colorCacheBits > 0 ? 1 << colorCacheBits : 0);
+        _reader = reader;
+        _width = width;
+        _groups = Vp8LMetaHuffmanImage.ReadGroups(reader, width, height, colorCacheBits, allowRecursion, out _metaImage);
+        _views = Vp8LFastPixelLoop.CreateViews(_groups);
+        _colorCache = colorCacheBits > 0 ? new Vp8LColorCache(colorCacheBits) : null;
+        _colorCacheLimit = LengthCodeLimit + (colorCacheBits > 0 ? 1 << colorCacheBits : 0);
 
-        var pixels = rentFromPool ? WebpBufferPool.SharedUInt32.Rent((int)pixelCount) : new uint[pixelCount];
+        PixelCount = (int)pixelCount;
+        Pixels = rentFromPool ? WebpBufferPool.SharedUInt32.Rent(PixelCount) : new uint[pixelCount];
+    }
+
+    /// <summary>Returns the Huffman tables to the pool. Call once the stream is fully decoded; decoding must not resume afterward.</summary>
+    public void Release()
+    {
+        foreach (var group in _groups)
+        {
+            group.Release();
+        }
+    }
+
+    /// <summary>The decoded ARGB pixels. When rented from the pool the array may be longer than <see cref="PixelCount"/>.</summary>
+    public uint[] Pixels { get; }
+
+    public int PixelCount { get; }
+
+    /// <summary>Pixels decoded so far (always <see cref="PixelCount"/> once the stream has ended, however it ended).</summary>
+    public int Position => _cursor.Pos;
+
+    /// <summary>
+    /// Decodes until at least <paramref name="limit"/> pixels exist (a backward reference can overshoot it), or
+    /// the stream ends. A truncated or corrupt stream stops early; the undecoded remainder is then zeroed and the
+    /// position moves to the end, so callers never see another decode's pool-recycled pixels.
+    /// </summary>
+    public void DecodeUntil(int limit)
+    {
+        if (_finished || _cursor.Pos >= limit)
+        {
+            return;
+        }
+
+        var reader = _reader;
+        var pixels = Pixels;
+        var colorCache = _colorCache;
+        var metaImage = _metaImage;
+        var groups = _groups;
+        int width = _width;
+        int pixelCount = PixelCount;
+
+        // The register-resident fast loop decodes everything except the last few bytes of the stream; the
+        // general loop below then finishes (and handles truncation) exactly as it always did.
+        if (_views is not null)
+        {
+            Vp8LFastPixelLoop.Run(reader, pixels, width, pixelCount, limit, _views, metaImage, colorCache, _colorCacheLimit, ref _cursor);
+        }
+
+        int col = _cursor.Col;
+        int row = _cursor.Row;
+        int pos = _cursor.Pos;
+        bool corrupt = _cursor.Corrupt;
         var activeGroup = groups[0];
+        if (metaImage != null && pos < pixelCount)
+        {
+            activeGroup = groups[metaImage.GetGroupIndex(col, row)];
+        }
 
-        int col = 0;
-        int row = 0;
-        long pos = 0;
-
-        while (pos < pixelCount)
+        bool stoppedEarly = corrupt;
+        while (!corrupt && pos < limit)
         {
             if (reader.IsOverBudget)
             {
                 // Truncated stream: stop decoding, mirroring GifLzwDecoder's "stop early on truncation rather
-                // than throw" convention. The undecoded remainder is zeroed after the loop.
+                // than throw" convention. The undecoded remainder is zeroed below.
+                stoppedEarly = true;
                 break;
             }
 
@@ -107,10 +199,11 @@ internal static class Vp8LPixelDecoder
                     // A backward reference reaching before the start of the buffer, or past its end, can
                     // only come from a corrupt/truncated stream -- stop early rather than throw, same
                     // leniency as the truncation case above.
+                    stoppedEarly = true;
                     break;
                 }
 
-                Vp8LBackwardCopier.CopyPixels(pixels, (int)pos, distance, length);
+                Vp8LBackwardCopier.CopyPixels(pixels, pos, distance, length);
 
                 if (colorCache != null)
                 {
@@ -128,7 +221,7 @@ internal static class Vp8LPixelDecoder
                     row++;
                 }
             }
-            else if (code < colorCacheLimit)
+            else if (code < _colorCacheLimit)
             {
                 int key = code - LengthCodeLimit;
                 pixels[pos] = colorCache!.Lookup(key);
@@ -144,19 +237,33 @@ internal static class Vp8LPixelDecoder
             else
             {
                 // Code outside every valid range for this stream's configuration -- corrupt data.
+                stoppedEarly = true;
                 break;
             }
         }
 
-        // Every `break` above leaves pixels [pos, pixelCount) never written. That region has to be zeroed
-        // explicitly, because `pixels` may be a pool-rented array still holding the *previous* decode's image:
-        // without this, a truncated or corrupt file would surface another image's pixels as its own. Only
-        // reached on malformed input -- a stream that decodes fully leaves nothing to clear.
-        if (pos < pixelCount)
+        if (stoppedEarly)
         {
-            pixels.AsSpan((int)pos, (int)(pixelCount - pos)).Clear();
+            // Pixels [pos, pixelCount) were never written. They have to be zeroed explicitly, because `pixels`
+            // may be a pool-rented array still holding the *previous* decode's image: without this, a
+            // truncated or corrupt file would surface another image's pixels as its own.
+            if (pos < pixelCount)
+            {
+                pixels.AsSpan(pos, pixelCount - pos).Clear();
+            }
+
+            pos = pixelCount;
+            _finished = true;
         }
 
-        return pixels;
+        _cursor.Pos = pos;
+        _cursor.Col = col;
+        _cursor.Row = row;
+        _cursor.Corrupt = false;
+        _cursor.CachedUpTo = pos;
+        if (pos >= pixelCount)
+        {
+            _finished = true;
+        }
     }
 }

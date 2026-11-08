@@ -478,6 +478,33 @@ work and allocation. SkiaSharp has no TIFF or fax codec. A 1700x2200 page-like b
 dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*CcittDecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
 ```
 
+## SimdCodecs
+
+Decode comparison against [Sdcb.SimdCodecs](https://github.com/sdcb/SimdCodecs) 1.4.0 (pure-managed, MIT, net10.0
+only, single-threaded by default). Here the baseline is SimdCodecs, so `Ratio` below 1.00 means PeachImage is *faster*.
+SimdCodecs decodes into one caller-owned RGBA8 buffer allocated once. PeachImage is measured two ways: `Decode(Stream)`
+with the result disposed so the pooled pixel buffer is recycled (*Load*), and `ImageDecoder.DecodeInto` into one
+caller-owned buffer with `SkipMetadata` (*Into*). `Ratio` is Load against SimdCodecs; PeachImage writes its native pixel
+format (RGB24 for opaque images) where SimdCodecs always writes RGBA8.
+
+```bash
+dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filter "*SimdCodecsDecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
+```
+
+| Scenario | Load | Into | SimdCodecs | Ratio | Load alloc | Into alloc | SimdCodecs alloc |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| JPEG 1080p, 4:2:0 | 4.08 ms | 4.16 ms | 4.29 ms | 0.95× | 5.9 KB | 6.2 KB | 1.2 KB |
+| JPEG 1080p, 4:4:4 | 5.05 ms | 4.98 ms | 5.52 ms | 0.91× | 5.9 KB | 6.2 KB | 1.2 KB |
+| JPEG 12MP, 4:2:0 | 23.80 ms | 23.70 ms | 25.22 ms | 0.94× | 6.0 KB | 6.4 KB | 1.3 KB |
+| JPEG 1080p, grayscale | 3.51 ms | 3.68 ms | 3.53 ms | 0.99× | 4.2 KB | 8.6 KB | 0.6 KB |
+| PNG 24bpp | 18.99 ms | 16.68 ms | 16.78 ms | 1.13× | 12.0 KB | 12.1 KB | 9.2 KB |
+| PNG 32bpp RGBA | 22.83 ms | 22.72 ms | 21.50 ms | 1.06× | 13.7 KB | 13.7 KB | 16.9 KB |
+| WebP lossless | 15.71 ms | 15.53 ms | 19.15 ms | 0.82× | 43.8 KB | 44.6 KB | 146 B |
+| WebP lossless + alpha | 19.62 ms | 19.41 ms | 20.08 ms | 0.98× | 43.1 KB | 43.9 KB | 166 B |
+| WebP lossy | 15.43 ms | 15.12 ms | 14.02 ms | 1.10× | 6.1 KB | 6.9 KB | 83 B |
+| WebP lossy + alpha | 16.00 ms | 16.03 ms | 14.52 ms | 1.10× | 12.8 KB | 13.6 KB | 99 B |
+
+
 ## Summary
 
 | Format | Baseline | Decode | Encode |
@@ -493,6 +520,7 @@ dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- --filt
 | JBIG2 | none (no shared build of jbig2dec) | 5.92 ms arithmetic / 3.04 ms MMR for 850x1100 | not implemented (decode-only) |
 | CCITT fax | libtiff | 2.47× (G4 TIFF), 3.66× (G3 TIFF) | not implemented (decode-only) |
 | JPEG XL | libjxl | 1.10×–1.71× | lossless 0.07×–0.31× (faster); lossy 1.14×–1.28× at effort 5, 0.69× vs. effort 7; lossless size within 2% of libjxl effort 3; lossy files within a few percent of libjxl effort 7 at equal SSIMULACRA2 |
+| Sdcb.SimdCodecs (managed) | SimdCodecs | JPEG 0.91×–0.99×; PNG 1.06×–1.13×; WebP 0.82×–1.10× | not measured |
 | Resize | SkiaSharp | — | Downscale: 1.24×–2.99×; Upscale: 1.67× (NearestNeighbor) or **0.23×–0.81×** (Bilinear/cubic family, faster than SkiaSharp) |
 
 Against SkiaSharp, JPEG decode beats it on every scenario, BMP and PNG are within or near target on most scenarios, and PNG

@@ -45,6 +45,51 @@ internal static class WebpChunkReader
         return data;
     }
 
+    /// <summary>
+    /// Reads a chunk's payload into a buffer rented from <see cref="Internal.WebpBufferPool"/> (so longer than <paramref name="size"/>
+    /// is possible), or returns <see langword="null"/> without reading when the stream cannot vouch for the size up front: a stream that
+    /// is not seekable, or one holding fewer bytes than the chunk claims, is left to <see cref="ReadPayload"/>, which will not trust the claim.
+    /// </summary>
+    public static byte[]? TryReadPayloadPooled(Stream stream, uint size)
+    {
+        if (size == 0 || !stream.CanSeek || size > stream.Length - stream.Position || size > int.MaxValue)
+        {
+            return null;
+        }
+
+        byte[] buffer = Internal.WebpBufferPool.Shared.Rent((int)size);
+        try
+        {
+            if (stream.ReadAtLeast(buffer.AsSpan(0, (int)size), (int)size, throwOnEndOfStream: false) != (int)size)
+            {
+                throw new WebpDecodingException("Truncated WebP chunk.");
+            }
+
+            SkipPadding(stream, size);
+            return buffer;
+        }
+        catch
+        {
+            Internal.WebpBufferPool.Shared.Return(buffer);
+            throw;
+        }
+    }
+
+    /// <summary>Reads only the first <paramref name="prefixLength"/> bytes of a chunk's payload (all of it when shorter) and skips the rest, including the pad byte.</summary>
+    public static byte[] ReadPrefix(Stream stream, uint size, int prefixLength)
+    {
+        int take = (int)Math.Min(size, (uint)prefixLength);
+        byte[] data = new byte[take];
+        if (take > 0 && stream.ReadAtLeast(data, take, throwOnEndOfStream: false) != take)
+        {
+            throw new WebpDecodingException("Truncated WebP chunk.");
+        }
+
+        WebpStreamHelpers.SkipForward(stream, size - (uint)take);
+        SkipPadding(stream, size);
+        return data;
+    }
+
     /// <summary>Discards a chunk's payload without materializing it (including the trailing pad byte if <paramref name="size"/> is odd).</summary>
     public static void SkipPayload(Stream stream, uint size)
     {

@@ -1,3 +1,4 @@
+using PeachImage.Formats.Webp.Internal;
 using PeachImage.Formats.Webp.Decoding.Alpha;
 using PeachImage.Formats.Webp.Decoding.Vp8;
 using PeachImage.Formats.Webp.Decoding.Vp8L;
@@ -12,7 +13,7 @@ namespace PeachImage.Formats.Webp.Decoding;
 /// </summary>
 internal static class WebpBitstreamDecoder
 {
-    public static Image Decode(WebpBitstreamFormat format, byte[] bitstreamData, byte[]? alphaData) =>
+    public static Image Decode(WebpBitstreamFormat format, ReadOnlyMemory<byte> bitstreamData, byte[]? alphaData) =>
         format == WebpBitstreamFormat.Lossless
             ? Vp8LDecoder.Decode(bitstreamData)
             : DecodeLossy(bitstreamData, alphaData);
@@ -20,31 +21,75 @@ internal static class WebpBitstreamDecoder
     /// <summary>
     /// Decodes the alpha plane (if any) at the bitstream's own dimensions first, then hands it into the VP8
     /// frame decoder so pixel conversion can emit RGBA32 directly instead of building an RGB24 image and
-    /// widening it afterward -- see <see cref="Vp8FrameDecoder.ProduceRgbFrame"/>'s remarks for why that
+    /// widening it afterward -- see <see cref="Vp8FrameDecoder"/>'s remarks for why that
     /// matters. Dimensions are read via a cheap peek rather than waiting on the frame decoder's own parse,
     /// since alpha decode needs them first; both read the identical bytes, so they can't disagree.
     /// </summary>
-    private static Image DecodeLossy(byte[] bitstreamData, byte[]? alphaData)
+    private static unsafe Image DecodeLossy(ReadOnlyMemory<byte> bitstreamData, byte[]? alphaData)
     {
-        byte[]? alphaPlane = null;
-
-        if (alphaData is { } data)
+        if (!WebpBitstreamHeaderPeek.TryPeekVp8(bitstreamData.Span, out int width, out int height))
         {
-            if (!WebpBitstreamHeaderPeek.TryPeekVp8(bitstreamData, out int width, out int height))
-            {
-                throw new WebpDecodingException("Malformed VP8 chunk: missing or invalid keyframe start code.");
-            }
-
-            alphaPlane = WebpAlphaDecoder.Decode(data, width, height);
+            throw new WebpDecodingException("Malformed VP8 chunk: missing or invalid keyframe start code.");
         }
 
-        var frame = Vp8FrameDecoder.Instance.Decode(bitstreamData, alphaPlane);
+        var format = alphaData is null ? PixelFormat.Rgb24 : PixelFormat.Rgba32;
+        int rowBytes = checked(width * format.GetBytesPerPixel());
 
-        // frame.Pixels is an exact-size array (other callers, including tests, rely on Pixels.Length being
-        // exact), so the pool-rented (possibly larger) buffer backing the final owned Image is a separate
-        // copy rather than frame.Pixels itself.
-        byte[] pooledPixels = ImageBufferPool.Shared.Rent(frame.Pixels.Length);
-        frame.Pixels.AsSpan().CopyTo(pooledPixels);
-        return Image.FromBuffer(frame.Width, frame.Height, frame.PixelFormat, pooledPixels, owned: true);
+        // The frame is converted straight into the pooled buffer that becomes the image: no exact-size intermediate array, no copy.
+        byte[]? pooledPixels = ImageBufferPool.Shared.Rent(checked(rowBytes * height));
+        try
+        {
+            fixed (byte* pixels = pooledPixels)
+            {
+                DecodeLossyInto(bitstreamData, alphaData, new WebpOutput((nint)pixels, rowBytes, width, height, format));
+            }
+
+            var image = Image.FromBuffer(width, height, format, pooledPixels, owned: true);
+            pooledPixels = null;
+            return image;
+        }
+        finally
+        {
+            if (pooledPixels is not null)
+            {
+                ImageBufferPool.Shared.Return(pooledPixels);
+            }
+        }
+    }
+
+    /// <summary>Decodes a single bitstream straight into <paramref name="output"/>'s memory.</summary>
+    public static void DecodeInto(WebpBitstreamFormat format, ReadOnlyMemory<byte> bitstreamData, byte[]? alphaData, WebpOutput output)
+    {
+        if (format == WebpBitstreamFormat.Lossless)
+        {
+            Vp8LDecoder.DecodeInto(bitstreamData, output);
+        }
+        else
+        {
+            DecodeLossyInto(bitstreamData, alphaData, output);
+        }
+    }
+
+    private static void DecodeLossyInto(ReadOnlyMemory<byte> bitstreamData, byte[]? alphaData, WebpOutput output)
+    {
+        if (!WebpBitstreamHeaderPeek.TryPeekVp8(bitstreamData.Span, out int width, out int height))
+        {
+            throw new WebpDecodingException("Malformed VP8 chunk: missing or invalid keyframe start code.");
+        }
+
+        output.Validate(width, height, alphaData is null ? PixelFormat.Rgb24 : PixelFormat.Rgba32);
+
+        byte[]? alphaPlane = alphaData is { } data ? WebpAlphaDecoder.Decode(data, width, height) : null;
+        try
+        {
+            Vp8FrameDecoder.Instance.DecodeInto(bitstreamData, alphaPlane, output);
+        }
+        finally
+        {
+            if (alphaPlane is not null)
+            {
+                WebpBufferPool.Shared.Return(alphaPlane);
+            }
+        }
     }
 }

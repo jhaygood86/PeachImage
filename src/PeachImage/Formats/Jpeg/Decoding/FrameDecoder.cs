@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Parallelism;
 using PeachImage.Formats.Jpeg.Decoding.ColorSpace;
 using PeachImage.Formats.Jpeg.Entropy;
 using PeachImage.Formats.Jpeg.Internal;
@@ -27,8 +28,20 @@ internal static class FrameDecoder
     /// </summary>
     public static (JpegFrameHeader FrameHeader, JpegColorSpace ColorSpace, bool IsAdobeInverted, ImageOrientation Orientation) IdentifyFrameHeader(Stream stream)
     {
-        long streamStart = stream.CanSeek ? stream.Position : -1;
         var source = new JpegByteSource(stream);
+        try
+        {
+            return IdentifyFrameHeader(stream, source);
+        }
+        finally
+        {
+            source.Release();
+        }
+    }
+
+    private static (JpegFrameHeader FrameHeader, JpegColorSpace ColorSpace, bool IsAdobeInverted, ImageOrientation Orientation) IdentifyFrameHeader(Stream stream, JpegByteSource source)
+    {
+        long streamStart = stream.CanSeek ? stream.Position : -1;
         var markerReader = new JpegMarkerReader(source);
 
         if (markerReader.NextMarker() != JpegMarker.Soi)
@@ -49,7 +62,7 @@ internal static class FrameDecoder
             {
                 case JpegMarker.Sof0 or JpegMarker.Sof1 or JpegMarker.Sof2:
                 {
-                    var frameHeader = JpegFrameHeader.Parse(ReadSegment(markerReader), isProgressive: marker == JpegMarker.Sof2);
+                    var frameHeader = JpegFrameHeader.Parse(ReadSegmentScratch(markerReader, source), isProgressive: marker == JpegMarker.Sof2);
                     ThrowIfDimensionsExceedLimits(frameHeader);
                     var (colorSpace, isAdobeInverted) = ColorSpaceResolver.Resolve(frameHeader.Components.Length, adobe);
                     return (frameHeader, colorSpace, isAdobeInverted, orientation);
@@ -67,11 +80,28 @@ internal static class FrameDecoder
 
                 case JpegMarker.App1:
                 {
-                    var payload = ReadSegment(markerReader);
-                    if (!sawOrientation && payload.AsSpan().StartsWith(ExifSignature))
+                    // Only the first EXIF block matters, and it is read into a pooled buffer: identifying must not allocate a copy of every APP1 segment.
+                    int segmentLength = markerReader.ReadSegmentLength();
+                    if (sawOrientation)
                     {
-                        sawOrientation = true;
-                        orientation = ExifOrientationReader.Read(payload);
+                        markerReader.SkipSegment(segmentLength);
+                        break;
+                    }
+
+                    var rented = System.Buffers.ArrayPool<byte>.Shared.Rent(segmentLength);
+                    try
+                    {
+                        var payload = rented.AsSpan(0, segmentLength);
+                        markerReader.ReadSegmentBytes(payload);
+                        if (payload.StartsWith(ExifSignature))
+                        {
+                            sawOrientation = true;
+                            orientation = ExifOrientationReader.Read(payload);
+                        }
+                    }
+                    finally
+                    {
+                        System.Buffers.ArrayPool<byte>.Shared.Return(rented);
                     }
 
                     break;
@@ -103,6 +133,16 @@ internal static class FrameDecoder
     /// </summary>
     /// <param name="stream">The JPEG bitstream.</param>
     /// <param name="maxScanCount">The maximum number of scans to accept.</param>
+    /// <param name="streamBaseline">
+    /// When set, a baseline frame whose first scan carries every component is decoded in streaming mode: coefficients are
+    /// inverse-transformed batch by batch as they are decoded, using these parallelism settings, and only the resulting planes
+    /// are kept (<see cref="DecodedFrame.StreamedPlanes"/>). Anything else decodes as usual. Only valid when the frame will be
+    /// reconstructed at full size.
+    /// </param>
+    /// <param name="callerOutput">
+    /// With <paramref name="streamBaseline"/>, caller memory the converted image rows are written into instead of a rented buffer;
+    /// <see cref="CallerOutput.Written"/> says afterward whether the streaming decode filled it.
+    /// </param>
     /// <param name="progressFrameAvailable">
     /// When set and the frame is progressive, called with a snapshot of the frame as accumulated so far after every scan
     /// except the last, starting once DC has been decoded for every component (earlier scans carry no usable picture).
@@ -111,10 +151,23 @@ internal static class FrameDecoder
     /// known once EOI is reached, a snapshot is delivered when the next marker after its scan is seen, so quantization
     /// tables redefined between scans have not yet been applied to it. Baseline frames never invoke it.
     /// </param>
-    public static DecodedFrame Decode(Stream stream, int maxScanCount = JpegDecodingLimits.MaxScanCount, Action<DecodedFrame>? progressFrameAvailable = null)
+    public static DecodedFrame Decode(Stream stream, int maxScanCount = JpegDecodingLimits.MaxScanCount, Action<DecodedFrame>? progressFrameAvailable = null, ParallelSettings? streamBaseline = null, CallerOutput? callerOutput = null)
     {
-        long streamStart = stream.CanSeek ? stream.Position : -1;
         var source = new JpegByteSource(stream);
+        try
+        {
+            return Decode(stream, source, maxScanCount, progressFrameAvailable, streamBaseline, callerOutput);
+        }
+        finally
+        {
+            source.Release();
+        }
+    }
+
+    private static DecodedFrame Decode(Stream stream, JpegByteSource source, int maxScanCount, Action<DecodedFrame>? progressFrameAvailable, ParallelSettings? streamBaseline, CallerOutput? callerOutput)
+    {
+        var streaming = new StreamingState { Requested = streamBaseline is not null, Parallel = streamBaseline ?? default, Target = callerOutput };
+        long streamStart = stream.CanSeek ? stream.Position : -1;
         var markerReader = new JpegMarkerReader(source);
 
         if (markerReader.NextMarker() != JpegMarker.Soi)
@@ -176,7 +229,7 @@ internal static class FrameDecoder
             switch (marker)
             {
                 case JpegMarker.Dqt:
-                    foreach (var table in JpegQuantizationTable.ParseAll(ReadSegment(markerReader)))
+                    foreach (var table in JpegQuantizationTable.ParseAll(ReadSegmentScratch(markerReader, source)))
                     {
                         quantTables[table.Id] = table;
                     }
@@ -184,7 +237,7 @@ internal static class FrameDecoder
                     break;
 
                 case JpegMarker.Dht:
-                    foreach (var spec in JpegHuffmanTableSpec.ParseAll(ReadSegment(markerReader)))
+                    foreach (var spec in JpegHuffmanTableSpec.ParseAll(ReadSegmentScratch(markerReader, source)))
                     {
                         (spec.TableClass == 0 ? dcHuffmanSpecs : acHuffmanSpecs)[spec.Id] = spec;
 
@@ -196,7 +249,7 @@ internal static class FrameDecoder
 
                 case JpegMarker.Dri:
                 {
-                    var payload = ReadSegment(markerReader);
+                    var payload = ReadSegmentScratch(markerReader, source);
                     if (payload.Length != 2)
                     {
                         throw new JpegDecodingException("Invalid DRI segment length.");
@@ -218,7 +271,9 @@ internal static class FrameDecoder
                     frameHeader = JpegFrameHeader.Parse(ReadSegment(markerReader), isProgressive: marker == JpegMarker.Sof2);
                     ThrowIfDimensionsExceedLimits(frameHeader);
                     ThrowIfStreamCannotHoldBaselineFrame(frameHeader, stream, streamStart, source.BytePosition);
-                    (components, mcusAcross, mcusDown) = BuildComponentPlans(frameHeader);
+                    // Streaming is for baseline frames only; a progressive frame keeps full coefficient buffers from the start.
+                    streaming.Requested &= !frameHeader.IsProgressive;
+                    (components, mcusAcross, mcusDown) = BuildComponentPlans(frameHeader, deferCoefficients: streaming.Requested);
                     break;
                 }
 
@@ -300,7 +355,8 @@ internal static class FrameDecoder
                         throw new JpegDecodingException($"JPEG frame contains more than {maxScanCount} scans, exceeding the maximum supported scan count.");
                     }
 
-                    var scanHeader = DecodeScan(markerReader, source, frameHeader, components, dcHuffmanSpecs, acHuffmanSpecs, dcTableCache, acTableCache, restartInterval, mcusAcross, mcusDown);
+                    streaming.AssumedColorSpace = ColorSpaceResolver.Resolve(frameHeader.Components.Length, adobe).ColorSpace;
+                    var scanHeader = DecodeScan(markerReader, source, frameHeader, components, dcHuffmanSpecs, acHuffmanSpecs, dcTableCache, acTableCache, restartInterval, mcusAcross, mcusDown, quantTables, streaming);
                     if (progressFrameAvailable is not null && frameHeader.IsProgressive)
                     {
                         if (scanHeader.SpectralStart == 0 && scanHeader.SuccessiveApproximationHigh == 0)
@@ -328,6 +384,13 @@ internal static class FrameDecoder
             throw new JpegDecodingException("JPEG stream ended without a frame header.");
         }
 
+        if (streaming.Requested && !streaming.BuffersAllocated)
+        {
+            // No scan ever ran: keep the usual all-zero coefficient buffers.
+            AllocateCoefficients(components, mcusAcross, mcusDown);
+            streaming.BuffersAllocated = true;
+        }
+
         BindQuantizationTables(components, quantTables);
 
         var (colorSpace, isAdobeInverted) = ColorSpaceResolver.Resolve(frameHeader.Components.Length, adobe);
@@ -339,6 +402,9 @@ internal static class FrameDecoder
             ColorSpace = colorSpace,
             IsAdobeInverted = isAdobeInverted,
             Metadata = BuildMetadata(metadata, iccChunks, iccChunkCount),
+            StreamedPlanes = streaming.Planes,
+            StreamedOutput = streaming.Output,
+            StreamedOutputColorSpace = streaming.OutputColorSpace,
         };
     }
 
@@ -387,7 +453,9 @@ internal static class FrameDecoder
         Dictionary<byte, HuffmanDecodingTable> acTableCache,
         int restartInterval,
         int mcusAcross,
-        int mcusDown)
+        int mcusDown,
+        Dictionary<byte, JpegQuantizationTable> quantTables,
+        StreamingState streaming)
     {
         var scanHeader = JpegScanHeader.Parse(ReadSegment(markerReader));
 
@@ -401,7 +469,7 @@ internal static class FrameDecoder
         for (int i = 0; i < scanHeader.Components.Length; i++)
         {
             var scanComponent = scanHeader.Components[i];
-            scanComponents[i] = Array.Find(components, c => c.Frame.Id == scanComponent.ComponentSelector)
+            scanComponents[i] = FindComponent(components, scanComponent.ComponentSelector)
                 ?? throw new JpegDecodingException($"Scan references undefined component id {scanComponent.ComponentSelector}.");
 
             if (needsDc)
@@ -442,6 +510,29 @@ internal static class FrameDecoder
 
         if (!frameHeader.IsProgressive)
         {
+            if (streaming.Planes is not null)
+            {
+                throw new JpegDecodingException("A baseline frame already decoded by its first scan has a further scan.");
+            }
+
+            if (streaming.Requested && !streaming.BuffersAllocated)
+            {
+                if (CanStream(components, scanComponents, quantTables))
+                {
+                    BindQuantizationTables(components, quantTables);
+                    streaming.Planes = StreamingBaselineScan.Decode(
+                        entropy, components, scanComponents, dcTables, acTables, restart, mcusAcross, mcusDown, streaming.Parallel,
+                        streaming.AssumedColorSpace, frameHeader.Width, frameHeader.Height, out var converted, streaming.Target);
+                    streaming.Output = converted;
+                    streaming.OutputColorSpace = streaming.AssumedColorSpace;
+                    streaming.BuffersAllocated = true;
+                    return scanHeader;
+                }
+
+                AllocateCoefficients(components, mcusAcross, mcusDown);
+                streaming.BuffersAllocated = true;
+            }
+
             BaselineScanDecoder.DecodeScan(entropy, scanComponents, dcTables, acTables, restart, mcusAcross, mcusDown);
         }
         else
@@ -497,7 +588,58 @@ internal static class FrameDecoder
         }
     }
 
-    private static (ComponentDecodeState[] Components, int McusAcross, int McusDown) BuildComponentPlans(JpegFrameHeader frameHeader)
+    /// <summary>Per-frame state for the optional streaming decode of a baseline frame.</summary>
+    private sealed class StreamingState
+    {
+        public bool Requested { get; set; }
+
+        public ParallelSettings Parallel { get; init; }
+
+        /// <summary>Caller memory the converted rows go to, when the caller decodes into its own buffer.</summary>
+        public CallerOutput? Target { get; init; }
+
+        /// <summary>Whether the components have their full-size coefficient buffers (or streaming took over, which needs none).</summary>
+        public bool BuffersAllocated { get; set; }
+
+        public byte[][]? Planes { get; set; }
+
+        /// <summary>The finished image bytes when rows were converted during the scan, and the color space they were converted as.</summary>
+        public byte[]? Output { get; set; }
+
+        public JpegColorSpace OutputColorSpace { get; set; }
+
+        /// <summary>The color space the frame resolves to given the markers seen when its scan starts.</summary>
+        public JpegColorSpace AssumedColorSpace { get; set; }
+    }
+
+    /// <summary>True when one scan covers every component exactly once and every quantization table it needs is already known.</summary>
+    private static bool CanStream(ComponentDecodeState[] components, ComponentDecodeState[] scanComponents, Dictionary<byte, JpegQuantizationTable> quantTables)
+    {
+        if (scanComponents.Length != components.Length)
+        {
+            return false;
+        }
+
+        foreach (var component in components)
+        {
+            if (!ContainsReference(scanComponents, component) || !quantTables.ContainsKey(component.Frame.QuantizationTableId))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void AllocateCoefficients(ComponentDecodeState[] components, int mcusAcross, int mcusDown)
+    {
+        foreach (var component in components)
+        {
+            component.Coefficients = new JpegCoefficientBuffer(mcusAcross * component.BlocksPerMcuHorizontal, mcusDown * component.BlocksPerMcuVertical);
+        }
+    }
+
+    private static (ComponentDecodeState[] Components, int McusAcross, int McusDown) BuildComponentPlans(JpegFrameHeader frameHeader, bool deferCoefficients)
     {
         int hMax = 1;
         int vMax = 1;
@@ -530,7 +672,7 @@ internal static class FrameDecoder
                 ActualWidthInSamples = actualWidth,
                 ActualHeightInSamples = actualHeight,
                 QuantizationTable = UnresolvedQuantizationTable,
-                Coefficients = new JpegCoefficientBuffer(blocksWide, blocksHigh),
+                Coefficients = deferCoefficients ? new JpegCoefficientBuffer(0, 0) : new JpegCoefficientBuffer(blocksWide, blocksHigh),
             };
         }
 
@@ -540,6 +682,41 @@ internal static class FrameDecoder
     // Placeholder assigned at construction time and always overwritten once every DQT segment in the
     // stream has been seen (immediately after the marker-parsing loop above finishes); never used as-is.
     private static readonly JpegQuantizationTable UnresolvedQuantizationTable = new() { Id = 0, Values = new ushort[64] };
+
+    private static ComponentDecodeState? FindComponent(ComponentDecodeState[] components, byte id)
+    {
+        foreach (var component in components)
+        {
+            if (component.Frame.Id == id)
+            {
+                return component;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool ContainsReference(ComponentDecodeState[] components, ComponentDecodeState component)
+    {
+        foreach (var candidate in components)
+        {
+            if (ReferenceEquals(candidate, component))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Reads a segment that is parsed straight away (not kept) into the source's reusable scratch instead of a new array.</summary>
+    private static Span<byte> ReadSegmentScratch(JpegMarkerReader markerReader, JpegByteSource source)
+    {
+        int length = markerReader.ReadSegmentLength();
+        var payload = source.Scratch(length);
+        markerReader.ReadSegmentBytes(payload);
+        return payload;
+    }
 
     private static byte[] ReadSegment(JpegMarkerReader markerReader)
     {

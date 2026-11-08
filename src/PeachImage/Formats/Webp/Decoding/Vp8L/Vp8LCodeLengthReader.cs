@@ -26,9 +26,10 @@ internal static class Vp8LCodeLengthReader
     /// <summary>Base repeat count added to the extra bits for repeat codes 16/17/18, indexed by <c>symbol - 16</c>.</summary>
     private static readonly int[] RepeatOffsets = [3, 3, 11];
 
-    public static Vp8LHuffmanTable ReadHuffmanCode(Vp8LBitReader reader, int alphabetSize)
+    public static Vp8LHuffmanTable ReadHuffmanCode(Vp8LBitReader reader, int alphabetSize, bool pooled = false)
     {
-        var codeLengths = new int[alphabetSize];
+        // Code lengths are only read to build the table, so they live on the stack for every alphabet but a large colour cache's.
+        Span<int> codeLengths = (alphabetSize <= Vp8LHuffmanTableBuilder.StackAlphabetSize ? stackalloc int[Vp8LHuffmanTableBuilder.StackAlphabetSize] : new int[alphabetSize])[..alphabetSize];
         bool simpleCode = reader.ReadBits(1) != 0;
 
         if (simpleCode)
@@ -55,15 +56,23 @@ internal static class Vp8LCodeLengthReader
                 codeLengthCodeLengths[CodeLengthCodeOrder[i]] = (int)reader.ReadBits(3);
             }
 
-            var lengthsTable = Vp8LHuffmanTableBuilder.Build(codeLengthCodeLengths.ToArray(), Vp8LHuffmanTableBuilder.LengthsRootBits);
-            ReadCodeLengthsWithTable(reader, lengthsTable, alphabetSize, codeLengths);
+            // The table that decodes the code lengths is only needed to read them.
+            var lengthsTable = Vp8LHuffmanTableBuilder.Build(codeLengthCodeLengths, Vp8LHuffmanTableBuilder.LengthsRootBits, pooled: true);
+            try
+            {
+                ReadCodeLengthsWithTable(reader, lengthsTable, alphabetSize, codeLengths);
+            }
+            finally
+            {
+                lengthsTable.Release();
+            }
         }
 
-        return Vp8LHuffmanTableBuilder.Build(codeLengths, Vp8LHuffmanTableBuilder.MainRootBits);
+        return Vp8LHuffmanTableBuilder.Build(codeLengths, Vp8LHuffmanTableBuilder.MainRootBits, pooled);
     }
 
     /// <summary>The "normal" case's second half: uses the just-built 19-symbol code-length table to decode <paramref name="numSymbols"/> real code lengths, expanding DEFLATE-style repeat codes 16/17/18 along the way.</summary>
-    private static void ReadCodeLengthsWithTable(Vp8LBitReader reader, Vp8LHuffmanTable lengthsTable, int numSymbols, int[] codeLengths)
+    private static void ReadCodeLengthsWithTable(Vp8LBitReader reader, Vp8LHuffmanTable lengthsTable, int numSymbols, Span<int> codeLengths)
     {
         int previousCodeLength = DefaultCodeLength;
         int maxSymbol;

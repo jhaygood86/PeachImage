@@ -55,17 +55,62 @@ internal static class JpegDecoder
             onProgress = partial => previewAvailable(BuildImage(partial, options, jpegOptions));
         }
 
-        var frame = FrameDecoder.Decode(stream, progressFrameAvailable: onProgress);
+        // A full-size, non-progressive decode can transform coefficients as they are decoded instead of keeping them all.
+        bool fullSize = options is null || (options.ScaleDenominator == 1 && options.TargetSize is null && options.ResolvedScaleDenominator <= 1);
+        var frame = FrameDecoder.Decode(stream, progressFrameAvailable: onProgress, streamBaseline: fullSize ? ParallelSettings.From(options) : null);
         try
         {
             return BuildImage(frame, options, jpegOptions);
         }
         finally
         {
-            foreach (var component in frame.Components)
+            frame.ReleaseBuffers();
+        }
+    }
+
+    /// <summary>
+    /// Decodes <paramref name="stream"/> straight into caller memory: <paramref name="destination"/> (rows <paramref name="rowStride"/> bytes
+    /// apart) receives the image at full size in its natural pixel format. A baseline frame the streaming converter handles never
+    /// touches an intermediate image buffer; any other frame is reconstructed as usual and copied. Returns the pixel format written.
+    /// The caller has already checked the destination against the header and ruled out scaling and a target format.
+    /// </summary>
+    public static unsafe PixelFormat DecodeInto(Stream stream, DecoderOptions? options, byte* destination, int rowStride, out ImageMetadata metadata)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+
+        var jpegOptions = options as JpegDecoderOptions;
+        var target = new CallerOutput((nint)destination, rowStride);
+
+        // The streaming converter always uses the default chroma filter, so the fast-upsampling option decodes the usual way.
+        bool direct = jpegOptions?.FastUpsampling != true;
+        var frame = FrameDecoder.Decode(stream, streamBaseline: ParallelSettings.From(options), callerOutput: direct ? target : null);
+        try
+        {
+            if (direct && target.Written && frame.ColorSpace == frame.StreamedOutputColorSpace)
             {
-                component.Coefficients.Return();
+                metadata = new ImageMetadata();
+                foreach (var profile in frame.Metadata)
+                {
+                    metadata.Profiles.Add(profile);
+                }
+
+                ApplyResolution(metadata);
+                return frame.ColorSpace == JpegColorSpace.Grayscale ? PixelFormat.Gray8 : PixelFormat.Rgb24;
             }
+
+            using var image = BuildImage(frame, options, jpegOptions);
+            int rowBytes = image.Width * image.PixelFormat.GetBytesPerPixel();
+            for (int y = 0; y < image.Height; y++)
+            {
+                image.GetRowSpan(y).CopyTo(new Span<byte>(destination + ((long)y * rowStride), rowBytes));
+            }
+
+            metadata = image.Metadata;
+            return image.PixelFormat;
+        }
+        finally
+        {
+            frame.ReleaseBuffers();
         }
     }
 

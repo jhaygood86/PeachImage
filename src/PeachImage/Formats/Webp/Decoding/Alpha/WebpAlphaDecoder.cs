@@ -11,6 +11,10 @@ namespace PeachImage.Formats.Webp.Decoding.Alpha;
 /// </summary>
 internal static class WebpAlphaDecoder
 {
+    /// <summary>
+    /// Decodes the plane into a buffer rented from <see cref="WebpBufferPool.Shared"/>: it may be longer than <c>width*height</c>
+    /// (only that many bytes are the plane) and goes back to that pool when the caller is done with it.
+    /// </summary>
     public static byte[] Decode(ReadOnlyMemory<byte> alphBytes, int width, int height)
     {
         if (alphBytes.Length < 1)
@@ -28,7 +32,7 @@ internal static class WebpAlphaDecoder
             _ => throw new WebpDecodingException($"Unsupported WebP alpha compression method {header.CompressionMethod}."),
         };
 
-        WebpAlphaFilter.Reverse(header.FilterMethod, plane, width, height);
+        WebpAlphaFilter.Reverse(header.FilterMethod, plane.AsSpan(0, checked(width * height)), width, height);
         return plane;
     }
 
@@ -40,7 +44,9 @@ internal static class WebpAlphaDecoder
             throw new WebpDecodingException($"WebP ALPH chunk (uncompressed) is too short: expected {expected} bytes, got {payload.Length}.");
         }
 
-        return payload[..(int)expected].ToArray();
+        byte[] plane = WebpBufferPool.Shared.Rent((int)expected);
+        payload[..(int)expected].CopyTo(plane);
+        return plane;
     }
 
     private static byte[] DecodeLossless(ReadOnlyMemory<byte> payload, int width, int height)
@@ -48,7 +54,8 @@ internal static class WebpAlphaDecoder
         uint[] argb = Vp8LDecoder.DecodeAlphaSubstream(payload, width, height, out bool isPooled);
         try
         {
-            byte[] plane = new byte[(long)width * height <= int.MaxValue ? width * height : throw new WebpDecodingException("WebP alpha plane too large.")];
+            int length = (long)width * height <= int.MaxValue ? width * height : throw new WebpDecodingException("WebP alpha plane too large.");
+            byte[] plane = WebpBufferPool.Shared.Rent(length);
 
             // The alpha lossless substream reuses VP8L's full general pixel-decode pipeline; only the green
             // channel byte of each ARGB pixel is meaningful here (alpha/red/blue of the inner decode are
@@ -56,7 +63,7 @@ internal static class WebpAlphaDecoder
             // packed A<<24 | R<<16 | G<<8 | B, matching libwebp's own internal pixel representation. `argb`
             // may be larger than `plane` (a pooled, possibly-oversized array) -- bounding the loop by
             // `plane.Length`, not `argb.Length`, is what makes that safe.
-            for (int i = 0; i < plane.Length; i++)
+            for (int i = 0; i < length; i++)
             {
                 plane[i] = (byte)(argb[i] >> 8);
             }

@@ -60,28 +60,49 @@ internal sealed class Vector256TriangleFilterUpsampler : IChromaUpsampler
             () => ArrayPool<ushort>.Shared.Rent(sourceWidth + 2),
             (y, aBuffer) =>
         {
-            Span<ushort> a = aBuffer.AsSpan(0, sourceWidth + 2);
-
-            int srcY = Math.Clamp(y / verticalRatio, 0, sourceHeight - 1);
-            int srcYNeighbor = verticalRatio == 2
-                ? Math.Clamp((y / verticalRatio) + (((y & 1) == 0) ? -1 : 1), 0, sourceHeight - 1)
-                : srcY;
-
-            var main = source.AsSpan(srcY * sourceWidth, sourceWidth);
-            var vNeighbor = source.AsSpan(srcYNeighbor * sourceWidth, sourceWidth);
-            var dstRow = destination.AsSpan(y * destinationWidth, destinationWidth);
-
-            ComputeColumnBlend(main, vNeighbor, a.Slice(1, sourceWidth));
-            a[0] = a[1];
-            a[sourceWidth + 1] = a[sourceWidth];
-
-            BlendRow(a, sourceWidth, dstRow);
+            UpsampleRowHorizontalDoubling(
+                source, sourceWidth, sourceHeight, verticalRatio, y,
+                aBuffer.AsSpan(0, sourceWidth + 2),
+                destination.AsSpan(y * destinationWidth, destinationWidth));
         },
             aBuffer => ArrayPool<ushort>.Shared.Return(aBuffer),
             parallel);
     }
 
     /// <summary>Computes <c>columnBlend[c] = 3*main[c] + vNeighbor[c]</c> for every source column, 16 at a time.</summary>
+    private static void UpsampleRowHorizontalDoubling(
+        byte[] source, int sourceWidth, int sourceHeight, int verticalRatio, int y,
+        Span<ushort> a, Span<byte> dstRow)
+    {
+        int srcY = Math.Clamp(y / verticalRatio, 0, sourceHeight - 1);
+        int srcYNeighbor = verticalRatio == 2
+            ? Math.Clamp((y / verticalRatio) + (((y & 1) == 0) ? -1 : 1), 0, sourceHeight - 1)
+            : srcY;
+
+        var main = source.AsSpan(srcY * sourceWidth, sourceWidth);
+        var vNeighbor = source.AsSpan(srcYNeighbor * sourceWidth, sourceWidth);
+
+        ComputeColumnBlend(main, vNeighbor, a.Slice(1, sourceWidth));
+        a[0] = a[1];
+        a[sourceWidth + 1] = a[sourceWidth];
+
+        BlendRow(a, sourceWidth, dstRow);
+    }
+
+    public bool TryUpsampleRow(
+        byte[] source, int sourceWidth, int sourceHeight,
+        int horizontalRatio, int verticalRatio,
+        int y, Span<byte> destinationRow, Span<ushort> scratch)
+    {
+        if (horizontalRatio != 2 || verticalRatio is not (1 or 2))
+        {
+            return false;
+        }
+
+        UpsampleRowHorizontalDoubling(source, sourceWidth, sourceHeight, verticalRatio, y, scratch.Slice(0, sourceWidth + 2), destinationRow);
+        return true;
+    }
+
     private static void ComputeColumnBlend(ReadOnlySpan<byte> main, ReadOnlySpan<byte> vNeighbor, Span<ushort> columnBlend)
     {
         int c = 0;

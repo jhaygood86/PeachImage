@@ -64,6 +64,33 @@ internal sealed class Vp8LBitReader
     /// </summary>
     public bool IsOverBudget => _bitPosition - _bitCount > _totalBits;
 
+    /// <summary>The backing buffer. Exposed so the pixel decoder's hot loop can keep the reader's state in locals.</summary>
+    internal byte[] Data => _data;
+
+    /// <summary>The exclusive end offset of real data in <see cref="Data"/>.</summary>
+    internal int EndOffset => _length;
+
+    /// <summary>Hands the shift-register state to a caller that will run its own register-resident loop; pair with <see cref="Import"/>.</summary>
+    internal void Export(out ulong bitBuffer, out int bitCount, out int bytePos)
+    {
+        bitBuffer = _bitBuffer;
+        bitCount = _bitCount;
+        bytePos = _bytePos;
+    }
+
+    /// <summary>
+    /// Takes back state handed out by <see cref="Export"/>. The caller may only have advanced
+    /// <paramref name="bytePos"/> by whole real bytes (no synthesized zero padding), which is what lets the
+    /// bits-loaded counter be recovered from the byte cursor alone.
+    /// </summary>
+    internal void Import(ulong bitBuffer, int bitCount, int bytePos)
+    {
+        _bitPosition += (long)(bytePos - _bytePos) * 8;
+        _bitBuffer = bitBuffer;
+        _bitCount = bitCount;
+        _bytePos = bytePos;
+    }
+
     /// <summary>Returns the next <paramref name="bitCount"/> bits (0-32) without consuming them.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint PeekBits(int bitCount)

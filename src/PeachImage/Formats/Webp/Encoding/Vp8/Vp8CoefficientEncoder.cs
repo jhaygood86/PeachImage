@@ -5,7 +5,7 @@ namespace PeachImage.Formats.Webp.Encoding.Vp8;
 
 /// <summary>
 /// Encodes VP8 DCT coefficient tokens (RFC 6386 section 13) — the write-side mirror of
-/// <see cref="Vp8CoefficientDecoder.DecodeBlock"/>'s hand-unrolled cascade, walked in the opposite direction.
+/// <see cref="Vp8CoefficientDecoder.DecodeMacroblock"/>'s hand-unrolled cascade, walked in the opposite direction.
 /// Reuses <see cref="Vp8CoefficientProbabilities"/>'s flat tables and <see cref="Vp8CoefficientTrees"/>'s
 /// band/category tables as-is (the same spec constants serve both directions — only which branch gets written
 /// versus read differs), and <see cref="Vp8CoefficientContext"/> unchanged (pure above/left bookkeeping with no
@@ -17,7 +17,7 @@ internal static class Vp8CoefficientEncoder
     /// Writes one 4x4 block's coefficient tokens from <paramref name="quantized"/> (zigzag scan order, as
     /// <see cref="Vp8ForwardQuantizer.Quantize"/> produces — integer levels, not yet multiplied by the quant
     /// step), stopping once <paramref name="last"/> nonzero coefficients have been written. Mirrors
-    /// <see cref="Vp8CoefficientDecoder.DecodeBlock"/>'s parameters exactly (<paramref name="planeType"/>,
+    /// <see cref="Vp8CoefficientDecoder.DecodeMacroblock"/>'s parameters exactly (<paramref name="planeType"/>,
     /// <paramref name="firstContext"/>, <paramref name="first"/>) so a caller building the encode-side
     /// equivalent of that method's call sites can pass the same values.
     /// </summary>

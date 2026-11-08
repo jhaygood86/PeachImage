@@ -1,3 +1,6 @@
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using PeachImage.Formats.Jpeg.Dct;
 using PeachImage.Formats.Jpeg.Markers;
 
 namespace PeachImage.Formats.Jpeg.Entropy;
@@ -29,6 +32,144 @@ internal sealed class JpegEntropyReader(JpegByteSource source)
         _buffer <<= count;
         _bitCount -= count;
         return value;
+    }
+
+    /// <summary>
+    /// Decodes one baseline block (a DC difference, then AC run/size symbols up to end-of-block) into <paramref name="block"/>, which
+    /// must be 64 zeroed coefficients, and updates <paramref name="dcPredictor"/>. The bit buffer lives in locals for the whole
+    /// block instead of in this object's fields, and each symbol is refilled to at least 32 bits first: a Huffman code of at most 16
+    /// bits plus its 15-bit magnitude never needs a second refill.
+    /// </summary>
+    public void DecodeBaselineBlock(HuffmanDecodingTable dcTable, HuffmanDecodingTable acTable, ref int dcPredictor, Span<short> block)
+    {
+        if (block.Length < 64)
+        {
+            throw new ArgumentException("A block holds 64 coefficients.", nameof(block));
+        }
+
+        ulong buffer = _buffer;
+        int bitCount = _bitCount;
+        if (bitCount < 32)
+        {
+            Refill(ref buffer, ref bitCount);
+        }
+
+        int dcEntry = dcTable.FastDc[(int)(buffer >> (64 - HuffmanDecodingTable.FastBits))];
+        int diff;
+        if (dcEntry != 0)
+        {
+            int bits = dcEntry & 0xFF;
+            buffer <<= bits;
+            bitCount -= bits;
+            diff = dcEntry >> 8;
+        }
+        else
+        {
+            int size = dcTable.DecodeSymbol(ref buffer, ref bitCount);
+            if (size > 15)
+            {
+                throw new JpegDecodingException("Invalid JPEG DC coefficient size.");
+            }
+
+            diff = size == 0 ? 0 : ExtendSign((int)(buffer >> (64 - size)), size);
+            buffer <<= size;
+            bitCount -= size;
+        }
+
+        dcPredictor += diff;
+        ref short coefficients = ref MemoryMarshal.GetReference(block);
+        coefficients = (short)dcPredictor;
+
+        ref byte naturalOrder = ref MemoryMarshal.GetReference(ZigZag.ToNaturalOrder);
+        uint[] fastAc = acTable.FastAc;
+        int k = 1;
+        while (k <= 63)
+        {
+            if (bitCount < 32)
+            {
+                Refill(ref buffer, ref bitCount);
+            }
+
+            uint entry = fastAc[(int)(buffer >> (64 - HuffmanDecodingTable.FastBits))];
+            if (entry != 0)
+            {
+                int bits = (int)(entry & 15);
+                buffer <<= bits;
+                bitCount -= bits;
+                uint kind = (entry >> 4) & 3;
+                if (kind == (uint)AcSymbolKind.Coefficient)
+                {
+                    k += (int)((entry >> 8) & 15);
+                    if (k > 63)
+                    {
+                        throw new JpegDecodingException("Invalid JPEG AC coefficient run: index exceeds block size.");
+                    }
+
+                    Unsafe.Add(ref coefficients, Unsafe.Add(ref naturalOrder, k)) = (short)((int)entry >> 16);
+                    k++;
+                    continue;
+                }
+
+                if (kind == (uint)AcSymbolKind.EndOfBlock)
+                {
+                    break;
+                }
+
+                k += 16;
+                continue;
+            }
+
+            int runSize = acTable.DecodeSymbol(ref buffer, ref bitCount);
+            int magnitude = runSize & 15;
+            int run = runSize >> 4;
+            if (magnitude == 0)
+            {
+                if (run == 15)
+                {
+                    k += 16;
+                    continue;
+                }
+
+                break;
+            }
+
+            int value = ExtendSign((int)(buffer >> (64 - magnitude)), magnitude);
+            buffer <<= magnitude;
+            bitCount -= magnitude;
+            k += run;
+            if (k > 63)
+            {
+                throw new JpegDecodingException("Invalid JPEG AC coefficient run: index exceeds block size.");
+            }
+
+            Unsafe.Add(ref coefficients, Unsafe.Add(ref naturalOrder, k)) = (short)value;
+            k++;
+        }
+
+        _buffer = buffer;
+        _bitCount = bitCount;
+    }
+
+    /// <summary>Tops the local bit buffer up to at least 32 bits, from one word load when the next eight bytes hold no marker, else through <see cref="EnsureBits"/>.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void Refill(ref ulong buffer, ref int bitCount)
+    {
+        if (bitCount >= 0 && !AtMarkerBoundary && source.TryPeekCleanWord(out ulong word))
+        {
+            int bytes = (64 - bitCount) >> 3;
+            int total = bitCount + (bytes << 3);
+            ulong keep = total == 64 ? ulong.MaxValue : ~(ulong.MaxValue >> total);
+            buffer |= (word >> bitCount) & keep;
+            bitCount = total;
+            source.Advance(bytes);
+            return;
+        }
+
+        _buffer = buffer;
+        _bitCount = bitCount;
+        EnsureBits(32);
+        buffer = _buffer;
+        bitCount = _bitCount;
     }
 
     /// <summary>Reads a single bit. Used for progressive successive-approximation refinement.</summary>

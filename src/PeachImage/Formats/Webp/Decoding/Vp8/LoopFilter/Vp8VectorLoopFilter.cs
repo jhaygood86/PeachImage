@@ -96,6 +96,22 @@ internal static class Vp8VectorLoopFilter
         var q2 = Load(plane, origin + (2 * stride));
         var q3 = Load(plane, origin + (3 * stride));
 
+        if (Vp8ByteLoopFilter.IsSupported)
+        {
+            var r = Vp8ByteLoopFilter.Filter(p3, p2, p1, p0, q0, q1, q2, q3, thresh, interiorLimit, hevThreshold, macroblockEdge);
+            if (macroblockEdge)
+            {
+                r.P2.StoreUnsafe(ref plane[origin - (3 * stride)]);
+                r.Q2.StoreUnsafe(ref plane[origin + (2 * stride)]);
+            }
+
+            r.P1.StoreUnsafe(ref plane[origin - (2 * stride)]);
+            r.P0.StoreUnsafe(ref plane[origin - stride]);
+            r.Q0.StoreUnsafe(ref plane[origin]);
+            r.Q1.StoreUnsafe(ref plane[origin + stride]);
+            return;
+        }
+
         var thresh2 = Vector128.Create((short)((2 * thresh) + 1));
         var it = Vector128.Create((short)interiorLimit);
         var hev = Vector128.Create((short)hevThreshold);
@@ -135,6 +151,35 @@ internal static class Vp8VectorLoopFilter
         int hevThreshold,
         bool macroblockEdge)
     {
+        if (Vp8ByteLoopFilter.IsSupported)
+        {
+            var r = Vp8ByteLoopFilter.Filter(
+                LoadChromaBytes(plane, origin - (4 * stride)),
+                LoadChromaBytes(plane, origin - (3 * stride)),
+                LoadChromaBytes(plane, origin - (2 * stride)),
+                LoadChromaBytes(plane, origin - stride),
+                LoadChromaBytes(plane, origin),
+                LoadChromaBytes(plane, origin + stride),
+                LoadChromaBytes(plane, origin + (2 * stride)),
+                LoadChromaBytes(plane, origin + (3 * stride)),
+                thresh,
+                interiorLimit,
+                hevThreshold,
+                macroblockEdge);
+
+            if (macroblockEdge)
+            {
+                StoreChromaBytes(plane, origin - (3 * stride), r.P2);
+                StoreChromaBytes(plane, origin + (2 * stride), r.Q2);
+            }
+
+            StoreChromaBytes(plane, origin - (2 * stride), r.P1);
+            StoreChromaBytes(plane, origin - stride, r.P0);
+            StoreChromaBytes(plane, origin, r.Q0);
+            StoreChromaBytes(plane, origin + stride, r.Q1);
+            return;
+        }
+
         var (p2, p1, p0, q0, q1, q2) = FilterHalf(
             LoadChromaRow(plane, origin - (4 * stride)),
             LoadChromaRow(plane, origin - (3 * stride)),
@@ -191,6 +236,21 @@ internal static class Vp8VectorLoopFilter
         Span<Vector128<byte>> taps = stackalloc Vector128<byte>[Taps];
         Transpose16x8(plane, first, stride, taps);
 
+        if (Vp8ByteLoopFilter.IsSupported)
+        {
+            var r = Vp8ByteLoopFilter.Filter(
+                taps[0], taps[1], taps[2], taps[3], taps[4], taps[5], taps[6], taps[7],
+                thresh, interiorLimit, hevThreshold, macroblockEdge);
+            taps[1] = r.P2;
+            taps[2] = r.P1;
+            taps[3] = r.P0;
+            taps[4] = r.Q0;
+            taps[5] = r.Q1;
+            taps[6] = r.Q2;
+            Transpose8x16(taps, plane, first, stride);
+            return;
+        }
+
         var thresh2 = Vector128.Create((short)((2 * thresh) + 1));
         var it = Vector128.Create((short)interiorLimit);
         var hev = Vector128.Create((short)hevThreshold);
@@ -231,6 +291,30 @@ internal static class Vp8VectorLoopFilter
     {
         int first = origin - (Taps / 2);
         var (c01, c23, c45, c67) = TransposeEightRows(plane, first, stride);
+
+        if (Vp8ByteLoopFilter.IsSupported)
+        {
+            var r = Vp8ByteLoopFilter.Filter(
+                Vector128.Create(c01.GetLower(), c01.GetLower()), Vector128.Create(c01.GetUpper(), c01.GetUpper()),
+                Vector128.Create(c23.GetLower(), c23.GetLower()), Vector128.Create(c23.GetUpper(), c23.GetUpper()),
+                Vector128.Create(c45.GetLower(), c45.GetLower()), Vector128.Create(c45.GetUpper(), c45.GetUpper()),
+                Vector128.Create(c67.GetLower(), c67.GetLower()), Vector128.Create(c67.GetUpper(), c67.GetUpper()),
+                thresh,
+                interiorLimit,
+                hevThreshold,
+                macroblockEdge);
+
+            // p3 and q3 are unmodified by every filter, so they go back exactly as they were read.
+            StoreEightRows(
+                Vp8Interleave.UnpackLow(Vector128.Create(c01.GetLower(), c01.GetLower()), r.P2),
+                Vp8Interleave.UnpackLow(r.P1, r.P0),
+                Vp8Interleave.UnpackLow(r.Q0, r.Q1),
+                Vp8Interleave.UnpackLow(r.Q2, Vector128.Create(c67.GetUpper(), c67.GetUpper())),
+                plane,
+                first,
+                stride);
+            return;
+        }
 
         var (p2, p1, p0, q0, q1, q2) = FilterHalf(
             WidenLane(c01.GetLower()), WidenLane(c01.GetUpper()),
@@ -471,6 +555,12 @@ internal static class Vp8VectorLoopFilter
         Lower(Vector128.CreateScalar(BinaryPrimitives.ReadUInt64LittleEndian(plane.Slice(offset, ChromaLanes))).AsByte());
 
     /// <summary>Widens <see cref="ChromaLanes"/> bytes held in a half-vector to 16-bit lanes.</summary>
+    private static Vector128<byte> LoadChromaBytes(Span<byte> plane, int offset) =>
+        Vector128.CreateScalar(BinaryPrimitives.ReadUInt64LittleEndian(plane.Slice(offset, ChromaLanes))).AsByte();
+
+    private static void StoreChromaBytes(Span<byte> plane, int offset, Vector128<byte> lane) =>
+        BinaryPrimitives.WriteUInt64LittleEndian(plane.Slice(offset, ChromaLanes), lane.AsUInt64().ToScalar());
+
     private static Vector128<short> WidenLane(Vector64<byte> lane) => Lower(Vector128.Create(lane, lane));
 
     /// <summary>Narrows a filtered chroma lane back to bytes; only the low <see cref="ChromaLanes"/> are meaningful, which is all the interleaves that follow consume.</summary>

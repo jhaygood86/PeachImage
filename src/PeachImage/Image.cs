@@ -607,6 +607,18 @@ public sealed class Image : IDisposable
         }
     }
 
+    /// <summary>
+    /// Decodes <paramref name="data"/> into <paramref name="destination"/> instead of a new <see cref="Image"/>; see <see cref="ImageDecoder"/>
+    /// for the contract. Prefer an <see cref="ImageDecoder"/> when decoding repeatedly.
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="destination"/> is shorter than <see cref="ImageInfo.GetRequiredBufferSize"/>, or <paramref name="rowStride"/> is less than one row.</exception>
+    public static ImageInfo DecodeInto(ReadOnlySpan<byte> data, Span<byte> destination, out ImageMetadata metadata, int rowStride = 0, DecoderOptions? options = null) =>
+        CallerBufferDecode.RunSpanOrThrow(data, options, destination, rowStride, out metadata);
+
+    /// <summary>Decodes the image at <paramref name="stream"/>'s position into <paramref name="destination"/>; see <see cref="DecodeInto(ReadOnlySpan{byte}, Span{byte}, out ImageMetadata, int, DecoderOptions?)"/>.</summary>
+    public static ImageInfo DecodeInto(Stream stream, Span<byte> destination, out ImageMetadata metadata, int rowStride = 0, DecoderOptions? options = null) =>
+        CallerBufferDecode.RunOrThrow(stream, options, destination, rowStride, out metadata);
+
     /// <summary>Reads image dimensions and format information from <paramref name="stream"/> without fully decoding pixel data.</summary>
     public static ImageInfo Identify(Stream stream) => Identify(stream, null);
 
@@ -631,6 +643,16 @@ public sealed class Image : IDisposable
         preparedStream = EnsureSeekable(preparedStream);
         var location = ContainerLocationScanner.Scan(preparedStream, codec.FormatName);
         return codec.Identify(preparedStream, options) with { HasLocation = location.HasLocation, ExifLocation = location.Exif };
+    }
+
+    // The header-level half of Identify: the codec and its ImageInfo, without the metadata location scan (the caller-buffer decode scans once itself).
+    internal static ImageInfo IdentifyHeader(Stream stream, DecoderOptions? options, out IImageCodec codec)
+    {
+        var found = ResolveCodec(stream, options, out var preparedStream)
+            ?? throw new UnknownImageFormatException("The image format could not be determined from the stream contents.");
+        ThrowIfFormatNotAllowed(found, options);
+        codec = found;
+        return found.Identify(preparedStream, options);
     }
 
     private static void ThrowIfFormatNotAllowed(IImageCodec codec, DecoderOptions? options)

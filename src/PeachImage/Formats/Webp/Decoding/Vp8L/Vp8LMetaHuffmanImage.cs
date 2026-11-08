@@ -22,6 +22,9 @@ internal sealed class Vp8LMetaHuffmanImage
         _subsampleBits = subsampleBits;
     }
 
+    /// <summary>Mask of the in-tile column bits: the group can only change when <c>(x &amp; TileMask) == 0</c>.</summary>
+    public int TileMask => (1 << _subsampleBits) - 1;
+
     /// <summary>Which <see cref="Vp8LHuffmanGroup"/> index applies to the tile containing pixel (<paramref name="x"/>, <paramref name="y"/>).</summary>
     public int GetGroupIndex(int x, int y) => _groupIndexPerTile[(_tileXSize * (y >> _subsampleBits)) + (x >> _subsampleBits)];
 
@@ -29,7 +32,8 @@ internal sealed class Vp8LMetaHuffmanImage
     /// Reads this image stream's Huffman code definitions: an optional meta-Huffman entropy sub-image (only
     /// permitted when <paramref name="allowRecursion"/> — VP8L never nests a second one inside a sub-image),
     /// then one <see cref="Vp8LHuffmanGroup"/> per distinct group index the entropy sub-image selects (or
-    /// exactly one group, if there's no entropy sub-image at all).
+    /// exactly one group, if there's no entropy sub-image at all). The groups' tables are rented from the array pool: the caller
+    /// owes <see cref="Vp8LHuffmanGroup.Release"/> for each once the stream is decoded.
     /// </summary>
     public static Vp8LHuffmanGroup[] ReadGroups(Vp8LBitReader reader, int xsize, int ysize, int colorCacheBits, bool allowRecursion, out Vp8LMetaHuffmanImage? metaImage)
     {
@@ -66,7 +70,7 @@ internal sealed class Vp8LMetaHuffmanImage
             var groups = new Vp8LHuffmanGroup[groupCount];
             for (int i = 0; i < groupCount; i++)
             {
-                groups[i] = Vp8LHuffmanGroup.Read(reader, colorCacheBits);
+                groups[i] = Vp8LHuffmanGroup.Read(reader, colorCacheBits, pooled: true);
             }
 
             metaImage = new Vp8LMetaHuffmanImage(groupIndexPerTile, tileXSize, subsampleBits);
@@ -74,7 +78,7 @@ internal sealed class Vp8LMetaHuffmanImage
         }
 
         metaImage = null;
-        return [Vp8LHuffmanGroup.Read(reader, colorCacheBits)];
+        return [Vp8LHuffmanGroup.Read(reader, colorCacheBits, pooled: true)];
     }
 
     /// <summary>Ceiling-divides <paramref name="size"/> by <c>1 &lt;&lt; sampleBits</c> — VP8L's <c>VP8LSubSampleSize</c>, shared by tile-grid subsampling (predictor/color transforms, the meta-Huffman image) and color-indexing's byte packing.</summary>

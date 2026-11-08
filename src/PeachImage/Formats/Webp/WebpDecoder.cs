@@ -35,7 +35,7 @@ internal static class WebpDecoder
         }
 
         var metadata = new ImageMetadata();
-        var container = WebpContainerReader.Read(stream, metadata, prelude, pendingHeader);
+        var container = WebpContainerReader.Read(stream, metadata, prelude, pendingHeader, headerOnly: true);
 
         bool hasAlpha;
         int width, height;
@@ -96,8 +96,16 @@ internal static class WebpDecoder
         }
         else
         {
-            var container = WebpContainerReader.Read(stream, metadata, prelude, pendingHeader);
-            image = WebpBitstreamDecoder.Decode(container.Format, container.BitstreamData, container.AlphaData);
+            var container = WebpContainerReader.Read(stream, metadata, prelude, pendingHeader, pooledBitstream: true);
+            try
+            {
+                image = WebpBitstreamDecoder.Decode(container.Format, container.Bitstream, container.AlphaData);
+            }
+            finally
+            {
+                container.Release();
+            }
+
             isAnimated = false;
 
             if (container.CanvasWidth is { } canvasWidth && container.CanvasHeight is { } canvasHeight
@@ -124,6 +132,42 @@ internal static class WebpDecoder
         result.IsAnimated = isAnimated;
         result.HasAlpha = hasAlpha;
         return result;
+    }
+
+    /// <summary>
+    /// Decodes a still (non-animated) file into memory the caller owns: rows <paramref name="stride"/> bytes apart, in the format and
+    /// size <paramref name="expected"/> (the file's own header) describes. The bitstream has to agree with that header.
+    /// </summary>
+    public static unsafe PixelFormat DecodeInto(Stream stream, byte* destination, int stride, ImageInfo expected, out ImageMetadata metadata)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+
+        metadata = new ImageMetadata();
+        var prelude = WebpContainerReader.ReadPrelude(stream, out var pendingHeader);
+        if (prelude.HasAnimation)
+        {
+            throw new InvalidOperationException("An animated WebP does not decode directly into a caller buffer.");
+        }
+
+        var container = WebpContainerReader.Read(stream, metadata, prelude, pendingHeader, pooledBitstream: true);
+        try
+        {
+            var output = new Decoding.WebpOutput((nint)destination, stride, expected.Width, expected.Height, expected.PixelFormat);
+            Decoding.WebpBitstreamDecoder.DecodeInto(container.Format, container.Bitstream, container.AlphaData, output);
+        }
+        finally
+        {
+            container.Release();
+        }
+
+        if (container.CanvasWidth is { } canvasWidth && container.CanvasHeight is { } canvasHeight
+            && (expected.Width != canvasWidth || expected.Height != canvasHeight))
+        {
+            throw new WebpDecodingException(
+                $"WebP VP8X canvas size {canvasWidth}x{canvasHeight} does not match the decoded bitstream size {expected.Width}x{expected.Height}.");
+        }
+
+        return expected.PixelFormat;
     }
 
     /// <summary>

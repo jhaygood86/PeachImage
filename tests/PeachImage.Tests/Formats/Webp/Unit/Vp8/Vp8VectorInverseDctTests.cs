@@ -85,6 +85,67 @@ public class Vp8VectorInverseDctTests
         }
     }
 
+    /// <summary>
+    /// The 16-bit kernel is only used when every coefficient is within +-2047, where its intermediates just fit. The largest
+    /// intermediates come from blocks whose coefficients all sit at the limit with the signs that make the butterflies add up, so this
+    /// tries every one of the 2^16 sign patterns at the limit (and, as a fallback check, one past it) against the scalar kernel.
+    /// </summary>
+    [Theory]
+    [InlineData(2047)]
+    [InlineData(2048)]
+    public void TransformFullAndAdd_MatchesTheScalarKernel_ForEverySignPatternAtTheSixteenBitLimit(int magnitude)
+    {
+        Assert.SkipUnless(Vp8VectorInverseDct.CanTransform, "No two-vector interleave (SSE2 or Arm64 AdvSimd) is available here.");
+
+        short[] coefficients = new short[16];
+        for (int pattern = 0; pattern < 1 << 16; pattern++)
+        {
+            for (int i = 0; i < 16; i++)
+            {
+                coefficients[i] = (short)(((pattern >> i) & 1) != 0 ? -magnitude : magnitude);
+            }
+
+            AssertAgrees(coefficients, (byte)(pattern & 0x80));
+        }
+    }
+
+    /// <summary>
+    /// Blocks whose only nonzero coefficients are raster positions 0, 1 and 4 take a shortcut; it must give the full transform's result
+    /// for any values there, including the extremes of the 16-bit input range and zeros in either AC position.
+    /// </summary>
+    [Fact]
+    public void AddSparseAc_MatchesTheScalarKernel_ForAnyCoefficientsAtPositionsZeroOneAndFour()
+    {
+        var random = new Random(161803);
+        short[] extremes = [0, 1, -1, 2, -2, 255, -255, 2047, -2047, 2114, -2114, 32767, -32768, 12345, -12345];
+
+        for (int trial = 0; trial < 30_000; trial++)
+        {
+            short[] coefficients = new short[16];
+            if (trial < extremes.Length * extremes.Length * extremes.Length)
+            {
+                coefficients[0] = extremes[trial % extremes.Length];
+                coefficients[1] = extremes[trial / extremes.Length % extremes.Length];
+                coefficients[4] = extremes[trial / (extremes.Length * extremes.Length)];
+            }
+            else
+            {
+                coefficients[0] = (short)random.Next(short.MinValue, short.MaxValue + 1);
+                coefficients[1] = (short)random.Next(-4000, 4001);
+                coefficients[4] = (short)random.Next(-4000, 4001);
+            }
+
+            byte basePixel = (byte)(trial % 3 == 0 ? 0 : trial % 3 == 1 ? 128 : 255);
+            byte[] expected = MakePlane(basePixel);
+            byte[] actual = MakePlane(basePixel);
+
+            Vp8ScalarInverseDct.TransformFullAndAdd(coefficients, expected, Stride + 1, Stride);
+            Vp8VectorInverseDct.AddSparseAc(ref coefficients[0], ref actual[Stride + 1], Stride);
+
+            Assert.Equal(expected, actual);
+        }
+    }
+
     private static IEnumerable<short[]> EnumerateStructuredBlocks()
     {
         // One AC coefficient at each position, at both signs and at a magnitude that will saturate the clamp.

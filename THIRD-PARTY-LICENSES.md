@@ -2,9 +2,9 @@
 
 PeachImage is original, from-scratch managed code with no native interop. With one disclosed exception — the
 ICC color-management engine, adapted directly from a third-party MIT-licensed library, see the Wacton/Unicolour
-section below — it bundles no third-party source code; every other attribution below exists only because an
-algorithm's exact structure or numeric data (never literal code) was used as reference material during
-implementation, per the terms below.
+section below — it bundles no third-party source code; every other attribution below exists because an
+algorithm's exact structure or numeric data was used as reference material during implementation (for libwebp, parts
+of the WebP codec were transcribed from its C source, see that section), per the terms below.
 
 ## Independent JPEG Group (IJG) / libjpeg-turbo — AAN fast DCT/IDCT butterfly wiring
 
@@ -265,6 +265,54 @@ distributed under the BSD 2-Clause License:
 > NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 This notice applies to the JPEG 2000 decoder and test files described above. It does not apply to any other part of PeachImage.
+
+## libwebp — WebP decoder and encoder
+
+`src/PeachImage/Formats/Webp/` is a managed implementation written from RFC 6386 (VP8), the WebP container and lossless
+bitstream specifications, using [libwebp](https://chromium.googlesource.com/webm/libwebp) as the behavioural and numeric
+reference; its output is checked against libwebp's. Beyond following libwebp's structure, parts of it are transcribed from
+libwebp's C source (`src/dec`, `src/dsp`, `src/enc`, `src/utils`), and are therefore derived works covered by the notice below:
+
+- **Tables and constants:** the coefficient probabilities and update probabilities, bands, categories and zigzag order, the
+  B-mode probabilities, the DC/AC quantizer tables, the VP8L backward-reference `kCodeToPlane` table and code-length order, the
+  colour-cache hash multiplier, and the forward-transform and RGB-to-YUV fixed-point constants
+  (`Decoding/Vp8/Vp8Coefficient*.cs`, `Vp8PredictionTrees.cs`, `Vp8Dequantizer.cs`, `Vp8ZigZag.cs`,
+  `Decoding/Vp8L/Vp8LBackwardReferenceTables.cs`, `Vp8LColorCache.cs`, `Vp8LCodeLengthReader.cs`,
+  `Encoding/Vp8/Vp8ForwardTransformConstants.cs`).
+- **Algorithms followed closely:** the VP8 boolean decoder and encoder (`Vp8BoolDecoder.cs`, `Encoding/Vp8/Vp8BoolEncoder.cs`),
+  intra-mode parsing and the unrolled coefficient decoding cascade (`Vp8ModeDecoder.cs`, `Vp8CoefficientDecoder.cs`), the 4x4
+  and whole-block intra predictors (`Vp8IntraPrediction4x4.cs`, `Vp8IntraPredictionWholeBlock.cs`), the loop filters
+  (`LoopFilter/`), the fancy chroma upsampler (`Upsampling/`), the alpha unfilters (`Alpha/WebpAlphaFilter.cs`), the forward
+  DCT/WHT and RGB-to-YUV conversion (`Encoding/Vp8/`), the VP8L canonical-Huffman table construction
+  (`Decoding/Vp8L/Vp8LHuffmanTableBuilder.cs`, a transliteration of `VP8LBuildHuffmanTable`), the predictor, colour and
+  colour-indexing inverse transforms, and the structure of the register-resident pixel loop (`Vp8LFastPixelLoop.cs`, after
+  `DecodeImageData`).
+
+The WebP tests fetch the libwebp-test-data corpus at test time (it is not checked in). libwebp is distributed under the BSD 3-Clause License, with a
+separate patent grant (the `PATENTS` file in the libwebp repository) from Google:
+
+> Copyright (c) 2010, Google Inc. All rights reserved.
+>
+> Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following
+> conditions are met:
+>
+> 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following
+>    disclaimer.
+>
+> 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following
+>    disclaimer in the documentation and/or other materials provided with the distribution.
+>
+> 3. Neither the name of Google nor the names of its contributors may be used to endorse or promote products derived from this
+>    software without specific prior written permission.
+>
+> THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING,
+> BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
+> SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+> DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+> INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+> NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+This notice applies to the WebP codec described above. It does not apply to any other part of PeachImage.
 
 ## JBIG2 and CCITT fax decoders
 

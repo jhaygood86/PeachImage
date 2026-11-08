@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8L;
@@ -31,6 +32,21 @@ internal sealed class Vp8LHuffmanTable
     public required Vp8LHuffmanCode[] Entries { get; init; }
 
     public required int RootBits { get; init; }
+
+    /// <summary>Whether <see cref="Entries"/> was rented from <see cref="ArrayPool{T}.Shared"/> (and so may be longer than the table) and has to go back through <see cref="Release"/>.</summary>
+    public bool IsPooled { get; init; }
+
+    private bool _released;
+
+    /// <summary>Returns a rented <see cref="Entries"/> to the pool. The table must not be decoded with afterward; calling it again is harmless.</summary>
+    public void Release()
+    {
+        if (IsPooled && !_released)
+        {
+            _released = true;
+            ArrayPool<Vp8LHuffmanCode>.Shared.Return(Entries);
+        }
+    }
 
     /// <summary>The longest code VP8L permits, so one peek of this width always covers both levels of the lookup — every root entry's total <see cref="Vp8LHuffmanCode.Bits"/> is bounded by it, and <see cref="RootBits"/> (7 or 8) is well under it.</summary>
     private const int MaxCodeLength = Internal.WebpDecodingLimits.MaxHuffmanCodeLength;

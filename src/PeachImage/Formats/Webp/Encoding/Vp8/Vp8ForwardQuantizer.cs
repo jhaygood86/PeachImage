@@ -18,7 +18,7 @@ internal static class Vp8ForwardQuantizer
     /// Quantizes <paramref name="coefficients"/> (natural raster order) into <paramref name="quantized"/>
     /// (zigzag scan order, integer levels — not yet multiplied back up by the quant step). Returns the scan
     /// position one past the last nonzero level (0 if the block is entirely zero, 16 if position 15 is
-    /// nonzero) — the encode-side mirror of <see cref="Vp8CoefficientDecoder.DecodeBlock"/>'s <c>last</c>
+    /// nonzero) — the encode-side mirror of <see cref="Vp8CoefficientDecoder.DecodeMacroblock"/>'s <c>last</c>
     /// bookkeeping, which the coefficient token encoder needs to know where to stop.
     /// </summary>
     public static int Quantize(ReadOnlySpan<short> coefficients, int dcQuant, int acQuant, Span<short> quantized)
@@ -105,7 +105,7 @@ internal static class Vp8ForwardQuantizer
     /// <summary>
     /// Dequantizes <paramref name="quantized"/> (zigzag scan order levels) back into
     /// <paramref name="output"/> (natural raster order, each level multiplied by its DC/AC quant step) — the
-    /// same natural-order/dequantized-value layout <see cref="Vp8CoefficientDecoder.DecodeBlock"/> produces,
+    /// same natural-order/dequantized-value layout <see cref="Vp8CoefficientDecoder.DecodeMacroblock"/> produces,
     /// so <see cref="Decoding.Vp8.Dct.Vp8ScalarInverseDct"/>/<see cref="Decoding.Vp8.Dct.Vp8ScalarInverseWht"/>
     /// can consume it unchanged for the encoder's own reconstruction pass.
     /// </summary>

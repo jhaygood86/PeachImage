@@ -22,17 +22,30 @@ internal sealed class Vp8LHuffmanGroup
     public required Vp8LHuffmanTable Distance { get; init; }
 
     /// <summary>Reads one group's worth of five Huffman code definitions from the bitstream, in green/red/blue/alpha/distance order.</summary>
-    public static Vp8LHuffmanGroup Read(Vp8LBitReader reader, int colorCacheBits)
+    /// <param name="reader">The bit reader.</param>
+    /// <param name="colorCacheBits">The colour cache width, or 0 for none.</param>
+    /// <param name="pooled">Rent the five tables from the shared array pool; the caller then owes <see cref="Release"/>.</param>
+    public static Vp8LHuffmanGroup Read(Vp8LBitReader reader, int colorCacheBits, bool pooled = false)
     {
         int cacheSize = colorCacheBits > 0 ? 1 << colorCacheBits : 0;
         int greenAlphabetSize = 256 + 24 + cacheSize;
 
-        var green = Vp8LCodeLengthReader.ReadHuffmanCode(reader, greenAlphabetSize);
-        var red = Vp8LCodeLengthReader.ReadHuffmanCode(reader, 256);
-        var blue = Vp8LCodeLengthReader.ReadHuffmanCode(reader, 256);
-        var alpha = Vp8LCodeLengthReader.ReadHuffmanCode(reader, 256);
-        var distance = Vp8LCodeLengthReader.ReadHuffmanCode(reader, Internal.WebpDecodingLimits.DistanceAlphabetSize);
+        var green = Vp8LCodeLengthReader.ReadHuffmanCode(reader, greenAlphabetSize, pooled);
+        var red = Vp8LCodeLengthReader.ReadHuffmanCode(reader, 256, pooled);
+        var blue = Vp8LCodeLengthReader.ReadHuffmanCode(reader, 256, pooled);
+        var alpha = Vp8LCodeLengthReader.ReadHuffmanCode(reader, 256, pooled);
+        var distance = Vp8LCodeLengthReader.ReadHuffmanCode(reader, Internal.WebpDecodingLimits.DistanceAlphabetSize, pooled);
 
         return new Vp8LHuffmanGroup { Green = green, Red = red, Blue = blue, Alpha = alpha, Distance = distance };
+    }
+
+    /// <summary>Returns the tables of a group read with <c>pooled: true</c> to the pool.</summary>
+    public void Release()
+    {
+        Green.Release();
+        Red.Release();
+        Blue.Release();
+        Alpha.Release();
+        Distance.Release();
     }
 }

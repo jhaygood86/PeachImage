@@ -17,19 +17,22 @@ namespace PeachImage.Formats.Webp.Decoding.Vp8L;
 /// </remarks>
 internal static class Vp8LColorTransform
 {
-    public static void ApplyInverse(Span<uint> pixels, Vp8LTransform transform)
+    public static void ApplyInverse(Span<uint> pixels, Vp8LTransform transform) =>
+        ApplyInverseRows(pixels, transform, 0, transform.Ysize);
+
+    /// <summary>Inverts rows <paramref name="yStart"/> to <paramref name="yEnd"/> (exclusive); <paramref name="pixels"/> starts at row <paramref name="yStart"/>.</summary>
+    public static void ApplyInverseRows(Span<uint> pixels, Vp8LTransform transform, int yStart, int yEnd)
     {
         int width = transform.Xsize;
-        int height = transform.Ysize;
         int bits = transform.Bits;
         int tileWidth = 1 << bits;
         var tileData = transform.Data!;
         int tilesPerRow = Vp8LMetaHuffmanImage.SubSampleSize(width, bits);
         var kernel = Vp8LTransformKernelSelector.Instance;
 
-        for (int y = 0; y < height; y++)
+        for (int y = yStart; y < yEnd; y++)
         {
-            var row = pixels.Slice(y * width, width);
+            var row = pixels.Slice((y - yStart) * width, width);
             var tileRow = tileData.AsSpan((y >> bits) * tilesPerRow, tilesPerRow);
 
             int x = 0;

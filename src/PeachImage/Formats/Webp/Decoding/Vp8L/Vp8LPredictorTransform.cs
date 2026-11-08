@@ -1,6 +1,7 @@
 ﻿using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using PeachImage.Formats.Webp.Kernels;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8L;
@@ -25,27 +26,59 @@ namespace PeachImage.Formats.Webp.Decoding.Vp8L;
 /// </remarks>
 internal static class Vp8LPredictorTransform
 {
-    public static void ApplyInverse(Span<uint> pixels, Vp8LTransform transform)
+    public static void ApplyInverse(Span<uint> pixels, Vp8LTransform transform) =>
+        ApplyInverseRows(pixels, 0, transform, 0, transform.Ysize);
+
+    /// <summary>
+    /// Inverts rows <paramref name="yStart"/> to <paramref name="yEnd"/> (exclusive) of the image, in place.
+    /// <paramref name="pixels"/> holds those rows' residuals starting at index <paramref name="rowsOffset"/>; when
+    /// <paramref name="yStart"/> is not 0, the already-reconstructed row <c>yStart - 1</c> must sit in the
+    /// <c>Xsize</c> elements immediately before <paramref name="rowsOffset"/>, because the first row's predictors
+    /// read it. Reconstructing a whole image is the case <c>rowsOffset = 0, yStart = 0, yEnd = Ysize</c>.
+    /// </summary>
+    public static void ApplyInverseRows(Span<uint> pixels, int rowsOffset, Vp8LTransform transform, int yStart, int yEnd) =>
+        ApplyInverseRows(pixels, rowsOffset, transform, yStart, yEnd, default);
+
+    /// <summary>
+    /// As above, but when <paramref name="source"/> is not empty the residuals are read from it (its first row is
+    /// row <paramref name="yStart"/>) instead of already being in <paramref name="pixels"/>: each row is copied in just
+    /// before it is reconstructed, while it is a few instructions from being used, rather than as a separate bulk pass.
+    /// </summary>
+    public static void ApplyInverseRows(Span<uint> pixels, int rowsOffset, Vp8LTransform transform, int yStart, int yEnd, ReadOnlySpan<uint> source)
     {
         int width = transform.Xsize;
-        int height = transform.Ysize;
         int bits = transform.Bits;
         var tileData = transform.Data!;
         int tilesPerRow = Vp8LMetaHuffmanImage.SubSampleSize(width, bits);
         var kernel = Vp8LTransformKernelSelector.Instance;
 
-        // Pixel (0,0): mode 0 (fixed opaque black), unconditionally.
-        pixels[0] = Vp8LPixelMath.AddWrapping(pixels[0], 0xFF000000u);
-
-        // Rest of row 0: mode 1 (left), unconditionally -- sequential, has an intra-row dependency.
-        for (int x = 1; x < width; x++)
+        int firstFlatRow = yStart;
+        if (yStart == 0)
         {
-            pixels[x] = Vp8LPixelMath.AddWrapping(pixels[x], pixels[x - 1]);
+            if (!source.IsEmpty)
+            {
+                source.Slice(0, width).CopyTo(pixels.Slice(rowsOffset, width));
+            }
+
+            // Pixel (0,0): mode 0 (fixed opaque black), unconditionally.
+            pixels[rowsOffset] = Vp8LPixelMath.AddWrapping(pixels[rowsOffset], 0xFF000000u);
+
+            // Rest of row 0: mode 1 (left), unconditionally -- sequential, has an intra-row dependency.
+            for (int x = 1; x < width; x++)
+            {
+                pixels[rowsOffset + x] = Vp8LPixelMath.AddWrapping(pixels[rowsOffset + x], pixels[rowsOffset + x - 1]);
+            }
+
+            firstFlatRow = 1;
         }
 
-        for (int y = 1; y < height; y++)
+        for (int y = firstFlatRow; y < yEnd; y++)
         {
-            int rowBase = y * width;
+            int rowBase = rowsOffset + ((y - yStart) * width);
+            if (!source.IsEmpty)
+            {
+                source.Slice((y - yStart) * width, width).CopyTo(pixels.Slice(rowBase, width));
+            }
 
             // First pixel of the row: mode 2 (top), unconditionally.
             pixels[rowBase] = Vp8LPixelMath.AddWrapping(pixels[rowBase], pixels[rowBase - width]);
@@ -90,7 +123,17 @@ internal static class Vp8LPredictorTransform
             case 8: Run<Average2TopLeftTopPredictor>(pixels, width, rowBase, xStart, runLength); return;
             case 9: Run<Average2TopTopRightPredictor>(pixels, width, rowBase, xStart, runLength); return;
             case 10: Run<Average4Predictor>(pixels, width, rowBase, xStart, runLength); return;
-            case 11: Run<SelectPredictor>(pixels, width, rowBase, xStart, runLength); return;
+            case 11:
+                if (Sse2.IsSupported)
+                {
+                    RunSelectSse2(pixels, width, rowBase, xStart, runLength);
+                }
+                else
+                {
+                    Run<SelectPredictor>(pixels, width, rowBase, xStart, runLength);
+                }
+
+                return;
             case 12: Run<ClampedAddSubtractFullPredictor>(pixels, width, rowBase, xStart, runLength); return;
             case 13: Run<ClampedAddSubtractHalfPredictor>(pixels, width, rowBase, xStart, runLength); return;
 
@@ -146,6 +189,48 @@ internal static class Vp8LPredictorTransform
 
             topLeft = top;
             top = topRight;
+        }
+    }
+
+    /// <summary>
+    /// Predictor 11 (the mode photographic lossless images use almost exclusively) with the whole recurrence
+    /// kept in vector registers. The output pixel feeds the next pixel's prediction, so the loop is a
+    /// latency chain, and everything that does not depend on the previous output is kept off it. What does:
+    /// one <c>psadbw</c> (the previous output against the top-left pixel), a compare against the distance of
+    /// the top pixel (which does not depend on it), and a select between the two candidate sums
+    /// <c>residual + left</c> and <c>residual + top</c>, both of which are formed while the distance is being
+    /// measured. The same arrangement as libwebp's <c>PredictorAdd11_SSE2</c>; results are bit-identical to
+    /// <see cref="SelectScalar"/>.
+    /// </summary>
+    private static void RunSelectSse2(Span<uint> pixels, int width, int rowBase, int xStart, int runLength)
+    {
+        int start = rowBase + xStart;
+        if (xStart < 1 || runLength < 1 || rowBase < width || start + runLength > pixels.Length || xStart + runLength > width)
+        {
+            throw new WebpDecodingException("Internal error: VP8L predictor run is out of bounds.");
+        }
+
+        ref uint origin = ref MemoryMarshal.GetReference(pixels);
+        var left = Vector128.CreateScalar(Unsafe.Add(ref origin, start - 1)).AsByte();
+
+        for (int i = 0; i < runLength; i++)
+        {
+            ref uint current = ref Unsafe.Add(ref origin, start + i);
+            var top = Vector128.CreateScalar(Unsafe.Add(ref origin, start + i - width)).AsByte();
+            var topLeft = Vector128.CreateScalar(Unsafe.Add(ref origin, start + i - width - 1)).AsByte();
+            var residual = Vector128.CreateScalar(current).AsByte();
+
+            // Sum of absolute channel differences, in 32-bit lane 0 (the other bytes are zero and cancel).
+            var distanceToTop = Sse2.SumAbsoluteDifferences(top, topLeft).AsInt32();
+            var distanceToLeft = Sse2.SumAbsoluteDifferences(left, topLeft).AsInt32();
+
+            // Select returns top unless left is strictly farther from the top-left pixel.
+            var pickLeft = Sse2.CompareGreaterThan(distanceToLeft, distanceToTop).AsByte();
+            var withLeft = Sse2.Add(residual, left);
+            var withTop = Sse2.Add(residual, top);
+
+            left = Vector128.ConditionalSelect(pickLeft, withLeft, withTop);
+            current = left.AsUInt32().ToScalar();
         }
     }
 
@@ -285,6 +370,18 @@ internal static class Vp8LPredictorTransform
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint Select(uint a, uint b, uint c)
     {
+        if (Sse2.IsSupported)
+        {
+            // psadbw is a horizontal sum of eight absolute byte differences in one instruction (what libwebp's
+            // SSE2 predictor 11 uses): lane 0 gets |a - c| summed over the four channels, lane 1 gets |b - c|.
+            // This sits on the loop-carried dependency chain (b is the previous output pixel), so the shorter
+            // latency is the point -- it replaces a max/min/sub/extract/fold sequence.
+            var sadOperands = Vector128.Create((ulong)a, (ulong)b).AsByte();
+            var sadReference = Vector128.Create((ulong)c, (ulong)c).AsByte();
+            var sums = Sse2.SumAbsoluteDifferences(sadOperands, sadReference).AsUInt64();
+            return sums.GetElement(1) <= sums.ToScalar() ? a : b;
+        }
+
         if (!Vector128.IsHardwareAccelerated)
         {
             return SelectScalar(a, b, c);
