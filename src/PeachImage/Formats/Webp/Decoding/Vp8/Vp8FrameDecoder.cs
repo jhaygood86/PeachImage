@@ -140,6 +140,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
 
                     uint nonZeroBlocks;
                     uint acBlocks;
+                    uint sparseAcBlocks;
 
                     if (modes.Skip)
                     {
@@ -147,12 +148,13 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                         anyNonZero = false;
                         nonZeroBlocks = 0;
                         acBlocks = 0;
+                        sparseAcBlocks = 0;
                     }
                     else
                     {
                         Vp8CoefficientDecoder.DecodeMacroblock(
                             tokenBr, coeffProbabilities, quant, modes.IsI4x4, ref coeffContext.Above[mbX], ref coeffContext.Left,
-                            coeffs, out nonZeroBlocks, out acBlocks, out anyNonZero);
+                            coeffs, out nonZeroBlocks, out acBlocks, out sparseAcBlocks, out anyNonZero);
                     }
 
                     int mbIndex = (mbY * mbCols) + mbX;
@@ -177,7 +179,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                             int row = n / 4;
                             int col = n % 4;
                             int blockOrigin = YOff((mbX * 16) + (col * 4), (mbY * 16) + (row * 4));
-                            AddResidual(coeffs, n, acBlocks, yPlane, blockOrigin, yStride);
+                            AddResidual(coeffs, n, acBlocks, sparseAcBlocks, yPlane, blockOrigin, yStride);
                         }
                     }
                     else
@@ -200,7 +202,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
 
                             if ((nonZeroBlocks & (1u << n)) != 0)
                             {
-                                AddResidual(coeffs, n, acBlocks, yPlane, blockOrigin, yStride);
+                                AddResidual(coeffs, n, acBlocks, sparseAcBlocks, yPlane, blockOrigin, yStride);
                             }
                         }
                     }
@@ -217,12 +219,12 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
 
                         if ((nonZeroBlocks & (1u << (16 + c))) != 0)
                         {
-                            AddResidual(coeffs, 16 + c, acBlocks, uPlane, uBlockOrigin, uvStride);
+                            AddResidual(coeffs, 16 + c, acBlocks, sparseAcBlocks, uPlane, uBlockOrigin, uvStride);
                         }
 
                         if ((nonZeroBlocks & (1u << (20 + c))) != 0)
                         {
-                            AddResidual(coeffs, 20 + c, acBlocks, vPlane, uBlockOrigin, uvStride);
+                            AddResidual(coeffs, 20 + c, acBlocks, sparseAcBlocks, vPlane, uBlockOrigin, uvStride);
                         }
                     }
                 }
@@ -280,7 +282,7 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
     /// <paramref name="acBlocks"/> says the block has no AC coefficients. Callers have already established
     /// from <c>nonZeroBlocks</c> that the block has something to add.
     /// </summary>
-    private static void AddResidual(Span<short> coeffs, int blockIndex, uint acBlocks, byte[] plane, int origin, int stride)
+    private static void AddResidual(Span<short> coeffs, int blockIndex, uint acBlocks, uint sparseAcBlocks, byte[] plane, int origin, int stride)
     {
         // One range check covers the block's sixteen coefficients and its four rows of four pixels; the kernels below then work on
         // raw references.
@@ -299,7 +301,14 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
             // intrinsic constant -- this branch is resolved once per process, not re-evaluated per block.
             if (Vp8VectorInverseDct.CanTransform)
             {
-                Vp8VectorInverseDct.TransformFullAndAdd(ref block, ref dst, stride);
+                if ((sparseAcBlocks & (1u << blockIndex)) != 0)
+                {
+                    Vp8VectorInverseDct.AddSparseAc(ref block, ref dst, stride);
+                }
+                else
+                {
+                    Vp8VectorInverseDct.TransformFullAndAdd(ref block, ref dst, stride);
+                }
             }
             else
             {

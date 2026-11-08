@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8.Dct;
 
@@ -71,10 +72,42 @@ internal static class Vp8VectorInverseDct
         }
     }
 
+    /// <summary>
+    /// The inverse transform of a block whose only nonzero coefficients are at raster positions 0, 1 and 4 (the first three in scan
+    /// order), added to the prediction. With every other input zero the two butterfly passes collapse: each output row is a row constant
+    /// (from positions 0 and 4) plus a fixed four-lane pattern (from position 1), so a few scalar multiplies and four vector rows replace
+    /// two transposes and eight vector multiplies. The arithmetic is the full transform's, in the same integer widths, so the result is
+    /// identical to <see cref="TransformFullAndAdd(ref short, ref byte, int)"/> for such a block.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void AddSparseAc(ref short coefficients, ref byte dst, int stride)
+    {
+        int in1 = Unsafe.Add(ref coefficients, 1);
+        int in4 = Unsafe.Add(ref coefficients, 4);
+        int a = coefficients + 4;
+
+        int c4 = (in4 * Vp8InverseTransformConstants.C2) >> 16;
+        int d4 = in4 + ((in4 * Vp8InverseTransformConstants.C1) >> 16);
+        int c1 = (in1 * Vp8InverseTransformConstants.C2) >> 16;
+        int d1 = in1 + ((in1 * Vp8InverseTransformConstants.C1) >> 16);
+
+        var pattern = Vector128.Create(d1, c1, -c1, -d1);
+        AddClipStoreRow(ref dst, Vector128.Create(a + d4) + pattern);
+        AddClipStoreRow(ref Unsafe.Add(ref dst, stride), Vector128.Create(a + c4) + pattern);
+        AddClipStoreRow(ref Unsafe.Add(ref dst, 2 * stride), Vector128.Create(a - c4) + pattern);
+        AddClipStoreRow(ref Unsafe.Add(ref dst, 3 * stride), Vector128.Create(a - d4) + pattern);
+    }
+
     /// <summary>The general inverse transform of a block known to carry AC, over raw references; see the span overload.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void TransformFullAndAdd(ref short coefficients, ref byte dst, int stride)
     {
+        if (Sse2.IsSupported && FitsSixteenBitMath(ref coefficients))
+        {
+            TransformFullAndAdd16(ref coefficients, ref dst, stride);
+            return;
+        }
+
         // Lane j of each vector = original column j's coefficient at that row position.
         var in0 = LoadRowOfColumns(ref coefficients, 0);
         var in4 = LoadRowOfColumns(ref coefficients, 4);
@@ -123,6 +156,99 @@ internal static class Vp8VectorInverseDct
         AddClipStoreRow(ref Unsafe.Add(ref dst, 2 * stride), row2);
         AddClipStoreRow(ref Unsafe.Add(ref dst, 3 * stride), row3);
     }
+
+    /// <summary>
+    /// The largest coefficient magnitude for which every intermediate of the transform fits in a signed 16-bit lane: the first pass
+    /// grows values by at most 3.85x, the second by at most 3.85x again plus the rounding bias, so 2047 * 14.8 + 4 stays below 32767.
+    /// Dequantized coefficients of real images are far inside it; anything outside takes the 32-bit kernel, which is exact for every input.
+    /// </summary>
+    private const int SixteenBitLimit = 2047;
+
+    /// <summary>Whether all sixteen coefficients are within +-<see cref="SixteenBitLimit"/>, which makes <see cref="TransformFullAndAdd16"/> exact.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool FitsSixteenBitMath(ref short coefficients)
+    {
+        // (v + limit) as unsigned is within [0, 2 * limit] exactly when v is within +-limit (values below -limit wrap high).
+        var offset = Vector128.Create((short)SixteenBitLimit);
+        var low = (Vector128.LoadUnsafe(ref coefficients) + offset).AsUInt16();
+        var high = (Vector128.LoadUnsafe(ref coefficients, 8) + offset).AsUInt16();
+        var bound = Vector128.Create((ushort)(2 * SixteenBitLimit));
+        return !Vector128.GreaterThanAny(low, bound) && !Vector128.GreaterThanAny(high, bound);
+    }
+
+    /// <summary>
+    /// <see cref="TransformFullAndAdd(ref short, ref byte, int)"/> in 16-bit lanes, for blocks within <see cref="SixteenBitLimit"/>. A
+    /// multiply by 20091 or 35468 shifted right by 16 is the high half of a signed 16-bit multiply (35468 as -30068 plus the value
+    /// itself), so the four multiplies of a butterfly are cheap high multiplies instead of 32-bit low multiplies, and with every
+    /// intermediate inside 16 bits the results are the same as the 32-bit kernel's. The structure is the same: butterflies down the
+    /// columns, a transpose, butterflies along the rows, a transpose, then descale, add, clamp.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void TransformFullAndAdd16(ref short coefficients, ref byte dst, int stride)
+    {
+        var in0 = LoadRow16(ref coefficients, 0);
+        var in4 = LoadRow16(ref coefficients, 4);
+        var in8 = LoadRow16(ref coefficients, 8);
+        var in12 = LoadRow16(ref coefficients, 12);
+
+        var a = in0 + in8;
+        var b = in0 - in8;
+        var c = Mul2(in4) - Mul1(in12);
+        var d = Mul1(in4) + Mul2(in12);
+
+        // Transpose the four (4-lane) vectors a+d, b+c, b-c, a-d: afterwards `columns01` holds column 0 then column 1 of the
+        // result, `columns23` columns 2 and 3.
+        var interleave01 = Sse2.UnpackLow(a + d, b + c);
+        var interleave23 = Sse2.UnpackLow(b - c, a - d);
+        var columns01 = Sse2.UnpackLow(interleave01.AsInt32(), interleave23.AsInt32()).AsInt16();
+        var columns23 = Sse2.UnpackHigh(interleave01.AsInt32(), interleave23.AsInt32()).AsInt16();
+
+        var col0 = columns01;
+        var col1 = Sse2.ShiftRightLogical128BitLane(columns01, 8);
+        var col2 = columns23;
+        var col3 = Sse2.ShiftRightLogical128BitLane(columns23, 8);
+
+        var dc = col0 + Vector128.Create((short)4);
+        var a2 = dc + col2;
+        var b2 = dc - col2;
+        var c2 = Mul2(col1) - Mul1(col3);
+        var d2 = Mul1(col1) + Mul2(col3);
+
+        var rowInterleave01 = Sse2.UnpackLow(a2 + d2, b2 + c2);
+        var rowInterleave23 = Sse2.UnpackLow(b2 - c2, a2 - d2);
+        var rows01 = Sse2.ShiftRightArithmetic(Sse2.UnpackLow(rowInterleave01.AsInt32(), rowInterleave23.AsInt32()).AsInt16(), 3);
+        var rows23 = Sse2.ShiftRightArithmetic(Sse2.UnpackHigh(rowInterleave01.AsInt32(), rowInterleave23.AsInt32()).AsInt16(), 3);
+
+        ref byte row1 = ref Unsafe.Add(ref dst, stride);
+        ref byte row2 = ref Unsafe.Add(ref dst, 2 * stride);
+        ref byte row3 = ref Unsafe.Add(ref dst, 3 * stride);
+
+        var zero = Vector128<byte>.Zero;
+        ulong pixels01 = Unsafe.ReadUnaligned<uint>(ref dst) | ((ulong)Unsafe.ReadUnaligned<uint>(ref row1) << 32);
+        ulong pixels23 = Unsafe.ReadUnaligned<uint>(ref row2) | ((ulong)Unsafe.ReadUnaligned<uint>(ref row3) << 32);
+        var sum01 = rows01 + Sse2.UnpackLow(Vector128.CreateScalarUnsafe(pixels01).AsByte(), zero).AsInt16();
+        var sum23 = rows23 + Sse2.UnpackLow(Vector128.CreateScalarUnsafe(pixels23).AsByte(), zero).AsInt16();
+
+        // Saturating pack clamps to [0,255]: negative sums go to 0 and anything above 255 to 255.
+        var packed = Sse2.PackUnsignedSaturate(sum01, sum23).AsUInt32();
+        Unsafe.WriteUnaligned(ref dst, packed.GetElement(0));
+        Unsafe.WriteUnaligned(ref row1, packed.GetElement(1));
+        Unsafe.WriteUnaligned(ref row2, packed.GetElement(2));
+        Unsafe.WriteUnaligned(ref row3, packed.GetElement(3));
+    }
+
+    /// <summary>Four consecutive coefficients in the low four 16-bit lanes.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<short> LoadRow16(ref short coefficients, int baseIndex) =>
+        Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(ref Unsafe.As<short, byte>(ref Unsafe.Add(ref coefficients, baseIndex)))).AsInt16();
+
+    /// <summary><c>v + ((v * 20091) &gt;&gt; 16)</c> on 16-bit lanes: the high half of the product is exact.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<short> Mul1(Vector128<short> v) => v + Sse2.MultiplyHigh(v, Vector128.Create((short)Vp8InverseTransformConstants.C1));
+
+    /// <summary><c>(v * 35468) &gt;&gt; 16</c> on 16-bit lanes, as <c>v + ((v * -30068) &gt;&gt; 16)</c> because 35468 does not fit a signed lane.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<short> Mul2(Vector128<short> v) => v + Sse2.MultiplyHigh(v, Vector128.Create((short)(Vp8InverseTransformConstants.C2 - 65536)));
 
     /// <summary>Four consecutive coefficients, sign-extended to 32-bit lanes (one 8-byte load plus a widen, not four scalar loads).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

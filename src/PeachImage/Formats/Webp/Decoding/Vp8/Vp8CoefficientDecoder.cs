@@ -129,6 +129,11 @@ internal static class Vp8CoefficientDecoder
     /// reconstruction can skip it outright. At ordinary quality most blocks are in that last case.
     /// </para>
     /// <para>
+    /// <paramref name="sparseAcBlocks"/> marks the AC blocks whose scan stopped at position 2 or 3, so their only possible nonzero
+    /// coefficients are raster positions 0, 1 and 4 (scan positions 0 to 2): a case with a much cheaper exact inverse transform
+    /// (<see cref="Dct.Vp8VectorInverseDct.AddSparseAc"/>), and the common one at ordinary quality.
+    /// </para>
+    /// <para>
     /// The AC test is <c>last &gt; 1</c>, where <c>last</c> is the scan position decoding stopped at. That is
     /// exact rather than approximate for two reasons: every coefficient the decoder writes is nonzero (the
     /// magnitude is at least 1 and the quantizer is at least 1), and the zigzag maps scan position 0 to raster
@@ -155,6 +160,7 @@ internal static class Vp8CoefficientDecoder
         Span<short> coeffs,
         out uint nonZeroBlocks,
         out uint acBlocks,
+        out uint sparseAcBlocks,
         out bool anyNonZero)
     {
         // Every offset below is built from a plane type in [0,3], a band in [0,7] and a context in [0,2];
@@ -173,6 +179,7 @@ internal static class Vp8CoefficientDecoder
         uint above = aboveContext;
         uint left = leftContext;
         uint ac = 0;
+        uint sparse = 0;
         bool anyTokens = false;
         bool y2Tokens = false;
 
@@ -232,6 +239,7 @@ internal static class Vp8CoefficientDecoder
 
             anyTokens |= nonZero;
             ac |= (result > 1 ? 1u : 0u) << block;
+            sparse |= (result is 2 or 3 ? 1u : 0u) << block;
             if (++block == 24)
             {
                 break;
@@ -264,6 +272,7 @@ internal static class Vp8CoefficientDecoder
 
         nonZeroBlocks = nonZero24;
         acBlocks = ac;
+        sparseAcBlocks = sparse;
         anyNonZero = y2Tokens || anyTokens || nonZero24 != 0;
     }
 
