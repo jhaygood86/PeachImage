@@ -1,5 +1,7 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace PeachImage.Formats.Jpeg.ColorConversion;
 
@@ -53,9 +55,97 @@ internal sealed class Vector256ColorConverter : IColorConverter
     private static readonly Vector128<byte> RgbShuffleG1 = Vector128.Create((byte)5, 8, 8, 6, 8, 8, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8);
     private static readonly Vector128<byte> RgbShuffleB1 = Vector128.Create((byte)8, 5, 8, 8, 6, 8, 8, 7, 8, 8, 8, 8, 8, 8, 8, 8);
 
+    // Output-byte index tables for expanding planar R, G, B (16 bytes each) into three 16-byte runs of packed RGB:
+    // output byte k of run j holds channel (k + 16j) % 3 of pixel (k + 16j) / 3; 0xFF zeroes the lane.
+    private static readonly Vector128<byte>[] Rgb16Shuffle = BuildRgb16Shuffles();
+
+    private static Vector128<byte>[] BuildRgb16Shuffles()
+    {
+        var tables = new Vector128<byte>[9];
+        Span<byte> indices = stackalloc byte[16];
+        for (int run = 0; run < 3; run++)
+        {
+            for (int channel = 0; channel < 3; channel++)
+            {
+                for (int k = 0; k < 16; k++)
+                {
+                    int global = (run * 16) + k;
+                    indices[k] = global % 3 == channel ? (byte)(global / 3) : (byte)0xFF;
+                }
+
+                tables[(run * 3) + channel] = Vector128.Create<byte>(indices);
+            }
+        }
+
+        return tables;
+    }
+
+    /// <summary>
+    /// Sixteen pixels per iteration: samples widen straight from memory to 32-bit lanes, the same float arithmetic
+    /// as the eight-lane loop below runs on two vectors, and the results are packed to bytes and interleaved with
+    /// three byte shuffles per output vector. Returns the number of pixels converted.
+    /// </summary>
+    private static unsafe int YCbCrToRgbAvx2(ReadOnlySpan<byte> y, ReadOnlySpan<byte> cb, ReadOnlySpan<byte> cr, Span<byte> rgb, int pixelCount)
+    {
+        if (y.Length < pixelCount || cb.Length < pixelCount || cr.Length < pixelCount || rgb.Length < pixelCount * 3)
+        {
+            throw new ArgumentException("Row buffers are shorter than the pixel count.");
+        }
+
+        var shuffle = Rgb16Shuffle;
+        Vector128<byte> r0 = shuffle[0], g0 = shuffle[1], b0 = shuffle[2];
+        Vector128<byte> r1 = shuffle[3], g1 = shuffle[4], b1 = shuffle[5];
+        Vector128<byte> r2 = shuffle[6], g2 = shuffle[7], b2 = shuffle[8];
+
+        int i = 0;
+        fixed (byte* py = y, pcb = cb, pcr = cr, pd = rgb)
+        {
+            for (; i + 16 <= pixelCount; i += 16)
+            {
+                var yLo = Avx.ConvertToVector256Single(Avx2.ConvertToVector256Int32(py + i));
+                var yHi = Avx.ConvertToVector256Single(Avx2.ConvertToVector256Int32(py + i + 8));
+                var cbLo = Avx.Subtract(Avx.ConvertToVector256Single(Avx2.ConvertToVector256Int32(pcb + i)), V128);
+                var cbHi = Avx.Subtract(Avx.ConvertToVector256Single(Avx2.ConvertToVector256Int32(pcb + i + 8)), V128);
+                var crLo = Avx.Subtract(Avx.ConvertToVector256Single(Avx2.ConvertToVector256Int32(pcr + i)), V128);
+                var crHi = Avx.Subtract(Avx.ConvertToVector256Single(Avx2.ConvertToVector256Int32(pcr + i + 8)), V128);
+
+                var red = PackChannel(
+                    ClampRound(Avx.Add(yLo, Avx.Multiply(V1_402, crLo))),
+                    ClampRound(Avx.Add(yHi, Avx.Multiply(V1_402, crHi))));
+                var green = PackChannel(
+                    ClampRound(Avx.Subtract(Avx.Subtract(yLo, Avx.Multiply(V0_344136, cbLo)), Avx.Multiply(V0_714136, crLo))),
+                    ClampRound(Avx.Subtract(Avx.Subtract(yHi, Avx.Multiply(V0_344136, cbHi)), Avx.Multiply(V0_714136, crHi))));
+                var blue = PackChannel(
+                    ClampRound(Avx.Add(yLo, Avx.Multiply(V1_772, cbLo))),
+                    ClampRound(Avx.Add(yHi, Avx.Multiply(V1_772, cbHi))));
+
+                byte* dst = pd + (i * 3);
+                Sse2.Store(dst, Sse2.Or(Sse2.Or(Ssse3.Shuffle(red, r0), Ssse3.Shuffle(green, g0)), Ssse3.Shuffle(blue, b0)));
+                Sse2.Store(dst + 16, Sse2.Or(Sse2.Or(Ssse3.Shuffle(red, r1), Ssse3.Shuffle(green, g1)), Ssse3.Shuffle(blue, b1)));
+                Sse2.Store(dst + 32, Sse2.Or(Sse2.Or(Ssse3.Shuffle(red, r2), Ssse3.Shuffle(green, g2)), Ssse3.Shuffle(blue, b2)));
+            }
+        }
+
+        return i;
+    }
+
+    /// <summary>Clamp to [0,255], add 0.5 and truncate: the exact round-half-up the eight-lane path uses.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<int> ClampRound(Vector256<float> value) =>
+        Avx.ConvertToVector256Int32WithTruncation(Avx.Add(Avx.Min(Avx.Max(value, VZero), V255), RoundingBias));
+
+    /// <summary>Packs two vectors of eight 0..255 ints into sixteen bytes in lane order.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<byte> PackChannel(Vector256<int> low, Vector256<int> high)
+    {
+        // packssdw interleaves the two inputs per 128-bit half; the 64-bit permute restores low-then-high order.
+        var packed = Avx2.Permute4x64(Avx2.PackSignedSaturate(low, high).AsInt64(), 0xD8).AsInt16();
+        return Sse2.PackUnsignedSaturate(packed.GetLower(), packed.GetUpper());
+    }
+
     public void YCbCrToRgb(ReadOnlySpan<byte> y, ReadOnlySpan<byte> cb, ReadOnlySpan<byte> cr, Span<byte> rgb, int pixelCount)
     {
-        int i = 0;
+        int i = Avx2.IsSupported && Ssse3.IsSupported ? YCbCrToRgbAvx2(y, cb, cr, rgb, pixelCount) : 0;
         for (; i + Lanes <= pixelCount; i += Lanes)
         {
             var yv = LoadWidened(y, i);
