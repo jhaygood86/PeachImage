@@ -59,6 +59,88 @@ internal static class BaselineScanDecoder
         }
     }
 
+    /// <summary>Resets the DC predictors; call once before the first <see cref="DecodeBatch"/> of a scan.</summary>
+    public static void BeginScan(ComponentDecodeState[] scanComponents)
+    {
+        foreach (var component in scanComponents)
+        {
+            component.DcPredictor = 0;
+        }
+    }
+
+    /// <summary>
+    /// Decodes MCU rows <paramref name="mcuYStart"/> to <paramref name="mcuYEnd"/> (exclusive) of a scan, writing into
+    /// each component's coefficient buffer starting at that buffer's row 0, so a small buffer can hold a batch.
+    /// Entropy and restart state carry over from one call to the next.
+    /// </summary>
+    public static void DecodeBatch(
+        JpegEntropyReader entropy,
+        ComponentDecodeState[] scanComponents,
+        HuffmanDecodingTable[] dcTables,
+        HuffmanDecodingTable[] acTables,
+        RestartController restart,
+        int mcusAcross,
+        int mcuYStart,
+        int mcuYEnd)
+    {
+        if (scanComponents.Length == 1)
+        {
+            var component = scanComponents[0];
+            int blocksWide = (component.ActualWidthInSamples + 7) / 8;
+            int blocksHigh = (component.ActualHeightInSamples + 7) / 8;
+            int rowStart = mcuYStart * component.BlocksPerMcuVertical;
+            int rowEnd = Math.Min(mcuYEnd * component.BlocksPerMcuVertical, blocksHigh);
+
+            for (int by = rowStart; by < rowEnd; by++)
+            {
+                for (int bx = 0; bx < blocksWide; bx++)
+                {
+                    if (restart.ShouldRestart)
+                    {
+                        restart.ConsumeRestart(entropy);
+                        component.DcPredictor = 0;
+                    }
+
+                    DecodeBlock(entropy, component, dcTables[0], acTables[0], bx, by - rowStart);
+                    restart.NotifyUnitDecoded();
+                }
+            }
+
+            return;
+        }
+
+        for (int mcuY = mcuYStart; mcuY < mcuYEnd; mcuY++)
+        {
+            for (int mcuX = 0; mcuX < mcusAcross; mcuX++)
+            {
+                if (restart.ShouldRestart)
+                {
+                    restart.ConsumeRestart(entropy);
+                    foreach (var component in scanComponents)
+                    {
+                        component.DcPredictor = 0;
+                    }
+                }
+
+                for (int ci = 0; ci < scanComponents.Length; ci++)
+                {
+                    var component = scanComponents[ci];
+                    for (int by = 0; by < component.BlocksPerMcuVertical; by++)
+                    {
+                        for (int bx = 0; bx < component.BlocksPerMcuHorizontal; bx++)
+                        {
+                            int blockX = (mcuX * component.BlocksPerMcuHorizontal) + bx;
+                            int blockY = ((mcuY - mcuYStart) * component.BlocksPerMcuVertical) + by;
+                            DecodeBlock(entropy, component, dcTables[ci], acTables[ci], blockX, blockY);
+                        }
+                    }
+                }
+
+                restart.NotifyUnitDecoded();
+            }
+        }
+    }
+
     private static void DecodeNonInterleaved(
         JpegEntropyReader entropy,
         ComponentDecodeState component,

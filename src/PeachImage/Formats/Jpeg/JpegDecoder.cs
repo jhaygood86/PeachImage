@@ -55,17 +55,16 @@ internal static class JpegDecoder
             onProgress = partial => previewAvailable(BuildImage(partial, options, jpegOptions));
         }
 
-        var frame = FrameDecoder.Decode(stream, progressFrameAvailable: onProgress);
+        // A full-size, non-progressive decode can transform coefficients as they are decoded instead of keeping them all.
+        bool fullSize = options is null || (options.ScaleDenominator == 1 && options.TargetSize is null && options.ResolvedScaleDenominator <= 1);
+        var frame = FrameDecoder.Decode(stream, progressFrameAvailable: onProgress, streamBaseline: fullSize ? ParallelSettings.From(options) : null);
         try
         {
             return BuildImage(frame, options, jpegOptions);
         }
         finally
         {
-            foreach (var component in frame.Components)
-            {
-                component.Coefficients.Return();
-            }
+            frame.ReleaseBuffers();
         }
     }
 

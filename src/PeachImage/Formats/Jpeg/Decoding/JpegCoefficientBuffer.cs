@@ -53,6 +53,13 @@ internal sealed class JpegCoefficientBuffer
     }
 
     /// <summary>Returns the backing array to the shared pool. The buffer must not be used afterward.</summary>
+    /// <summary>Zeroes every coefficient, for reusing the buffer as a fresh batch.</summary>
+    public void Clear()
+    {
+        var coefficients = _coefficients ?? throw new ObjectDisposedException(nameof(JpegCoefficientBuffer));
+        Array.Clear(coefficients, 0, checked(BlocksWide * BlocksHigh * 64));
+    }
+
     public void Return()
     {
         if (_coefficients is { } buffer)

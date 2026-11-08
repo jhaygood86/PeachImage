@@ -27,7 +27,7 @@ internal sealed class ComponentDecodeState
     public required JpegQuantizationTable QuantizationTable { get; set; }
 
     /// <summary>The coefficient storage for every block in this component's MCU-padded grid.</summary>
-    public required JpegCoefficientBuffer Coefficients { get; init; }
+    public required JpegCoefficientBuffer Coefficients { get; set; }
 
     /// <summary>Per-scan working DC predictor (reset at the start of each scan and on every restart).</summary>
     public int DcPredictor { get; set; }

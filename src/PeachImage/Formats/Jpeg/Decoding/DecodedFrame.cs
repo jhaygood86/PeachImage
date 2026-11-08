@@ -19,4 +19,30 @@ internal sealed class DecodedFrame
 
     /// <summary>Raw metadata profiles captured while parsing (JFIF/EXIF/ICC/Adobe/etc.).</summary>
     public required List<RawMetadataProfile> Metadata { get; init; }
+
+    /// <summary>
+    /// When the frame was decoded in streaming mode, each component's already inverse-transformed sample plane
+    /// (<c>ActualWidthInSamples x ActualHeightInSamples</c>, pooled), in the same order as <see cref="Components"/>; the
+    /// coefficient buffers then no longer hold the frame. <see langword="null"/> for a frame that kept its coefficients.
+    /// </summary>
+    public byte[][]? StreamedPlanes { get; set; }
+
+    /// <summary>Returns the pooled coefficient buffers and any streamed planes. Call once the frame has been reconstructed.</summary>
+    public void ReleaseBuffers()
+    {
+        foreach (var component in Components)
+        {
+            component.Coefficients.Return();
+        }
+
+        if (StreamedPlanes is { } planes)
+        {
+            foreach (var plane in planes)
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(plane);
+            }
+
+            StreamedPlanes = null;
+        }
+    }
 }
