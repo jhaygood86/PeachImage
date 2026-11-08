@@ -221,7 +221,7 @@ internal static class WebpProfileHarness
     private static long DecodeOnce(byte[] bytes)
     {
         using var stream = new MemoryStream(bytes);
-        var image = WebpDecoder.Decode(stream);
+        using var image = WebpDecoder.Decode(stream);
 
         var pixels = image.GetPixelSpan();
         long accumulator = pixels.Length;

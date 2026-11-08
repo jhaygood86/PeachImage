@@ -1,4 +1,6 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using PeachImage.Formats.Webp.Decoding.Vp8.ColorConversion;
 using PeachImage.Formats.Webp.Decoding.Vp8.Dct;
 using PeachImage.Formats.Webp.Decoding.Vp8.LoopFilter;
@@ -260,28 +262,39 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
     /// <paramref name="acBlocks"/> says the block has no AC coefficients. Callers have already established
     /// from <c>nonZeroBlocks</c> that the block has something to add.
     /// </summary>
-    private static void AddResidual(Span<short> coeffs, int blockIndex, uint acBlocks, Span<byte> plane, int origin, int stride)
+    private static void AddResidual(Span<short> coeffs, int blockIndex, uint acBlocks, byte[] plane, int origin, int stride)
     {
-        var block = coeffs.Slice(blockIndex * 16, 16);
+        // One range check covers the block's sixteen coefficients and its four rows of four pixels; the kernels below then work on
+        // raw references.
+        if ((uint)blockIndex >= 25 || (blockIndex + 1) * 16 > coeffs.Length
+            || origin < 0 || stride < 0 || (long)origin + (3L * stride) + 4 > plane.Length)
+        {
+            throw new ArgumentException("The block lies outside its buffers.");
+        }
+
+        ref short block = ref Unsafe.Add(ref MemoryMarshal.GetReference(coeffs), blockIndex * 16);
+        ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(plane), origin);
 
         if ((acBlocks & (1u << blockIndex)) != 0)
         {
             // Vp8VectorInverseDct.CanTransform checks Sse2/AdvSimd.Arm64.IsSupported, which RyuJIT treats as a JIT-time
-            // intrinsic constant -- this branch is resolved once per process, not re-evaluated per
-            // block, the same way every other Sse2.IsSupported/Vector128.IsHardwareAccelerated gate in this
-            // decoder is checked inline rather than cached behind a selector.
+            // intrinsic constant -- this branch is resolved once per process, not re-evaluated per block.
             if (Vp8VectorInverseDct.CanTransform)
             {
-                Vp8VectorInverseDct.TransformFullAndAdd(block, plane, origin, stride);
+                Vp8VectorInverseDct.TransformFullAndAdd(ref block, ref dst, stride);
             }
             else
             {
-                Vp8ScalarInverseDct.TransformFullAndAdd(block, plane, origin, stride);
+                Vp8ScalarInverseDct.TransformFullAndAdd(coeffs.Slice(blockIndex * 16, 16), plane, origin, stride);
             }
+        }
+        else if (Vector128.IsHardwareAccelerated)
+        {
+            Vp8VectorInverseDct.AddDcOnly(ref block, ref dst, stride);
         }
         else
         {
-            Vp8ScalarInverseDct.TransformDcOnlyAndAdd(block, plane, origin, stride);
+            Vp8ScalarInverseDct.TransformDcOnlyAndAdd(coeffs.Slice(blockIndex * 16, 16), plane, origin, stride);
         }
     }
 
@@ -369,6 +382,58 @@ internal sealed class Vp8FrameDecoder : IWebpLossyBitstreamDecoder
                     if (inner)
                     {
                         Vp8SimpleLoopFilter.FilterTopEdgesInner(yPlane, yOrigin, yStride, strength.Limit);
+                    }
+                }
+                else if (Vp8EdgeFilter.IsSupported)
+                {
+                    int uOrigin = uOff(mbX * 8, mbY * 8);
+
+                    // One extent check for everything this macroblock's edges touch, in place of a bounds check per row of each edge.
+                    // The planes are padded to whole macroblocks, so this only fails for a plane that is not the decoder's own.
+                    int yLowest = yOrigin - (mbY > 0 ? 4 * yStride : 0) - (mbX > 0 ? 4 : 0);
+                    int uLowest = uOrigin - (mbY > 0 ? 4 * uvStride : 0) - (mbX > 0 ? 4 : 0);
+                    if (yLowest < 0 || uLowest < 0
+                        || yOrigin + (15 * yStride) + 16 > yPlane.Length
+                        || uOrigin + (7 * uvStride) + 8 > Math.Min(uPlane.Length, vPlane.Length))
+                    {
+                        throw new InvalidOperationException("The loop filter's macroblock lies outside its plane.");
+                    }
+
+                    ref byte yAt = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(yPlane), yOrigin);
+                    ref byte uAt = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(uPlane), uOrigin);
+                    ref byte vAt = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(vPlane), uOrigin);
+                    int edgeLimit = strength.Limit + 4;
+
+                    if (mbX > 0)
+                    {
+                        Vp8EdgeFilter.LumaVertical(ref yAt, yStride, true, edgeLimit, strength.InteriorLimit, strength.HevThreshold);
+                        Vp8EdgeFilter.ChromaVertical(ref uAt, ref vAt, uvStride, true, edgeLimit, strength.InteriorLimit, strength.HevThreshold);
+                    }
+
+                    if (inner)
+                    {
+                        for (int k = 4; k <= 12; k += 4)
+                        {
+                            Vp8EdgeFilter.LumaVertical(ref Unsafe.Add(ref yAt, k), yStride, false, strength.Limit, strength.InteriorLimit, strength.HevThreshold);
+                        }
+
+                        Vp8EdgeFilter.ChromaVertical(ref Unsafe.Add(ref uAt, 4), ref Unsafe.Add(ref vAt, 4), uvStride, false, strength.Limit, strength.InteriorLimit, strength.HevThreshold);
+                    }
+
+                    if (mbY > 0)
+                    {
+                        Vp8EdgeFilter.LumaHorizontal(ref yAt, yStride, true, edgeLimit, strength.InteriorLimit, strength.HevThreshold);
+                        Vp8EdgeFilter.ChromaHorizontal(ref uAt, ref vAt, uvStride, true, edgeLimit, strength.InteriorLimit, strength.HevThreshold);
+                    }
+
+                    if (inner)
+                    {
+                        for (int k = 4; k <= 12; k += 4)
+                        {
+                            Vp8EdgeFilter.LumaHorizontal(ref Unsafe.Add(ref yAt, k * yStride), yStride, false, strength.Limit, strength.InteriorLimit, strength.HevThreshold);
+                        }
+
+                        Vp8EdgeFilter.ChromaHorizontal(ref Unsafe.Add(ref uAt, 4 * uvStride), ref Unsafe.Add(ref vAt, 4 * uvStride), uvStride, false, strength.Limit, strength.InteriorLimit, strength.HevThreshold);
                     }
                 }
                 else

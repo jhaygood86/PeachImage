@@ -28,7 +28,7 @@ namespace PeachImage.Formats.Webp.Decoding.Vp8.Dct;
 /// </remarks>
 internal static class Vp8VectorInverseDct
 {
-    /// <summary>Whether <see cref="TransformFullAndAdd"/> is usable — the 4x4 transpose is built from <see cref="Vp8Interleave.UnpackLow(Vector128{int}, Vector128{int})"/>/<see cref="Vp8Interleave.UnpackHigh(Vector128{int}, Vector128{int})"/>, which map to <c>punpck*</c> on x86 and <c>zip1/zip2</c> on Arm64 (the portable vector API has no two-vector interleave).</summary>
+    /// <summary>Whether <see cref="TransformFullAndAdd(ReadOnlySpan{short}, Span{byte}, int, int)"/> is usable — the 4x4 transpose is built from <see cref="Vp8Interleave.UnpackLow(Vector128{int}, Vector128{int})"/>/<see cref="Vp8Interleave.UnpackHigh(Vector128{int}, Vector128{int})"/>, which map to <c>punpck*</c> on x86 and <c>zip1/zip2</c> on Arm64 (the portable vector API has no two-vector interleave).</summary>
     public static bool CanTransform => Vp8Interleave.IsSupported;
 
     private static readonly Vector128<int> C1 = Vector128.Create(Vp8InverseTransformConstants.C1);
@@ -40,11 +40,46 @@ internal static class Vp8VectorInverseDct
     /// <inheritdoc cref="Vp8ScalarInverseDct.TransformFullAndAdd"/>
     public static void TransformFullAndAdd(ReadOnlySpan<short> coefficients, Span<byte> dst, int offset, int stride)
     {
+        // One range check for the whole block (16 coefficients; four rows of four pixels), in place of a check per load and store.
+        if (coefficients.Length < 16 || offset < 0 || stride < 0 || (long)offset + (3L * stride) + 4 > dst.Length)
+        {
+            throw new ArgumentException("The block lies outside its buffers.");
+        }
+
+        TransformFullAndAdd(ref MemoryMarshal.GetReference(coefficients), ref Unsafe.Add(ref MemoryMarshal.GetReference(dst), offset), stride);
+    }
+
+    /// <summary>
+    /// Adds a block whose only coefficient is DC: the inverse transform of such a block is the constant <c>(dc + 4) &gt;&gt; 3</c>,
+    /// added to all sixteen pixels (the scalar <see cref="Vp8ScalarInverseDct.TransformDcOnlyAndAdd"/> on four-pixel vectors).
+    /// The caller guarantees the 4x4 pixels at <paramref name="dst"/> and 16 coefficients at <paramref name="coefficients"/> exist.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void AddDcOnly(ref short coefficients, ref byte dst, int stride)
+    {
+        // (dc + 4) >> 3 of an int16 fits in 13 bits, so the short lanes below cannot overflow.
+        var dc = Vector128.Create((short)((coefficients + 4) >> 3));
+        var zero = Vector128<short>.Zero;
+        var max = Vector128.Create((short)255);
+
+        for (int row = 0; row < 4; row++)
+        {
+            ref byte line = ref Unsafe.Add(ref dst, row * stride);
+            var pixels = Vector128.WidenLower(Vector128.CreateScalar(Unsafe.ReadUnaligned<uint>(ref line)).AsByte()).AsInt16();
+            var sum = Vector128.Min(Vector128.Max(pixels + dc, zero), max).AsUInt16();
+            Unsafe.WriteUnaligned(ref line, Vector128.Narrow(sum, sum).AsUInt32().ToScalar());
+        }
+    }
+
+    /// <summary>The general inverse transform of a block known to carry AC, over raw references; see the span overload.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void TransformFullAndAdd(ref short coefficients, ref byte dst, int stride)
+    {
         // Lane j of each vector = original column j's coefficient at that row position.
-        var in0 = LoadRowOfColumns(coefficients, 0);
-        var in4 = LoadRowOfColumns(coefficients, 4);
-        var in8 = LoadRowOfColumns(coefficients, 8);
-        var in12 = LoadRowOfColumns(coefficients, 12);
+        var in0 = LoadRowOfColumns(ref coefficients, 0);
+        var in4 = LoadRowOfColumns(ref coefficients, 4);
+        var in8 = LoadRowOfColumns(ref coefficients, 8);
+        var in12 = LoadRowOfColumns(ref coefficients, 12);
 
         // Column pass: 4 independent butterflies, one per lane (= per original column). Lane-parallel, no
         // transpose needed yet -- this mirrors the scalar loop's `for (int i = 0; i < 4; i++)` exactly, just
@@ -83,16 +118,16 @@ internal static class Vp8VectorInverseDct
 
         Transpose4x4(out0, out1, out2, out3, out var row0, out var row1, out var row2, out var row3);
 
-        AddClipStoreRow(dst, offset, row0);
-        AddClipStoreRow(dst, offset + stride, row1);
-        AddClipStoreRow(dst, offset + (2 * stride), row2);
-        AddClipStoreRow(dst, offset + (3 * stride), row3);
+        AddClipStoreRow(ref dst, row0);
+        AddClipStoreRow(ref Unsafe.Add(ref dst, stride), row1);
+        AddClipStoreRow(ref Unsafe.Add(ref dst, 2 * stride), row2);
+        AddClipStoreRow(ref Unsafe.Add(ref dst, 3 * stride), row3);
     }
 
     /// <summary>Four consecutive coefficients, sign-extended to 32-bit lanes (one 8-byte load plus a widen, not four scalar loads).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Vector128<int> LoadRowOfColumns(ReadOnlySpan<short> coefficients, int baseIndex) =>
-        Vector128.WidenLower(Vector128.CreateScalar(MemoryMarshal.Read<ulong>(MemoryMarshal.AsBytes(coefficients.Slice(baseIndex, 4)))).AsInt16());
+    private static Vector128<int> LoadRowOfColumns(ref short coefficients, int baseIndex) =>
+        Vector128.WidenLower(Vector128.CreateScalar(Unsafe.ReadUnaligned<ulong>(ref Unsafe.As<short, byte>(ref Unsafe.Add(ref coefficients, baseIndex)))).AsInt16());
 
     /// <summary>The scalar kernel's <c>Mul1(v) = v + ((v*C1) &gt;&gt; 16)</c>, lane-wise. <c>Vector128.Multiply</c> on <see cref="int"/> truncates to the low 32 bits exactly as C#'s <c>int * int</c> does, so this matches the scalar form bit for bit, wraparound included.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -127,15 +162,14 @@ internal static class Vp8VectorInverseDct
 
     /// <summary>Shifts a row's 4 pixel deltas by the final descale, adds them to the existing prediction, clamps to [0,255], and stores.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void AddClipStoreRow(Span<byte> dst, int rowOffset, Vector128<int> deltas)
+    private static void AddClipStoreRow(ref byte row, Vector128<int> deltas)
     {
         var shifted = Vector128.ShiftRightArithmetic(deltas, 3);
-        var row = dst.Slice(rowOffset, 4);
-        var basePixels = Vector128.WidenLower(Vector128.WidenLower(Vector128.CreateScalar(MemoryMarshal.Read<uint>(row)).AsByte())).AsInt32();
+        var basePixels = Vector128.WidenLower(Vector128.WidenLower(Vector128.CreateScalar(Unsafe.ReadUnaligned<uint>(ref row)).AsByte())).AsInt32();
         var clamped = Vector128.Min(Vector128.Max(basePixels + shifted, Zero), TwoFiftyFive).AsUInt32();
 
         // Every lane is in [0,255], so the truncating narrows keep the values and put the four bytes in lane 0.
         var bytes = Vector128.Narrow(Vector128.Narrow(clamped, clamped), Vector128.Narrow(clamped, clamped));
-        MemoryMarshal.Write(row, bytes.AsUInt32().ToScalar());
+        Unsafe.WriteUnaligned(ref row, bytes.AsUInt32().ToScalar());
     }
 }
