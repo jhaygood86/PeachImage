@@ -20,4 +20,16 @@ internal interface IChromaUpsampler
         byte[] destination, int destinationWidth, int destinationHeight,
         int horizontalRatio, int verticalRatio,
         ParallelSettings parallel = default);
+
+    /// <summary>
+    /// Produces row <paramref name="y"/> of the upsampled plane on its own, for the ratios the horizontal-doubling filter
+    /// covers (horizontal 2 with vertical 1 or 2), writing the first <c>sourceWidth * 2</c> bytes of
+    /// <paramref name="destinationRow"/>. <paramref name="scratch"/> needs <c>sourceWidth + 2</c> elements. Returns
+    /// <see langword="false"/>, writing nothing, for any other ratio or an upsampler without a row form. The result is
+    /// exactly row <paramref name="y"/> of what <see cref="Upsample"/> produces.
+    /// </summary>
+    bool TryUpsampleRow(
+        byte[] source, int sourceWidth, int sourceHeight,
+        int horizontalRatio, int verticalRatio,
+        int y, Span<byte> destinationRow, Span<ushort> scratch);
 }

@@ -35,4 +35,9 @@ internal sealed class NearestNeighborUpsampler : IChromaUpsampler
             }
         }, parallel);
     }
+
+    public bool TryUpsampleRow(
+        byte[] source, int sourceWidth, int sourceHeight,
+        int horizontalRatio, int verticalRatio,
+        int y, Span<byte> destinationRow, Span<ushort> scratch) => false;
 }

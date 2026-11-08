@@ -27,6 +27,16 @@ internal sealed class DecodedFrame
     /// </summary>
     public byte[][]? StreamedPlanes { get; set; }
 
+    /// <summary>
+    /// For a streaming decode that also converted rows as they became available: the finished image bytes (Gray8 for
+    /// <see cref="JpegColorSpace.Grayscale"/>, Rgb24 for <see cref="JpegColorSpace.YCbCr"/>), pooled. Reconstruction takes
+    /// ownership of it when it uses it. <see langword="null"/> otherwise.
+    /// </summary>
+    public byte[]? StreamedOutput { get; set; }
+
+    /// <summary>The color space <see cref="StreamedOutput"/> was converted as; it is only usable if the frame resolves to the same one.</summary>
+    public JpegColorSpace StreamedOutputColorSpace { get; set; }
+
     /// <summary>Returns the pooled coefficient buffers and any streamed planes. Call once the frame has been reconstructed.</summary>
     public void ReleaseBuffers()
     {
@@ -43,6 +53,12 @@ internal sealed class DecodedFrame
             }
 
             StreamedPlanes = null;
+        }
+
+        if (StreamedOutput is { } output)
+        {
+            PeachImage.Internal.ImageBufferPool.Shared.Return(output);
+            StreamedOutput = null;
         }
     }
 }

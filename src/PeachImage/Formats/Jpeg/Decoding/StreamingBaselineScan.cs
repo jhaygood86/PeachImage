@@ -2,6 +2,7 @@ using System.Buffers;
 using PeachImage.Formats.Jpeg.Dct;
 using PeachImage.Formats.Jpeg.Entropy;
 using PeachImage.Formats.Shared.Parallelism;
+using PeachImage.Internal;
 
 namespace PeachImage.Formats.Jpeg.Decoding;
 
@@ -20,6 +21,8 @@ internal static class StreamingBaselineScan
     /// <summary>
     /// Decodes the scan and returns each frame component's inverse-transformed plane (pooled; the caller owns them), in the
     /// order of <paramref name="frameComponents"/>. Every frame component must be in <paramref name="scanComponents"/>.
+    /// When <paramref name="colorSpace"/> is one the row converter handles, the image rows are also upsampled and converted
+    /// behind the transforms, and <paramref name="output"/> returns the finished bytes (otherwise it is <see langword="null"/>).
     /// </summary>
     public static byte[][] Decode(
         JpegEntropyReader entropy,
@@ -30,13 +33,26 @@ internal static class StreamingBaselineScan
         RestartController restart,
         int mcusAcross,
         int mcusDown,
-        ParallelSettings parallel)
+        ParallelSettings parallel,
+        JpegColorSpace colorSpace,
+        int imageWidth,
+        int imageHeight,
+        out byte[]? output)
     {
+        output = null;
         int componentCount = frameComponents.Length;
         var planes = new byte[componentCount][];
         var dequant = new float[componentCount][];
         var buffers = new JpegCoefficientBuffer?[2][] { new JpegCoefficientBuffer?[componentCount], new JpegCoefficientBuffer?[componentCount] };
         var pending = new Task?[2];
+
+        // Work behind the decode runs on its own threads only when that cannot break the caller's limits: the decoding thread plus
+        // a transform task plus a conversion task is three threads, so a lower cap, or a scheduler of the caller's own (which
+        // may be bounded or may not run a task until asked), keeps everything on the calling thread.
+        bool overlap = parallel.Scheduler is null && parallel.EffectiveDegree >= 3;
+        Task? lastConvert = null;
+        StreamingRowConverter? converter = null;
+        byte[]? convertedBuffer = null;
         bool succeeded = false;
 
         try
@@ -51,6 +67,19 @@ internal static class StreamingBaselineScan
                 int rows = component.BlocksPerMcuVertical * BatchMcuRows;
                 buffers[0][i] = new JpegCoefficientBuffer(blocksWide, rows);
                 buffers[1][i] = new JpegCoefficientBuffer(blocksWide, rows);
+            }
+
+            // Rows are converted behind the transforms when the frame's shape allows it.
+            if (colorSpace is JpegColorSpace.YCbCr or JpegColorSpace.Grayscale)
+            {
+                int bytesPerPixel = colorSpace == JpegColorSpace.Grayscale ? 1 : 3;
+                convertedBuffer = ImageBufferPool.Shared.Rent(checked(imageWidth * imageHeight * bytesPerPixel));
+                converter = StreamingRowConverter.TryCreate(frameComponents, planes, colorSpace, imageWidth, imageHeight, convertedBuffer);
+                if (converter is null)
+                {
+                    ImageBufferPool.Shared.Return(convertedBuffer);
+                    convertedBuffer = null;
+                }
             }
 
             BaselineScanDecoder.BeginScan(scanComponents);
@@ -79,20 +108,41 @@ internal static class StreamingBaselineScan
 
                 int firstMcuRow = mcuY;
                 int mcuRowCount = mcuEnd - mcuY;
+                int mcuRowsDone = mcuEnd;
                 void Transform() => TransformBatch(frameComponents, slotBuffers, dequant, planes, firstMcuRow, mcuRowCount);
 
-                if (parallel.IsSequential)
+                if (!overlap)
                 {
                     Transform();
+                    converter?.ConvertReady(mcuRowsDone, parallel);
                 }
                 else
                 {
-                    pending[slot] = Task.Factory.StartNew(Transform, CancellationToken.None, TaskCreationOptions.None, parallel.Scheduler ?? TaskScheduler.Default);
+                    var scheduler = TaskScheduler.Default;
+                    var transformTask = Task.Factory.StartNew(Transform, CancellationToken.None, TaskCreationOptions.None, scheduler);
+                    pending[slot] = transformTask;
+
+                    if (converter is not null)
+                    {
+                        // Converting rows needs every earlier transform finished (the previous conversion task stands for all of
+                        // them) and this one; conversions also run one after another, since each continues where the last stopped.
+                        var conversionConverter = converter;
+                        Task[] prerequisites = lastConvert is null ? [transformTask] : [transformTask, lastConvert];
+                        lastConvert = Task.Factory.ContinueWhenAll(
+                            prerequisites,
+                            _ => conversionConverter.ConvertReady(mcuRowsDone, new ParallelSettings(1, null)),
+                            CancellationToken.None,
+                            TaskContinuationOptions.None,
+                            scheduler);
+                    }
                 }
             }
 
             Complete(ref pending[0]);
             Complete(ref pending[1]);
+            Complete(ref lastConvert);
+            output = convertedBuffer;
+            convertedBuffer = null;
             succeeded = true;
             return planes;
         }
@@ -101,7 +151,7 @@ internal static class StreamingBaselineScan
             if (!succeeded)
             {
                 // A transform still running reads these buffers and writes these planes: let it finish before they go back.
-                foreach (var task in pending)
+                foreach (var task in new[] { pending[0], pending[1], lastConvert })
                 {
                     try
                     {
@@ -111,6 +161,11 @@ internal static class StreamingBaselineScan
                     {
                         // The failure being propagated is the decode's own; a transform failure behind it adds nothing.
                     }
+                }
+
+                if (convertedBuffer is not null)
+                {
+                    ImageBufferPool.Shared.Return(convertedBuffer);
                 }
 
                 foreach (var plane in planes)

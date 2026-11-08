@@ -98,6 +98,29 @@ public class StreamingBaselineDecodeTests
         }
     }
 
+    [Fact]
+    public void FastUpsampling_IgnoresTheRowsConvertedWithTheDefaultFilter()
+    {
+        byte[] jpeg = Encode(color: true, 130, 77, JpegChromaSubsampling.Yuv420, restartInterval: 0);
+        var options = new JpegDecoderOptions { FastUpsampling = true };
+
+        using var fullStream = new MemoryStream(jpeg);
+        var full = FrameDecoder.Decode(fullStream);
+        using var streamedStream = new MemoryStream(jpeg);
+        var streamed = FrameDecoder.Decode(streamedStream, streamBaseline: new ParallelSettings(1, null));
+        try
+        {
+            using var expected = FrameReconstructor.Reconstruct(full, options);
+            using var actual = FrameReconstructor.Reconstruct(streamed, options);
+            Assert.True(expected.GetPixelSpan().SequenceEqual(actual.GetPixelSpan()));
+        }
+        finally
+        {
+            full.ReleaseBuffers();
+            streamed.ReleaseBuffers();
+        }
+    }
+
     private static byte[] Encode(bool color, int width, int height, JpegChromaSubsampling subsampling, int restartInterval, bool progressive = false)
     {
         var random = new Random(width * 31 + height);

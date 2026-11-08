@@ -310,6 +310,7 @@ internal static class FrameDecoder
                         throw new JpegDecodingException($"JPEG frame contains more than {maxScanCount} scans, exceeding the maximum supported scan count.");
                     }
 
+                    streaming.AssumedColorSpace = ColorSpaceResolver.Resolve(frameHeader.Components.Length, adobe).ColorSpace;
                     var scanHeader = DecodeScan(markerReader, source, frameHeader, components, dcHuffmanSpecs, acHuffmanSpecs, dcTableCache, acTableCache, restartInterval, mcusAcross, mcusDown, quantTables, streaming);
                     if (progressFrameAvailable is not null && frameHeader.IsProgressive)
                     {
@@ -357,6 +358,8 @@ internal static class FrameDecoder
             IsAdobeInverted = isAdobeInverted,
             Metadata = BuildMetadata(metadata, iccChunks, iccChunkCount),
             StreamedPlanes = streaming.Planes,
+            StreamedOutput = streaming.Output,
+            StreamedOutputColorSpace = streaming.OutputColorSpace,
         };
     }
 
@@ -472,7 +475,11 @@ internal static class FrameDecoder
                 if (CanStream(components, scanComponents, quantTables))
                 {
                     BindQuantizationTables(components, quantTables);
-                    streaming.Planes = StreamingBaselineScan.Decode(entropy, components, scanComponents, dcTables, acTables, restart, mcusAcross, mcusDown, streaming.Parallel);
+                    streaming.Planes = StreamingBaselineScan.Decode(
+                        entropy, components, scanComponents, dcTables, acTables, restart, mcusAcross, mcusDown, streaming.Parallel,
+                        streaming.AssumedColorSpace, frameHeader.Width, frameHeader.Height, out var converted);
+                    streaming.Output = converted;
+                    streaming.OutputColorSpace = streaming.AssumedColorSpace;
                     streaming.BuffersAllocated = true;
                     return scanHeader;
                 }
@@ -547,6 +554,14 @@ internal static class FrameDecoder
         public bool BuffersAllocated { get; set; }
 
         public byte[][]? Planes { get; set; }
+
+        /// <summary>The finished image bytes when rows were converted during the scan, and the color space they were converted as.</summary>
+        public byte[]? Output { get; set; }
+
+        public JpegColorSpace OutputColorSpace { get; set; }
+
+        /// <summary>The color space the frame resolves to given the markers seen when its scan starts.</summary>
+        public JpegColorSpace AssumedColorSpace { get; set; }
     }
 
     /// <summary>True when one scan covers every component exactly once and every quantization table it needs is already known.</summary>

@@ -37,6 +37,16 @@ internal static class FrameReconstructor
             vMax = Math.Max(vMax, c.Frame.VerticalSamplingFactor);
         }
 
+        if (frame.StreamedOutput is { } finished
+            && scaleDenominator == 1
+            && options?.FastUpsampling != true
+            && frame.ColorSpace == frame.StreamedOutputColorSpace)
+        {
+            // Rows were upsampled and converted while the scan decoded; the image is already built.
+            frame.StreamedOutput = null;
+            return Image.FromBuffer(width, height, frame.ColorSpace == JpegColorSpace.Grayscale ? PixelFormat.Gray8 : PixelFormat.Rgb24, finished, owned: true);
+        }
+
         var planes = new byte[frame.Components.Length][];
         var rented = new List<byte[]>(frame.Components.Length * 3);
 
