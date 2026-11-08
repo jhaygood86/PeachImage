@@ -68,6 +68,37 @@ public class EncodeDecodeRoundTripTests
         Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
     }
 
+    /// <summary>
+    /// The decoder runs the inverse transforms 16 rows at a time; these heights end mid-batch, span many batches,
+    /// and (with the noisy source) make the predictor read the row above across every batch boundary.
+    /// </summary>
+    [Theory]
+    [InlineData(33, 100)]
+    [InlineData(200, 49)]
+    [InlineData(7, 161)]
+    [InlineData(64, 16)]
+    [InlineData(64, 17)]
+    public void TallNoisyImage_RoundTrips_Exactly_AcrossRowBatches(int width, int height)
+    {
+        var source = CreateNoisyImage(width, height, seed: width * 1000 + height);
+
+        var decoded = EncodeThenDecode(source, new WebpEncoderOptions());
+
+        Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
+    }
+
+    [Theory]
+    [InlineData(48, 130)]
+    [InlineData(13, 70)]
+    public void TallFewColorImage_RoundTrips_Exactly_AcrossRowBatches(int width, int height)
+    {
+        var source = CreateFewColorImage(width, height);
+
+        var decoded = EncodeThenDecode(source, new WebpEncoderOptions());
+
+        Assert.True(source.GetPixelSpan().SequenceEqual(decoded.GetPixelSpan()));
+    }
+
     [Fact]
     public void ManyColorImage_RoundTrips_Exactly_ViaPredictorTransform()
     {

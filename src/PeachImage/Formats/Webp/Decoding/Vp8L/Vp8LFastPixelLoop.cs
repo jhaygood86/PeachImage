@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8L;
 
@@ -42,7 +43,7 @@ internal static class Vp8LFastPixelLoop
     /// </summary>
     private const int SafeTailBytes = 16;
 
-    private readonly struct GroupView
+    internal readonly struct GroupView
     {
         public readonly Vp8LHuffmanCode[] Green;
         public readonly Vp8LHuffmanCode[] Red;
@@ -91,17 +92,12 @@ internal static class Vp8LFastPixelLoop
         public int Pos;
     }
 
-    /// <summary>Runs the loop; returns with <paramref name="cursor"/> advanced as far as it could safely go.</summary>
-    public static void Run(
-        Vp8LBitReader reader,
-        uint[] pixels,
-        int width,
-        int pixelCount,
-        Vp8LHuffmanGroup[] groups,
-        Vp8LMetaHuffmanImage? metaImage,
-        Vp8LColorCache? colorCache,
-        int colorCacheLimit,
-        ref Vp8LPixelCursor cursor)
+    /// <summary>
+    /// Builds the per-group table views once per stream; <see langword="null"/> when any group has a root level
+    /// that is not a full 256-entry table (the unchecked root lookup would be unsafe), in which case the caller
+    /// uses the general loop for the whole stream.
+    /// </summary>
+    public static GroupView[]? CreateViews(Vp8LHuffmanGroup[] groups)
     {
         var views = new GroupView[groups.Length];
         for (int i = 0; i < views.Length; i++)
@@ -109,10 +105,30 @@ internal static class Vp8LFastPixelLoop
             views[i] = new GroupView(groups[i]);
             if (!views[i].IsWellFormed)
             {
-                return;
+                return null;
             }
         }
 
+        return views;
+    }
+
+    /// <summary>
+    /// Decodes pixels until <paramref name="limit"/> (or the stream's last safe byte, whichever comes first);
+    /// returns with <paramref name="cursor"/> advanced as far as it could safely go. A backward reference can
+    /// carry the position past <paramref name="limit"/>.
+    /// </summary>
+    public static void Run(
+        Vp8LBitReader reader,
+        uint[] pixels,
+        int width,
+        int pixelCount,
+        int limit,
+        GroupView[] views,
+        Vp8LMetaHuffmanImage? metaImage,
+        Vp8LColorCache? colorCache,
+        int colorCacheLimit,
+        ref Vp8LPixelCursor cursor)
+    {
         byte[] data = reader.Data;
         int end = reader.EndOffset;
         int safeEnd = end - SafeTailBytes;
@@ -137,7 +153,7 @@ internal static class Vp8LFastPixelLoop
         uint trivialArgb;
         views[hasMeta ? metaImage!.GetGroupIndex(col, row) : 0].Deconstruct(out greenTable, out redTable, out blueTable, out alphaTable, out distanceTable, out trivial, out trivialArgb);
 
-        while (pos < pixelCount && bits.Pos <= safeEnd)
+        while (pos < limit && bits.Pos <= safeEnd)
         {
             if (hasMeta && (col & tileMask) == 0)
             {
@@ -294,22 +310,42 @@ internal static class Vp8LFastPixelLoop
         return offset + extra + 1;
     }
 
+    /// <summary>
+    /// Copies a backward reference. Most are short, where a call into <c>Array.Copy</c> costs more than the
+    /// copy; so short runs are copied with four-pixel vector moves (forward order, which stays correct for an
+    /// overlapping source as long as the distance is at least the vector width), and only long non-overlapping
+    /// runs use the bulk copy.
+    /// </summary>
     private static void CopyPixels(uint[] pixels, int destPos, int distance, int length)
     {
-        if (distance >= length)
-        {
-            Array.Copy(pixels, destPos - distance, pixels, destPos, length);
-        }
-        else if (distance == 1)
+        if (distance == 1)
         {
             pixels.AsSpan(destPos, length).Fill(pixels[destPos - 1]);
+            return;
         }
-        else
+
+        if (distance >= length && length >= 64)
         {
-            for (int i = 0; i < length; i++)
+            Array.Copy(pixels, destPos - distance, pixels, destPos, length);
+            return;
+        }
+
+        // Bounds: destPos - distance >= 0 and destPos + length <= pixels.Length were established by the caller.
+        ref uint destination = ref pixels[destPos];
+        ref uint source = ref pixels[destPos - distance];
+        int i = 0;
+
+        if (distance >= 4 && Vector128.IsHardwareAccelerated)
+        {
+            for (; i + 4 <= length; i += 4)
             {
-                pixels[destPos + i] = pixels[destPos - distance + i];
+                Vector128.LoadUnsafe(ref source, (nuint)i).StoreUnsafe(ref destination, (nuint)i);
             }
+        }
+
+        for (; i < length; i++)
+        {
+            Unsafe.Add(ref destination, i) = Unsafe.Add(ref source, i);
         }
     }
 }

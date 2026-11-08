@@ -15,7 +15,7 @@ namespace PeachImage.Formats.Webp.Decoding.Vp8L;
 /// alone is ~8 MiB, comfortably past the large-object-heap threshold, and a fresh LOH allocation on every
 /// decode call was measured to be a real, significant source of Gen2 GC pressure (LOH is collected only as
 /// part of a Gen2 collection). Every downstream consumer of this buffer (the four transform inverses,
-/// <see cref="PackPixels"/>, <c>WebpAlphaDecoder</c>'s green-channel extraction loop) already works through
+/// <see cref="Vp8LPixelPacker"/>, <c>WebpAlphaDecoder</c>'s green-channel extraction loop) already works through
 /// explicitly-bounded <c>Span&lt;uint&gt;</c>/length-bounded loops rather than trusting the array's own
 /// <c>.Length</c>, which is what makes it safe for the rented array to be larger than the actual pixel count
 /// (an <see cref="System.Buffers.ArrayPool{T}"/> contract) — callers are responsible for returning it once done.
@@ -42,19 +42,46 @@ internal static class Vp8LDecoder
 
         ValidateDimensions(width, height);
 
-        var (argb, pixelCount, isPooled) = DecodeCore(reader, width, height, rentFromPool: true);
+        // The pixel stream is decoded a batch of rows at a time and each batch goes through the inverse
+        // transforms and the byte conversion straight away, while it is still in cache.
+        int transformXsize = width;
+        var transforms = Vp8LTransformReader.ReadTransforms(reader, ref transformXsize, height);
+        var stream = new Vp8LPixelStream(reader, transformXsize, height, allowRecursion: true, rentFromPool: true);
+        Vp8LRowTransformPipeline? pipeline = transforms.Count > 0 ? new Vp8LRowTransformPipeline(transforms, width) : null;
+        byte[]? packed = null;
+
         try
         {
             var pixelFormat = alphaIsUsed ? PixelFormat.Rgba32 : PixelFormat.Rgb24;
-            byte[] packed = PackPixels(argb.AsSpan(0, pixelCount), pixelFormat);
-            return Image.FromBuffer(width, height, pixelFormat, packed, owned: true);
+            int bytesPerPixel = alphaIsUsed ? 4 : 3;
+            packed = ImageBufferPool.Shared.Rent(checked(width * height * bytesPerPixel));
+
+            for (int rowsDone = 0; rowsDone < height;)
+            {
+                int rowsEnd = Math.Min(height, rowsDone + Vp8LRowTransformPipeline.BatchRows);
+                stream.DecodeUntil(rowsEnd * transformXsize);
+
+                ReadOnlySpan<uint> rows = pipeline is null
+                    ? stream.Pixels.AsSpan(rowsDone * width, (rowsEnd - rowsDone) * width)
+                    : pipeline.Process(stream.Pixels, transformXsize, rowsDone, rowsEnd);
+
+                Vp8LPixelPacker.Pack(rows, packed.AsSpan(rowsDone * width * bytesPerPixel), alphaIsUsed);
+                rowsDone = rowsEnd;
+            }
+
+            var image = Image.FromBuffer(width, height, pixelFormat, packed, owned: true);
+            packed = null;
+            return image;
         }
         finally
         {
-            if (isPooled)
+            if (packed is not null)
             {
-                WebpBufferPool.SharedUInt32.Return(argb);
+                ImageBufferPool.Shared.Return(packed);
             }
+
+            pipeline?.Dispose();
+            WebpBufferPool.SharedUInt32.Return(stream.Pixels);
         }
     }
 
@@ -147,29 +174,6 @@ internal static class Vp8LDecoder
         {
             throw new WebpDecodingException($"VP8L image {width}x{height} exceeds the maximum supported pixel count.");
         }
-    }
-
-    private static byte[] PackPixels(ReadOnlySpan<uint> argb, PixelFormat format)
-    {
-        int bytesPerPixel = format == PixelFormat.Rgba32 ? 4 : 3;
-        int byteCount = checked((int)((long)argb.Length * bytesPerPixel));
-        var buffer = ImageBufferPool.Shared.Rent(byteCount);
-
-        int o = 0;
-        for (int i = 0; i < argb.Length; i++)
-        {
-            uint pixel = argb[i];
-            buffer[o++] = (byte)(pixel >> 16); // red
-            buffer[o++] = (byte)(pixel >> 8);  // green
-            buffer[o++] = (byte)pixel;         // blue
-
-            if (bytesPerPixel == 4)
-            {
-                buffer[o++] = (byte)(pixel >> 24); // alpha
-            }
-        }
-
-        return buffer;
     }
 
     /// <summary>Recovers the backing array (and valid byte range within it) from a <see cref="ReadOnlyMemory{T}"/> without copying when possible, falling back to a copy only when the memory isn't array-backed.</summary>

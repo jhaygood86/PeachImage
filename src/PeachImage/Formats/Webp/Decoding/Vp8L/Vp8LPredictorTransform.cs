@@ -26,27 +26,59 @@ namespace PeachImage.Formats.Webp.Decoding.Vp8L;
 /// </remarks>
 internal static class Vp8LPredictorTransform
 {
-    public static void ApplyInverse(Span<uint> pixels, Vp8LTransform transform)
+    public static void ApplyInverse(Span<uint> pixels, Vp8LTransform transform) =>
+        ApplyInverseRows(pixels, 0, transform, 0, transform.Ysize);
+
+    /// <summary>
+    /// Inverts rows <paramref name="yStart"/> to <paramref name="yEnd"/> (exclusive) of the image, in place.
+    /// <paramref name="pixels"/> holds those rows' residuals starting at index <paramref name="rowsOffset"/>; when
+    /// <paramref name="yStart"/> is not 0, the already-reconstructed row <c>yStart - 1</c> must sit in the
+    /// <c>Xsize</c> elements immediately before <paramref name="rowsOffset"/>, because the first row's predictors
+    /// read it. Reconstructing a whole image is the case <c>rowsOffset = 0, yStart = 0, yEnd = Ysize</c>.
+    /// </summary>
+    public static void ApplyInverseRows(Span<uint> pixels, int rowsOffset, Vp8LTransform transform, int yStart, int yEnd) =>
+        ApplyInverseRows(pixels, rowsOffset, transform, yStart, yEnd, default);
+
+    /// <summary>
+    /// As above, but when <paramref name="source"/> is not empty the residuals are read from it (its first row is
+    /// row <paramref name="yStart"/>) instead of already being in <paramref name="pixels"/>: each row is copied in just
+    /// before it is reconstructed, while it is a few instructions from being used, rather than as a separate bulk pass.
+    /// </summary>
+    public static void ApplyInverseRows(Span<uint> pixels, int rowsOffset, Vp8LTransform transform, int yStart, int yEnd, ReadOnlySpan<uint> source)
     {
         int width = transform.Xsize;
-        int height = transform.Ysize;
         int bits = transform.Bits;
         var tileData = transform.Data!;
         int tilesPerRow = Vp8LMetaHuffmanImage.SubSampleSize(width, bits);
         var kernel = Vp8LTransformKernelSelector.Instance;
 
-        // Pixel (0,0): mode 0 (fixed opaque black), unconditionally.
-        pixels[0] = Vp8LPixelMath.AddWrapping(pixels[0], 0xFF000000u);
-
-        // Rest of row 0: mode 1 (left), unconditionally -- sequential, has an intra-row dependency.
-        for (int x = 1; x < width; x++)
+        int firstFlatRow = yStart;
+        if (yStart == 0)
         {
-            pixels[x] = Vp8LPixelMath.AddWrapping(pixels[x], pixels[x - 1]);
+            if (!source.IsEmpty)
+            {
+                source.Slice(0, width).CopyTo(pixels.Slice(rowsOffset, width));
+            }
+
+            // Pixel (0,0): mode 0 (fixed opaque black), unconditionally.
+            pixels[rowsOffset] = Vp8LPixelMath.AddWrapping(pixels[rowsOffset], 0xFF000000u);
+
+            // Rest of row 0: mode 1 (left), unconditionally -- sequential, has an intra-row dependency.
+            for (int x = 1; x < width; x++)
+            {
+                pixels[rowsOffset + x] = Vp8LPixelMath.AddWrapping(pixels[rowsOffset + x], pixels[rowsOffset + x - 1]);
+            }
+
+            firstFlatRow = 1;
         }
 
-        for (int y = 1; y < height; y++)
+        for (int y = firstFlatRow; y < yEnd; y++)
         {
-            int rowBase = y * width;
+            int rowBase = rowsOffset + ((y - yStart) * width);
+            if (!source.IsEmpty)
+            {
+                source.Slice((y - yStart) * width, width).CopyTo(pixels.Slice(rowBase, width));
+            }
 
             // First pixel of the row: mode 2 (top), unconditionally.
             pixels[rowBase] = Vp8LPixelMath.AddWrapping(pixels[rowBase], pixels[rowBase - width]);
