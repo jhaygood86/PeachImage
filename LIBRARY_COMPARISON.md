@@ -381,6 +381,11 @@ rows in both libraries.
 | Lossless 2048x2048 with splines | 210.8 ms | 208.6 ms | 154.5 ms | 1.32× | 1.35× | 23.2 MB |
 | Lossy 500x606 with noise | 9.54 ms | 9.52 ms | 5.77 ms | 1.67× | 1.65× | 2.7 MB |
 
+The lossless-with-patches row moves between processes more than the noise floor: run as separate benchmark processes, its Mean
+ranged 66.6–81.9 ms on .NET 10 and 61.7–79.1 ms on .NET 11, with each process steady within itself. The spread comes from its
+parallel Modular group decode; single-threaded (`--affinity 1`) the same decode is steady, at 117–124 ms on .NET 10 and
+106–111 ms on .NET 11.
+
 ```bash
 dotnet run -c Release -f net11.0 --project bench/PeachImage.Benchmarks -- --filter "*JxlDecodeBenchmarks*" --warmupCount 5 --iterationCount 20 --inProcess --affinity 15
 ```
@@ -539,5 +544,6 @@ Resize flips by direction — slower than SkiaSharp on downscale (PeachImage app
 SkiaSharp's default resize doesn't), faster on upscale for the cubic family.
 
 Between the two runtimes most scenarios are within the noise floor. The clearest .NET 11 gains are JPEG decode (8–15%),
-JPEG 2000 decode (6–18%), WebP lossless photographic and alpha encode (7–11%) and filtered resize downscale (1–11%); the clearest
-.NET 11 loss is JPEG XL lossless decode with patches (12% slower).
+JPEG 2000 decode (6–18%), WebP lossless photographic and alpha encode (7–11%) and filtered resize downscale (1–11%). The one row
+where .NET 11 reads slower, JPEG XL lossless decode with patches, is within that scenario's spread between processes (see the JPEG
+XL section).
