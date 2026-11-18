@@ -11,5 +11,5 @@ and point `PEACH_NATIVE_DIR` at the resulting `installed/x64-windows/bin` (defau
 `C:\Sources\GoogleSource\vcpkg-native\x64-windows\bin`). Versions used for the published numbers: libjxl 0.12.0, OpenJPEG 2.5.4,
 libtiff 4.7.2, libavif 1.4.2, dav1d 1.5.4.
 
-`dotnet run -c Release -f net10.0 --project bench/PeachImage.Benchmarks -- native-smoke` decodes each asset through PeachImage and
+`dotnet run -c Release -f net11.0 --project bench/PeachImage.Benchmarks -- native-smoke` decodes each asset through PeachImage and
 the matching shim once, to confirm the DLLs load and both sides process the same workload before a long benchmark run.

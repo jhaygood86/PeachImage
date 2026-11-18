@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using PeachImage.Formats.Shared.Vectors;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8.ColorConversion;
 
@@ -81,9 +82,9 @@ internal sealed class Sse2Vp8ColorConverter : IVp8ColorConverter
                     // Low halves hold the runs of pixels 0-15, high halves those of pixels 16-31: output order is run0, run1, run2 of the
                     // low half, then the same of the high half.
                     ref byte wideDst = ref Unsafe.Add(ref outRef, x * 3);
-                    Avx2.Permute2x128(run0, run1, 0x20).StoreUnsafe(ref wideDst);
-                    Avx2.Permute2x128(run2, run0, 0x30).StoreUnsafe(ref wideDst, 32);
-                    Avx2.Permute2x128(run1, run2, 0x31).StoreUnsafe(ref wideDst, 64);
+                    VectorShuffle.ConcatLowerLower(run0, run1).StoreUnsafe(ref wideDst);
+                    VectorShuffle.ConcatLowerUpper(run2, run0).StoreUnsafe(ref wideDst, 32);
+                    VectorShuffle.ConcatUpperUpper(run1, run2).StoreUnsafe(ref wideDst, 64);
                 }
             }
 
@@ -152,10 +153,10 @@ internal sealed class Sse2Vp8ColorConverter : IVp8ColorConverter
                 var pixels3 = Avx2.UnpackHigh(redGreenHigh, blueAlphaHigh).AsByte();
 
                 ref byte wideDst = ref Unsafe.Add(ref outRef, x * 4);
-                Avx2.Permute2x128(pixels0, pixels1, 0x20).StoreUnsafe(ref wideDst);
-                Avx2.Permute2x128(pixels2, pixels3, 0x20).StoreUnsafe(ref wideDst, 32);
-                Avx2.Permute2x128(pixels0, pixels1, 0x31).StoreUnsafe(ref wideDst, 64);
-                Avx2.Permute2x128(pixels2, pixels3, 0x31).StoreUnsafe(ref wideDst, 96);
+                VectorShuffle.ConcatLowerLower(pixels0, pixels1).StoreUnsafe(ref wideDst);
+                VectorShuffle.ConcatLowerLower(pixels2, pixels3).StoreUnsafe(ref wideDst, 32);
+                VectorShuffle.ConcatUpperUpper(pixels0, pixels1).StoreUnsafe(ref wideDst, 64);
+                VectorShuffle.ConcatUpperUpper(pixels2, pixels3).StoreUnsafe(ref wideDst, 96);
             }
         }
 
@@ -170,16 +171,16 @@ internal sealed class Sse2Vp8ColorConverter : IVp8ColorConverter
                 out var blue);
 
             var a = Vector128.LoadUnsafe(ref aRef, (nuint)x);
-            var redGreenLow = Sse2.UnpackLow(red, green).AsUInt16();
-            var redGreenHigh = Sse2.UnpackHigh(red, green).AsUInt16();
-            var blueAlphaLow = Sse2.UnpackLow(blue, a).AsUInt16();
-            var blueAlphaHigh = Sse2.UnpackHigh(blue, a).AsUInt16();
+            var redGreenLow = VectorShuffle.ZipLower(red, green).AsUInt16();
+            var redGreenHigh = VectorShuffle.ZipUpper(red, green).AsUInt16();
+            var blueAlphaLow = VectorShuffle.ZipLower(blue, a).AsUInt16();
+            var blueAlphaHigh = VectorShuffle.ZipUpper(blue, a).AsUInt16();
 
             ref byte dst = ref Unsafe.Add(ref outRef, x * 4);
-            Sse2.UnpackLow(redGreenLow, blueAlphaLow).AsByte().StoreUnsafe(ref dst);
-            Sse2.UnpackHigh(redGreenLow, blueAlphaLow).AsByte().StoreUnsafe(ref dst, 16);
-            Sse2.UnpackLow(redGreenHigh, blueAlphaHigh).AsByte().StoreUnsafe(ref dst, 32);
-            Sse2.UnpackHigh(redGreenHigh, blueAlphaHigh).AsByte().StoreUnsafe(ref dst, 48);
+            VectorShuffle.ZipLower(redGreenLow, blueAlphaLow).AsByte().StoreUnsafe(ref dst);
+            VectorShuffle.ZipUpper(redGreenLow, blueAlphaLow).AsByte().StoreUnsafe(ref dst, 16);
+            VectorShuffle.ZipLower(redGreenHigh, blueAlphaHigh).AsByte().StoreUnsafe(ref dst, 32);
+            VectorShuffle.ZipUpper(redGreenHigh, blueAlphaHigh).AsByte().StoreUnsafe(ref dst, 48);
         }
 
         Span<byte> pixel = stackalloc byte[3];
@@ -205,8 +206,8 @@ internal sealed class Sse2Vp8ColorConverter : IVp8ColorConverter
     {
         // Interleaving with zero in the low byte promotes each sample s to the 16-bit value s << 8.
         var zero = Vector128<byte>.Zero;
-        Convert8(Sse2.UnpackLow(zero, y).AsUInt16(), Sse2.UnpackLow(zero, u).AsUInt16(), Sse2.UnpackLow(zero, v).AsUInt16(), out var redLow, out var greenLow, out var blueLow);
-        Convert8(Sse2.UnpackHigh(zero, y).AsUInt16(), Sse2.UnpackHigh(zero, u).AsUInt16(), Sse2.UnpackHigh(zero, v).AsUInt16(), out var redHigh, out var greenHigh, out var blueHigh);
+        Convert8(VectorShuffle.ZipLower(zero, y).AsUInt16(), VectorShuffle.ZipLower(zero, u).AsUInt16(), VectorShuffle.ZipLower(zero, v).AsUInt16(), out var redLow, out var greenLow, out var blueLow);
+        Convert8(VectorShuffle.ZipUpper(zero, y).AsUInt16(), VectorShuffle.ZipUpper(zero, u).AsUInt16(), VectorShuffle.ZipUpper(zero, v).AsUInt16(), out var redHigh, out var greenHigh, out var blueHigh);
 
         red = Sse2.PackUnsignedSaturate(redLow, redHigh);
         green = Sse2.PackUnsignedSaturate(greenLow, greenHigh);

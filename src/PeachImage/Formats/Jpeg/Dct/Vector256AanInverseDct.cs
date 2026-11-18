@@ -99,7 +99,7 @@ internal sealed class Vector256AanInverseDct : IInverseDctKernel
         // is exact — the same bias-and-truncate idea as AanScalarInverseDct's range-limit-table finish, just
         // via a vector Min/Max clamp instead of a table lookup (a table lookup here would need a gather,
         // which is slower than the two compare instructions Min/Max already are).
-        var asUInt = Vector256.ConvertToInt32(clamped).AsUInt32();
+        var asUInt = Vector256.ConvertToInt32Native(clamped).AsUInt32();
         var narrowedToUShort = Vector128.Narrow(asUInt.GetLower(), asUInt.GetUpper());
         var bytes = Vector128.Narrow(narrowedToUShort, Vector128<ushort>.Zero).GetLower();
         bytes.StoreUnsafe(ref output[offset]);

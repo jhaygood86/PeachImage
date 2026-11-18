@@ -63,11 +63,7 @@ internal static class PngChunkReader
         var crc = new System.IO.Hashing.Crc32();
         crc.Append(typeBytes);
         crc.Append(data);
-        Span<byte> computedBytes = stackalloc byte[4];
-        crc.GetCurrentHash(computedBytes);
-
-        // System.IO.Hashing.Crc32 writes its hash little-endian; PNG's on-disk CRC field is big-endian.
-        uint computed = BinaryPrimitives.ReadUInt32LittleEndian(computedBytes);
+        uint computed = crc.GetCurrentHashAsUInt32();
 
         Span<byte> stored = stackalloc byte[4];
         ReadExactlyOrThrow(stream, stored);

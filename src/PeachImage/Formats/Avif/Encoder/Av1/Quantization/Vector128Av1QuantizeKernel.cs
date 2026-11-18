@@ -31,7 +31,7 @@ internal sealed class Vector128Av1QuantizeKernel : IAv1QuantizeKernel
                 firstRecip[lane] = acReciprocal;
             }
 
-            QuantizeChunk(coeff, levelsOut, 0, Vector128.Create((ReadOnlySpan<double>)firstRecip));
+            QuantizeChunk(coeff, levelsOut, 0, Vector128.Create(firstRecip));
             i = Lanes;
         }
 

@@ -86,9 +86,7 @@ internal static class Vp8ChromaUpsampler
 
             if (Avx2.IsSupported)
             {
-                // Sixteen chroma columns (thirty-two output pixels) per step. Packs and unpacks work within each 128-bit half, so
-                // the half holding columns c..c+7 and the half holding c+8..c+15 each interleave their own even and odd results,
-                // which leaves the thirty-two bytes in output order.
+                // Sixteen chroma columns (thirty-two output pixels) per step.
                 var wideEight = Vector256.Create((ushort)8);
                 while (c + 16 <= lastColumn && (2 * (c + 16)) <= width)
                 {
@@ -108,9 +106,8 @@ internal static class Vp8ChromaUpsampler
                     var odd = Avx2.ShiftRightLogical(
                         Avx2.Add(Avx2.Add(shared, Avx2.Add(Avx2.ShiftLeftLogical(nearNext, 1), nearNext)), farNext), 4);
 
-                    var evenBytes = Avx2.PackUnsignedSaturate(even.AsInt16(), even.AsInt16());
-                    var oddBytes = Avx2.PackUnsignedSaturate(odd.AsInt16(), odd.AsInt16());
-                    Avx2.UnpackLow(evenBytes, oddBytes).StoreUnsafe(ref dstRef, (nuint)(2 * c));
+                    // Every lane is at most 255, so placing odd in each lane's high byte leaves the bytes in pixel order.
+                    Avx2.Or(even, Avx2.ShiftLeftLogical(odd, 8)).AsByte().StoreUnsafe(ref dstRef, (nuint)(2 * c));
 
                     c += 16;
                 }
@@ -118,7 +115,6 @@ internal static class Vp8ChromaUpsampler
 
             // Eight chroma columns (sixteen output pixels) per step in portable 128-bit vectors: x86 without AVX2, ARM64 and WASM.
             var eight = Vector128.Create((ushort)8);
-            var interleave = Vector128.Create((byte)0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15);
             while (c + 8 <= lastColumn && (2 * (c + 8)) <= width)
             {
                 var nearPrevious = Widen8(ref nearRef, c - 1);
@@ -134,8 +130,8 @@ internal static class Vp8ChromaUpsampler
                 var even = Vector128.ShiftRightLogical(shared + (nearPrevious << 1) + nearPrevious + farPrevious, 4);
                 var odd = Vector128.ShiftRightLogical(shared + (nearNext << 1) + nearNext + farNext, 4);
 
-                // Every lane is at most 255, so the narrowing is exact; the shuffle interleaves even/odd back into pixel order.
-                Vector128.Shuffle(Vector128.Narrow(even, odd), interleave).StoreUnsafe(ref dstRef, (nuint)(2 * c));
+                // Every lane is at most 255, so placing odd in each lane's high byte leaves the bytes in pixel order.
+                (even | (odd << 8)).AsByte().StoreUnsafe(ref dstRef, (nuint)(2 * c));
 
                 c += 8;
             }

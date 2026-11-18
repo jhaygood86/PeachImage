@@ -1,5 +1,6 @@
 using System.Buffers;
 using PeachImage.Formats.Jpeg2000.Internal;
+using PeachImage.Formats.Shared.Arithmetic;
 
 namespace PeachImage.Formats.Jpeg2000.Decoding;
 
@@ -224,10 +225,10 @@ internal sealed class J2kTileComponent
         int roiShift)
     {
         var info = siz.Components[componentIndex];
-        int tcx0 = CeilDiv(tx0, info.XRsiz);
-        int tcy0 = CeilDiv(ty0, info.YRsiz);
-        int tcx1 = CeilDiv(tx1, info.XRsiz);
-        int tcy1 = CeilDiv(ty1, info.YRsiz);
+        int tcx0 = IntMath.CeilDiv(tx0, info.XRsiz);
+        int tcy0 = IntMath.CeilDiv(ty0, info.YRsiz);
+        int tcx1 = IntMath.CeilDiv(tx1, info.XRsiz);
+        int tcy1 = IntMath.CeilDiv(ty1, info.YRsiz);
         int levels = coding.Levels;
         var resolutions = new J2kResolution[levels + 1];
         long blockBudget = Jpeg2000DecodingLimits.MaxCodeBlocksPerTile;
@@ -264,10 +265,10 @@ internal sealed class J2kTileComponent
                 else
                 {
                     long half = 1L << (nb - 1);
-                    bx0 = (int)CeilDivLong(tcx0 - (half * xob), 1L << nb);
-                    by0 = (int)CeilDivLong(tcy0 - (half * yob), 1L << nb);
-                    bx1 = (int)CeilDivLong(tcx1 - (half * xob), 1L << nb);
-                    by1 = (int)CeilDivLong(tcy1 - (half * yob), 1L << nb);
+                    bx0 = (int)IntMath.CeilDiv(tcx0 - (half * xob), 1L << nb);
+                    by0 = (int)IntMath.CeilDiv(tcy0 - (half * yob), 1L << nb);
+                    bx1 = (int)IntMath.CeilDiv(tcx1 - (half * xob), 1L << nb);
+                    by1 = (int)IntMath.CeilDiv(tcy1 - (half * yob), 1L << nb);
                 }
 
                 // Quantization parameters for this subband.
@@ -410,13 +411,7 @@ internal sealed class J2kTileComponent
         };
     }
 
-    public static int CeilDiv(int a, int b) => (int)(((long)a + b - 1) / b);
 
     public static int CeilDivPow2(int a, int n) => n >= 31 ? (a > 0 ? 1 : 0) : (int)(((long)a + (1L << n) - 1) >> n);
 
-    private static long CeilDivLong(long a, long b)
-    {
-        long q = a / b;
-        return a % b != 0 && ((a < 0) == (b < 0)) ? q + 1 : q;
-    }
 }

@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using PeachImage.Formats.Shared.Vectors;
 
 namespace PeachImage.Formats.Avif.Decoding.Av1;
 
@@ -699,20 +700,20 @@ internal static partial class Av1InverseTransform
     private static Vector128<int> NarrowToInt32(Vector256<long> x) =>
         Avx2.PermuteVar8x32(x.AsInt32(), Vector256.Create(0, 2, 4, 6, 0, 2, 4, 6)).GetLower();
 
-    /// <summary>Transposes a 4x4 matrix of ints held as four row vectors. SSE2 (implied by AVX2).</summary>
+    /// <summary>Transposes a 4x4 matrix of ints held as four row vectors.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void Transpose4x4(
         Vector128<int> a, Vector128<int> b, Vector128<int> c, Vector128<int> d,
         out Vector128<int> o0, out Vector128<int> o1, out Vector128<int> o2, out Vector128<int> o3)
     {
-        Vector128<int> t0 = Sse2.UnpackLow(a, b);
-        Vector128<int> t1 = Sse2.UnpackLow(c, d);
-        Vector128<int> t2 = Sse2.UnpackHigh(a, b);
-        Vector128<int> t3 = Sse2.UnpackHigh(c, d);
-        o0 = Sse2.UnpackLow(t0.AsInt64(), t1.AsInt64()).AsInt32();
-        o1 = Sse2.UnpackHigh(t0.AsInt64(), t1.AsInt64()).AsInt32();
-        o2 = Sse2.UnpackLow(t2.AsInt64(), t3.AsInt64()).AsInt32();
-        o3 = Sse2.UnpackHigh(t2.AsInt64(), t3.AsInt64()).AsInt32();
+        var t0 = VectorShuffle.ZipLower(a, b).AsInt64();
+        var t1 = VectorShuffle.ZipLower(c, d).AsInt64();
+        var t2 = VectorShuffle.ZipUpper(a, b).AsInt64();
+        var t3 = VectorShuffle.ZipUpper(c, d).AsInt64();
+        o0 = VectorShuffle.ZipLower(t0, t1).AsInt32();
+        o1 = VectorShuffle.ZipUpper(t0, t1).AsInt32();
+        o2 = VectorShuffle.ZipLower(t2, t3).AsInt32();
+        o3 = VectorShuffle.ZipUpper(t2, t3).AsInt32();
     }
 
     private static Vector256<long> RoundBatch(Vector256<long> x, int n)

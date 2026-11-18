@@ -97,7 +97,7 @@ internal sealed class Vector128Av1RgbToYuvKernel : IAv1RgbToYuvKernel
     private static void StoreRoundedY(Vector128<float> yv, Span<int> yOut, int offset)
     {
         var clamped = Vector128.Min(Vector128.Max(yv, VZero), V255);
-        var rounded = Vector128.ConvertToInt32(clamped + RoundingBias);
+        var rounded = Vector128.ConvertToInt32Native(clamped + RoundingBias);
         rounded.StoreUnsafe(ref yOut[offset]);
     }
 }

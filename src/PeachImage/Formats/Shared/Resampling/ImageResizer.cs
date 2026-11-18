@@ -392,10 +392,10 @@ internal static class ImageResizer
                 p3 = Unpremultiply(p3, fullScale);
             }
 
-            var i0 = Vector128.ConvertToUInt32(RoundClamped(p0, zero, max));
-            var i1 = Vector128.ConvertToUInt32(RoundClamped(p1, zero, max));
-            var i2 = Vector128.ConvertToUInt32(RoundClamped(p2, zero, max));
-            var i3 = Vector128.ConvertToUInt32(RoundClamped(p3, zero, max));
+            var i0 = Vector128.ConvertToInt32Native(RoundClamped(p0, zero, max)).AsUInt32();
+            var i1 = Vector128.ConvertToInt32Native(RoundClamped(p1, zero, max)).AsUInt32();
+            var i2 = Vector128.ConvertToInt32Native(RoundClamped(p2, zero, max)).AsUInt32();
+            var i3 = Vector128.ConvertToInt32Native(RoundClamped(p3, zero, max)).AsUInt32();
 
             var packed = Vector128.Narrow(Vector128.Narrow(i0, i1), Vector128.Narrow(i2, i3));
             if (channelCount == 3)
@@ -413,15 +413,11 @@ internal static class ImageResizer
 
     /// <summary>
     /// Clamps to [0, fullScale] then rounds half-to-even, matching the scalar <c>Math.Clamp(MathF.Round(v), ...)</c>
-    /// (the bounds are integers, so clamping before rounding gives the same result). Adding then subtracting
-    /// 2^23 rounds to nearest-even in IEEE single precision for any value in [0, 2^23), and avoids
-    /// <c>Vector128.Round</c>, which doesn't exist on net8.
+    /// (the bounds are integers, so clamping before rounding gives the same result). The result is a whole number
+    /// within int range, so callers convert it with the non-saturating <c>ConvertToInt32Native</c>.
     /// </summary>
-    private static Vector128<float> RoundClamped(Vector128<float> value, Vector128<float> zero, Vector128<float> max)
-    {
-        var magic = Vector128.Create(8388608f);
-        return (Vector128.Min(Vector128.Max(value, zero), max) + magic) - magic;
-    }
+    private static Vector128<float> RoundClamped(Vector128<float> value, Vector128<float> zero, Vector128<float> max) =>
+        Vector128.Round(Vector128.Min(Vector128.Max(value, zero), max));
 
     private static Vector128<float> Unpremultiply(Vector128<float> pixel, float fullScale)
     {

@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using PeachImage.Formats.Shared.Vectors;
 
 namespace PeachImage.Formats.Webp.Encoding.Vp8;
 
@@ -249,14 +250,9 @@ internal static class Vp8ForwardColorConverter
         var low = Vector128.WidenLower(row0) + Vector128.WidenLower(row1);
         var high = Vector128.WidenUpper(row0) + Vector128.WidenUpper(row1);
 
-        // Even and odd columns of the low and high halves, four 16-bit lanes each, joined into eight.
-        var even = Vector128.Create(Vector128.Shuffle(low, EvenLanes).GetLower(), Vector128.Shuffle(high, EvenLanes).GetLower());
-        var odd = Vector128.Create(Vector128.Shuffle(low, OddLanes).GetLower(), Vector128.Shuffle(high, OddLanes).GetLower());
-        return even + odd;
+        // Even columns plus odd columns, across the low then the high half.
+        return VectorShuffle.UnzipEven(low, high) + VectorShuffle.UnzipOdd(low, high);
     }
-
-    private static readonly Vector128<ushort> EvenLanes = Vector128.Create((ushort)0, 2, 4, 6, 255, 255, 255, 255);
-    private static readonly Vector128<ushort> OddLanes = Vector128.Create((ushort)1, 3, 5, 7, 255, 255, 255, 255);
 
     /// <summary>One chroma output group (four samples): <c>ClipUv(kr * r + kg * g + kb * b)</c> over the low or high four of the 2x2 sums.</summary>
     private static Vector128<int> ChromaGroup(Vector128<ushort> rs, Vector128<ushort> gs, Vector128<ushort> bs, bool upper, int kr, int kg, int kb)

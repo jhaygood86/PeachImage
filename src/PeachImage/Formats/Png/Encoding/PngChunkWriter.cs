@@ -21,12 +21,10 @@ internal static class PngChunkWriter
         var crc = new System.IO.Hashing.Crc32();
         crc.Append(lengthAndType[4..]);
         crc.Append(data);
-        Span<byte> crcBytes = stackalloc byte[4];
-        crc.GetCurrentHash(crcBytes);
 
-        // System.IO.Hashing.Crc32 writes its hash little-endian; PNG's on-disk CRC field is big-endian.
+        // PNG's on-disk CRC field is big-endian.
         Span<byte> crcOnDisk = stackalloc byte[4];
-        BinaryPrimitives.WriteUInt32BigEndian(crcOnDisk, BinaryPrimitives.ReadUInt32LittleEndian(crcBytes));
+        BinaryPrimitives.WriteUInt32BigEndian(crcOnDisk, crc.GetCurrentHashAsUInt32());
         stream.Write(crcOnDisk);
     }
 }

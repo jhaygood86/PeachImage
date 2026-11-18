@@ -303,7 +303,7 @@ internal sealed class Vector128ColorConverter : IColorConverter
         return Vector128.ConvertToSingle(uintVec);
     }
 
-    private static Vector128<int> ToRoundedInt(Vector128<float> value) => Vector128.ConvertToInt32(value + RoundingBias);
+    private static Vector128<int> ToRoundedInt(Vector128<float> value) => Vector128.ConvertToInt32Native(value + RoundingBias);
 
     /// <summary>
     /// Rounds <paramref name="value"/> and writes the <see cref="Lanes"/> resulting bytes into

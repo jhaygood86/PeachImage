@@ -40,7 +40,7 @@ internal sealed class Vector256Av1QuantizeKernel : IAv1QuantizeKernel
                 firstRecip[lane] = acReciprocal;
             }
 
-            QuantizeChunk(coeff, levelsOut, 0, Vector256.Create((ReadOnlySpan<double>)firstRecip));
+            QuantizeChunk(coeff, levelsOut, 0, Vector256.Create(firstRecip));
             i = Lanes;
         }
 

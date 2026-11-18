@@ -1,3 +1,4 @@
+using PeachImage.Formats.Shared.Vectors;
 using PeachImage.Formats.Webp.Decoding.Vp8;
 using PeachImage.Formats.Webp.Decoding.Vp8.Dct;
 using PeachImage.Formats.Webp.Encoding.Vp8;
@@ -17,7 +18,7 @@ public class Vp8ForwardDctVectorTests
     [InlineData(5, 3)]
     public void VectorForwardDct_MatchesScalar(int seed, int pattern)
     {
-        Assert.SkipUnless(Vp8Interleave.IsSupported, "No two-vector interleave is available here.");
+        Assert.SkipUnless(VectorShuffle.IsSupported, "No two-vector interleave is available here.");
 
         var rng = new Random(seed);
         for (int iteration = 0; iteration < 2000; iteration++)

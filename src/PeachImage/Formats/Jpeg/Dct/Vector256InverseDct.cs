@@ -68,7 +68,7 @@ internal sealed class Vector256InverseDct : IInverseDctKernel
                 row[u] = (float)(normalization[u] * Math.Cos((((2 * x) + 1) * u * Math.PI) / 16.0));
             }
 
-            rows[x] = Vector256.Create((ReadOnlySpan<float>)row);
+            rows[x] = Vector256.Create(row);
         }
 
         return rows;

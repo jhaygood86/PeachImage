@@ -257,7 +257,7 @@ internal sealed class Vector256ColorConverter : IColorConverter
         return Vector256.ConvertToSingle(Vector256.Create(uintLower, uintUpper));
     }
 
-    private static Vector256<int> ToRoundedInt(Vector256<float> value) => Vector256.ConvertToInt32(value + RoundingBias);
+    private static Vector256<int> ToRoundedInt(Vector256<float> value) => Vector256.ConvertToInt32Native(value + RoundingBias);
 
     /// <summary>Rounds <paramref name="value"/>'s <see cref="Lanes"/> lanes down to a <see cref="Vector64{Byte}"/> (int-&gt;uint-&gt;ushort-&gt;byte narrow, no scalar casts) — the same chain <see cref="StoreRounded"/>'s planar fast path uses.</summary>
     private static Vector64<byte> NarrowRounded(Vector256<float> value)

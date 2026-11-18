@@ -1,6 +1,6 @@
 using System.Buffers.Binary;
+using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Runtime.Intrinsics.X86;
 
 namespace PeachImage.Formats.Avif.Encoder.Av1;
 
@@ -249,72 +249,30 @@ internal sealed class Av1IntrabcHashTable
 }
 
 /// <summary>
-/// Real CRC32C (Castagnoli, polynomial <c>0x82f63b78</c> reversed), ported from libaom's own
-/// <c>av1_crc32c_calculator_init</c>/<c>av1_get_crc32c_value_c</c> (<c>av1/encoder/hash.c</c>) -- the
-/// single-table, byte-at-a-time reference form (libaom's own 8-way-sliced fast path, also in that file,
-/// produces bit-identical results, just faster; this project has no need for that speed). Used only by
-/// <see cref="Av1IntrabcHashTable"/> to combine sub-block hashes -- not a general-purpose CRC utility.
+/// Real CRC32C (Castagnoli, polynomial <c>0x82f63b78</c> reversed), matching libaom's
+/// <c>av1_get_crc32c_value_c</c> (<c>av1/encoder/hash.c</c>). Used only by <see cref="Av1IntrabcHashTable"/> to
+/// combine sub-block hashes -- not a general-purpose CRC utility.
 /// </summary>
+/// <remarks>
+/// <see cref="BitOperations.Crc32C(uint, ulong)"/> is the same reflected-in/reflected-out algorithm, on SSE4.2's or
+/// Arm's <c>crc32c</c> instruction where available and in software otherwise, so consuming 8 bytes at a time is
+/// bit-identical to the byte-at-a-time reference (this class's real inputs are always 16 bytes; see
+/// <c>Av1IntrabcHashTable.ComputeLevel</c>).
+/// </remarks>
 internal static class Av1IntrabcCrc32C
 {
-    private const uint Polynomial = 0x82f63b78u;
-
-    private static readonly uint[] Table = BuildTable();
-
-    private static uint[] BuildTable()
-    {
-        var table = new uint[256];
-        for (uint n = 0; n < 256; n++)
-        {
-            uint crc = n;
-            for (int k = 0; k < 8; k++)
-            {
-                crc = (crc & 1) != 0 ? (crc >> 1) ^ Polynomial : crc >> 1;
-            }
-
-            table[n] = crc;
-        }
-
-        return table;
-    }
-
     public static uint Compute(ReadOnlySpan<byte> data)
     {
         uint crc = 0xFFFFFFFFu;
-
-        // Hardware CRC32C (SSE4.2's `crc32` instruction, available on effectively every AVX2-capable x86-64
-        // CPU) implements exactly this same reflected-in/reflected-out, poly-0x82f63b78 algorithm natively --
-        // it's the instruction real-world CRC-32C (iSCSI, ext4, this class's own check-value test) is defined
-        // against, so consuming 8 (then 4, then 1) bytes at a time this way is bit-identical to the scalar
-        // table loop below, just far fewer iterations for this class's always-16-byte real inputs (see
-        // Av1IntrabcHashTable.ComputeLevel). Falls back to the portable table loop on non-x86/older hardware.
         int i = 0;
-        if (Sse42.X64.IsSupported)
+        for (; i + 8 <= data.Length; i += 8)
         {
-            for (; i + 8 <= data.Length; i += 8)
-            {
-                crc = (uint)Sse42.X64.Crc32(crc, BinaryPrimitives.ReadUInt64LittleEndian(data[i..]));
-            }
-        }
-
-        if (Sse42.IsSupported)
-        {
-            for (; i + 4 <= data.Length; i += 4)
-            {
-                crc = Sse42.Crc32(crc, BinaryPrimitives.ReadUInt32LittleEndian(data[i..]));
-            }
-
-            for (; i < data.Length; i++)
-            {
-                crc = Sse42.Crc32(crc, data[i]);
-            }
-
-            return crc ^ 0xFFFFFFFFu;
+            crc = BitOperations.Crc32C(crc, BinaryPrimitives.ReadUInt64LittleEndian(data[i..]));
         }
 
         for (; i < data.Length; i++)
         {
-            crc = Table[(byte)(crc ^ data[i])] ^ (crc >> 8);
+            crc = BitOperations.Crc32C(crc, data[i]);
         }
 
         return crc ^ 0xFFFFFFFFu;

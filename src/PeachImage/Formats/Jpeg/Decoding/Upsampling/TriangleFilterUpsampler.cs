@@ -27,7 +27,6 @@ namespace PeachImage.Formats.Jpeg.Decoding.Upsampling;
 internal sealed class TriangleFilterUpsampler : IChromaUpsampler
 {
     private static readonly NearestNeighborUpsampler Fallback = new();
-    private static readonly Vector128<byte> InterleaveMask = Vector128.Create((byte)0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15);
     private static readonly Vector128<ushort> Eight = Vector128.Create((ushort)8);
 
     public void Upsample(
@@ -153,12 +152,10 @@ internal sealed class TriangleFilterUpsampler : IChromaUpsampler
             var leftBlend = Vector128.ShiftRightLogical(centerTimes3 + left + Eight, 4);
             var rightBlend = Vector128.ShiftRightLogical(centerTimes3 + right + Eight, 4);
 
-            // Narrow packs [leftBlend0..7, rightBlend0..7] into one 16-byte vector; Shuffle interleaves that
-            // into actual output order [left0,right0,left1,right1,...] — dst[2c]=leftBlend[c] (uses the
-            // column to c's left), dst[2c+1]=rightBlend[c] (uses the column to c's right).
-            var combined = Vector128.Narrow(leftBlend, rightBlend);
-            var interleaved = Vector128.Shuffle(combined, InterleaveMask);
-            interleaved.StoreUnsafe(ref dstRow[c * 2]);
+            // Output order is [left0,right0,left1,right1,...]: dst[2c]=leftBlend[c] (uses the column to c's left),
+            // dst[2c+1]=rightBlend[c] (uses the column to c's right). Both are at most 255, so putting rightBlend in
+            // each 16-bit lane's high byte lays the bytes out in exactly that order.
+            (leftBlend | (rightBlend << 8)).AsByte().StoreUnsafe(ref dstRow[c * 2]);
         }
 
         for (; c < sourceWidth; c++)
