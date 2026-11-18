@@ -20,6 +20,8 @@ internal sealed class Vector128ColorConverter : IColorConverter
     private static readonly Vector128<float> V1_402 = Vector128.Create(1.402f);
     private static readonly Vector128<float> V0_344136 = Vector128.Create(0.344136f);
     private static readonly Vector128<float> V0_714136 = Vector128.Create(0.714136f);
+    private static readonly Vector128<float> VNeg0_344136 = Vector128.Create(-0.344136f);
+    private static readonly Vector128<float> VNeg0_714136 = Vector128.Create(-0.714136f);
     private static readonly Vector128<float> V1_772 = Vector128.Create(1.772f);
     private static readonly Vector128<float> V128 = Vector128.Create(128f);
     private static readonly Vector128<float> VZero = Vector128<float>.Zero;
@@ -50,9 +52,9 @@ internal sealed class Vector128ColorConverter : IColorConverter
             var cbv = LoadWidened(cb, i) - V128;
             var crv = LoadWidened(cr, i) - V128;
 
-            StoreRounded(Clamp(yv + (V1_402 * crv)), rgb, (i * 3) + 0, 3);
-            StoreRounded(Clamp(yv - (V0_344136 * cbv) - (V0_714136 * crv)), rgb, (i * 3) + 1, 3);
-            StoreRounded(Clamp(yv + (V1_772 * cbv)), rgb, (i * 3) + 2, 3);
+            StoreRounded(Clamp(Vector128.MultiplyAddEstimate(V1_402, crv, yv)), rgb, (i * 3) + 0, 3);
+            StoreRounded(Clamp(Vector128.MultiplyAddEstimate(VNeg0_714136, crv, Vector128.MultiplyAddEstimate(VNeg0_344136, cbv, yv))), rgb, (i * 3) + 1, 3);
+            StoreRounded(Clamp(Vector128.MultiplyAddEstimate(V1_772, cbv, yv)), rgb, (i * 3) + 2, 3);
         }
 
         for (; i < pixelCount; i++)
@@ -83,9 +85,9 @@ internal sealed class Vector128ColorConverter : IColorConverter
             var cbv = LoadWidened(cb, i) - V128;
             var crv = LoadWidened(cr, i) - V128;
 
-            var rv = Clamp(yv + (V1_402 * crv));
-            var gv = Clamp(yv - (V0_344136 * cbv) - (V0_714136 * crv));
-            var bv = Clamp(yv + (V1_772 * cbv));
+            var rv = Clamp(Vector128.MultiplyAddEstimate(V1_402, crv, yv));
+            var gv = Clamp(Vector128.MultiplyAddEstimate(VNeg0_714136, crv, Vector128.MultiplyAddEstimate(VNeg0_344136, cbv, yv)));
+            var bv = Clamp(Vector128.MultiplyAddEstimate(V1_772, cbv, yv));
 
             // Round R/G/B first, then invert — see Vector256ColorConverter.YcckToCmyk's remarks.
             StoreRounded(rv, cmyk, (i * 4) + 0, 4, invert: true);
@@ -186,11 +188,11 @@ internal sealed class Vector128ColorConverter : IColorConverter
         cb0 -= V128; cb1 -= V128; cb2 -= V128; cb3 -= V128;
         cr0 -= V128; cr1 -= V128; cr2 -= V128; cr3 -= V128;
 
-        r = Pack(Clamp(y0 + (V1_402 * cr0)), Clamp(y1 + (V1_402 * cr1)), Clamp(y2 + (V1_402 * cr2)), Clamp(y3 + (V1_402 * cr3)));
+        r = Pack(Clamp(Vector128.MultiplyAddEstimate(V1_402, cr0, y0)), Clamp(Vector128.MultiplyAddEstimate(V1_402, cr1, y1)), Clamp(Vector128.MultiplyAddEstimate(V1_402, cr2, y2)), Clamp(Vector128.MultiplyAddEstimate(V1_402, cr3, y3)));
         g = Pack(
-            Clamp(y0 - (V0_344136 * cb0) - (V0_714136 * cr0)), Clamp(y1 - (V0_344136 * cb1) - (V0_714136 * cr1)),
-            Clamp(y2 - (V0_344136 * cb2) - (V0_714136 * cr2)), Clamp(y3 - (V0_344136 * cb3) - (V0_714136 * cr3)));
-        b = Pack(Clamp(y0 + (V1_772 * cb0)), Clamp(y1 + (V1_772 * cb1)), Clamp(y2 + (V1_772 * cb2)), Clamp(y3 + (V1_772 * cb3)));
+            Clamp(Vector128.MultiplyAddEstimate(VNeg0_714136, cr0, Vector128.MultiplyAddEstimate(VNeg0_344136, cb0, y0))), Clamp(Vector128.MultiplyAddEstimate(VNeg0_714136, cr1, Vector128.MultiplyAddEstimate(VNeg0_344136, cb1, y1))),
+            Clamp(Vector128.MultiplyAddEstimate(VNeg0_714136, cr2, Vector128.MultiplyAddEstimate(VNeg0_344136, cb2, y2))), Clamp(Vector128.MultiplyAddEstimate(VNeg0_714136, cr3, Vector128.MultiplyAddEstimate(VNeg0_344136, cb3, y3))));
+        b = Pack(Clamp(Vector128.MultiplyAddEstimate(V1_772, cb0, y0)), Clamp(Vector128.MultiplyAddEstimate(V1_772, cb1, y1)), Clamp(Vector128.MultiplyAddEstimate(V1_772, cb2, y2)), Clamp(Vector128.MultiplyAddEstimate(V1_772, cb3, y3)));
     }
 
     /// <summary>

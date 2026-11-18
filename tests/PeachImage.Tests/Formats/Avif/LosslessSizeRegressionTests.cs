@@ -160,11 +160,8 @@ public class LosslessSizeRegressionTests
     /// before -> confirmed net10.0 4.67 after / 5.00 before, threshold 4.85); 512x512 (4.07 after / 4.32
     /// before -> est. net10.0 4.31 after / 4.58 before, threshold 4.45) -- biased toward the after-fix side
     /// for headroom against further legitimate runtime-specific PNG-compression drift, while staying
-    /// meaningfully below the before-fix (net10.0) ratio at every size so a real regression is still caught
-    /// on at least the net10.0 leg of this multi-targeted test suite (net8.0's own before-fix ratios, being
-    /// lower to start with, no longer independently exceed these net10.0-calibrated thresholds -- a real
-    /// regression would still fail CI overall via net10.0, just not be independently visible on net8.0
-    /// alone).</para>
+    /// meaningfully below the before-fix (net10.0) ratio at every size so a real regression is still caught.
+    /// net8.0 is no longer targeted; its figures are kept below only as the calibration history.</para>
     ///
     /// <para>256x256's threshold was bumped again (4.85 -> 5.0) once lossless switched to 128x128
     /// superblocks (matching libaom's own default for non-tiny images, spec's use_128x128_superblock):

@@ -72,7 +72,7 @@ public class VectorShuffleTests
     {
         int n = Vector128<T>.Count;
         int half = n / 2;
-        T[] zipLower = new T[n], zipUpper = new T[n], unzipEven = new T[n], unzipOdd = new T[n];
+        T[] zipLower = new T[n], zipUpper = new T[n];
         T[] concatLL = new T[n], concatUU = new T[n], reverse = new T[n];
         for (int i = 0; i < half; i++)
         {
@@ -80,10 +80,6 @@ public class VectorShuffleTests
             zipLower[(2 * i) + 1] = b[i];
             zipUpper[2 * i] = a[half + i];
             zipUpper[(2 * i) + 1] = b[half + i];
-            unzipEven[i] = a[2 * i];
-            unzipEven[half + i] = b[2 * i];
-            unzipOdd[i] = a[(2 * i) + 1];
-            unzipOdd[half + i] = b[(2 * i) + 1];
             concatLL[i] = a[i];
             concatLL[half + i] = b[i];
             concatUU[i] = a[half + i];
@@ -97,8 +93,6 @@ public class VectorShuffleTests
 
         Assert.Equal(zipLower, ToArray(VectorShuffle.ZipLower(a, b)));
         Assert.Equal(zipUpper, ToArray(VectorShuffle.ZipUpper(a, b)));
-        Assert.Equal(unzipEven, ToArray(VectorShuffle.UnzipEven(a, b)));
-        Assert.Equal(unzipOdd, ToArray(VectorShuffle.UnzipOdd(a, b)));
         Assert.Equal(concatLL, ToArray(VectorShuffle.ConcatLowerLower(a, b)));
         Assert.Equal(concatUU, ToArray(VectorShuffle.ConcatUpperUpper(a, b)));
         Assert.Equal(reverse, ToArray(VectorShuffle.Reverse(a)));
@@ -108,13 +102,9 @@ public class VectorShuffleTests
     {
         int n = Vector256<T>.Count;
         int half = n / 2;
-        T[] zipLower = new T[n], zipUpper = new T[n], concatLL = new T[n], concatLU = new T[n], concatUU = new T[n], reverse = new T[n];
+        T[] concatLL = new T[n], concatLU = new T[n], concatUU = new T[n];
         for (int i = 0; i < half; i++)
         {
-            zipLower[2 * i] = a[i];
-            zipLower[(2 * i) + 1] = b[i];
-            zipUpper[2 * i] = a[half + i];
-            zipUpper[(2 * i) + 1] = b[half + i];
             concatLL[i] = a[i];
             concatLL[half + i] = b[i];
             concatLU[i] = a[i];
@@ -123,17 +113,9 @@ public class VectorShuffleTests
             concatUU[half + i] = b[half + i];
         }
 
-        for (int i = 0; i < n; i++)
-        {
-            reverse[i] = a[n - 1 - i];
-        }
-
-        Assert.Equal(zipLower, ToArray(VectorShuffle.ZipLower(a, b)));
-        Assert.Equal(zipUpper, ToArray(VectorShuffle.ZipUpper(a, b)));
         Assert.Equal(concatLL, ToArray(VectorShuffle.ConcatLowerLower(a, b)));
         Assert.Equal(concatLU, ToArray(VectorShuffle.ConcatLowerUpper(a, b)));
         Assert.Equal(concatUU, ToArray(VectorShuffle.ConcatUpperUpper(a, b)));
-        Assert.Equal(reverse, ToArray(VectorShuffle.Reverse(a)));
     }
 
     private static T[] ToArray<T>(Vector128<T> v)

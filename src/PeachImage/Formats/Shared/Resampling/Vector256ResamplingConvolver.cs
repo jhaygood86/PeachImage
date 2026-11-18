@@ -56,7 +56,7 @@ internal sealed class Vector256ResamplingConvolver : IResamplingConvolver
         {
             var s = Vector256.LoadUnsafe(ref MemoryMarshal.GetReference(source.Slice(i, 8)));
             var a = Vector256.LoadUnsafe(ref MemoryMarshal.GetReference(accumulator.Slice(i, 8)));
-            (a + (s * weightVec)).StoreUnsafe(ref accumulator[i]);
+            Vector256.MultiplyAddEstimate(s, weightVec, a).StoreUnsafe(ref accumulator[i]);
         }
 
         for (; i < source.Length; i++)
