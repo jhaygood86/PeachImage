@@ -4,7 +4,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsPackable>true</IsPackable>
     <PackageId>PeachImage</PackageId>
-    <Version>0.7.4</Version>
+    <Version>0.8.0</Version>
     <PackageReleaseNotes>See https://github.com/jhaygood86/PeachImage/releases for release notes.</PackageReleaseNotes>
     <RootNamespace>PeachImage</RootNamespace>
     <AssemblyName>PeachImage</AssemblyName>
@@ -34,8 +34,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.IO.Hashing" Version="10.0.12" />
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.401" PrivateAssets="All" />
+    <PackageReference Include="System.IO.Hashing" Version="11.0.0" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="11.0.100" PrivateAssets="All" />
   </ItemGroup>
 
 </Project>

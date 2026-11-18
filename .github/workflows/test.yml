@@ -24,8 +24,8 @@ jobs:
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: |
-          8.0.x
           10.0.x
+          11.0.x
         cache: true
         cache-dependency-path: tests/PeachImage.Tests/PeachImage.Tests.csproj
 
@@ -55,7 +55,7 @@ jobs:
         key: corpus-v1
         enableCrossOsArchive: true
 
-    # The fast lane's tests never touch tests/corpus, so net8.0/net10.0 can run genuinely in parallel here
+    # The fast lane's tests never touch tests/corpus, so net10.0/net11.0 can run genuinely in parallel here
     # (TestTfmsInParallel is left at its csproj default of false project-wide specifically to avoid two TFM
     # processes racing to fetch the corpus concurrently on a cold cache -- see PeachImage.Tests.csproj -- but
     # that race can't happen in a lane that excludes every corpus-tagged test). The corpus lane still needs

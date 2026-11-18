@@ -72,7 +72,7 @@ internal static class Vp8IntraPredictionWholeBlock
     }
 
     /// <summary>Throws unless the <paramref name="size"/> x <paramref name="size"/> block at <paramref name="origin"/>, plus the neighbours the prediction reads, lie inside <paramref name="plane"/>.</summary>
-    private static void CheckBlock(Span<byte> plane, int origin, int stride, int size, bool readsAbove, bool readsLeft)
+    private static void CheckBlock(ReadOnlySpan<byte> plane, int origin, int stride, int size, bool readsAbove, bool readsLeft)
     {
         long lowest = origin - (readsAbove ? stride : 0) - (readsLeft ? 1 : 0);
         long end = origin + ((size - 1L) * stride) + size;

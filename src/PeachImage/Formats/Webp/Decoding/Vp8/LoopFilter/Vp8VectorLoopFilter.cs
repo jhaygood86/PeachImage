@@ -355,7 +355,7 @@ internal static class Vp8VectorLoopFilter
     /// together: byte interleaves pair adjacent rows, 16-bit interleaves group them into fours, and 32-bit
     /// interleaves complete the eight, at which point each 64-bit half of a vector is one whole tap column.
     /// </remarks>
-    private static void Transpose16x8(Span<byte> plane, int first, int stride, Span<Vector128<byte>> taps)
+    private static void Transpose16x8(ReadOnlySpan<byte> plane, int first, int stride, Span<Vector128<byte>> taps)
     {
         var (v0, v1, v2, v3) = TransposeEightRows(plane, first, stride);
         var (w0, w1, w2, w3) = TransposeEightRows(plane, first + (8 * stride), stride);
@@ -372,7 +372,7 @@ internal static class Vp8VectorLoopFilter
 
     /// <summary>Transposes eight rows of <see cref="Taps"/> bytes; each returned vector holds two tap columns, low half then high.</summary>
     private static (Vector128<byte> C01, Vector128<byte> C23, Vector128<byte> C45, Vector128<byte> C67) TransposeEightRows(
-        Span<byte> plane, int first, int stride)
+        ReadOnlySpan<byte> plane, int first, int stride)
     {
         var t0 = Vp8Interleave.UnpackLow(LoadRow(plane, first), LoadRow(plane, first + stride));
         var t1 = Vp8Interleave.UnpackLow(LoadRow(plane, first + (2 * stride)), LoadRow(plane, first + (3 * stride)));
@@ -424,7 +424,7 @@ internal static class Vp8VectorLoopFilter
     }
 
     /// <summary>Reads one lane's <see cref="Taps"/> taps into the low half of a vector; the high half is unused by the interleave ladder.</summary>
-    private static Vector128<byte> LoadRow(Span<byte> plane, int offset) =>
+    private static Vector128<byte> LoadRow(ReadOnlySpan<byte> plane, int offset) =>
         Vector128.CreateScalar(BinaryPrimitives.ReadUInt64LittleEndian(plane.Slice(offset, Taps))).AsByte();
 
     /// <summary>Writes the two lanes packed into <paramref name="rows"/> back to consecutive strided rows.</summary>
@@ -545,17 +545,17 @@ internal static class Vp8VectorLoopFilter
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector128<short> ShiftRight3(Vector128<short> v) => Vector128.ShiftRightArithmetic(v, 3);
 
-    private static Vector128<byte> Load(Span<byte> plane, int offset) =>
-        Vector128.LoadUnsafe(ref plane[offset]);
+    private static Vector128<byte> Load(ReadOnlySpan<byte> plane, int offset) =>
+        Vector128.LoadUnsafe(in plane[offset]);
 
     private static Vector128<short> Lower(Vector128<byte> v) => Vector128.WidenLower(v).AsInt16();
 
     /// <summary>Reads one chroma tap row — <see cref="ChromaLanes"/> contiguous bytes — widened to 16-bit lanes.</summary>
-    private static Vector128<short> LoadChromaRow(Span<byte> plane, int offset) =>
+    private static Vector128<short> LoadChromaRow(ReadOnlySpan<byte> plane, int offset) =>
         Lower(Vector128.CreateScalar(BinaryPrimitives.ReadUInt64LittleEndian(plane.Slice(offset, ChromaLanes))).AsByte());
 
     /// <summary>Widens <see cref="ChromaLanes"/> bytes held in a half-vector to 16-bit lanes.</summary>
-    private static Vector128<byte> LoadChromaBytes(Span<byte> plane, int offset) =>
+    private static Vector128<byte> LoadChromaBytes(ReadOnlySpan<byte> plane, int offset) =>
         Vector128.CreateScalar(BinaryPrimitives.ReadUInt64LittleEndian(plane.Slice(offset, ChromaLanes))).AsByte();
 
     private static void StoreChromaBytes(Span<byte> plane, int offset, Vector128<byte> lane) =>
