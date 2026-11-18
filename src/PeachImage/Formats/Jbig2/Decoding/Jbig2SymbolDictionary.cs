@@ -65,6 +65,12 @@ internal static class Jbig2SymbolDictionaryDecoder
             throw new Jbig2DecodingException("JBIG2 symbol dictionary declares too many symbols.");
         }
 
+        // Only input and new symbols can be exported; checking here also keeps a corrupt count from sizing the export list.
+        if (p.ExportedCount > total)
+        {
+            throw new Jbig2DecodingException("JBIG2 symbol dictionary exports more symbols than it has.");
+        }
+
         var symbols = new Jbig2Bitmap[total];
         for (int i = 0; i < inputCount; i++)
         {
