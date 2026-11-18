@@ -42,7 +42,7 @@ internal static class JxlSampleConversion
             for (; i <= source.Length - Vector<float>.Count; i += Vector<float>.Count)
             {
                 var v = Vector.Min(Vector.Max((new Vector<float>(source[i..]) * m) + half, zero), m + half);
-                Vector.ConvertToInt32(v).CopyTo(destination[i..]);
+                Vector.ConvertToInt32Native(v).CopyTo(destination[i..]);
             }
         }
 

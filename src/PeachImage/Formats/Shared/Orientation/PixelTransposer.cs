@@ -1,5 +1,6 @@
 ﻿using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using PeachImage.Formats.Shared.Vectors;
 
 namespace PeachImage.Formats.Shared.Orientation;
 
@@ -76,7 +77,7 @@ internal static unsafe class PixelTransposer
 
     private static void RunWords(uint* src, uint* dst, int width, int height, int stepX, int stepY, int origin)
     {
-        bool vectorize = Vector128.IsHardwareAccelerated;
+        bool vectorize = VectorShuffle.IsSupported;
         for (int ty = 0; ty < height; ty += TileSize)
         {
             int yEnd = Math.Min(ty + TileSize, height);
@@ -152,20 +153,16 @@ internal static unsafe class PixelTransposer
             lowest = dstColumn0 - (y + 3);
         }
 
-        var even = Vector128.Create(uint.MaxValue, 0, uint.MaxValue, 0);
-        var low = Vector128.Create(uint.MaxValue, uint.MaxValue, 0, 0);
+        // Interleave row pairs as 32-bit elements, then the results as 64-bit elements.
+        var lo01 = VectorShuffle.ZipLower(r0, r1).AsUInt64();
+        var hi01 = VectorShuffle.ZipUpper(r0, r1).AsUInt64();
+        var lo23 = VectorShuffle.ZipLower(r2, r3).AsUInt64();
+        var hi23 = VectorShuffle.ZipUpper(r2, r3).AsUInt64();
 
-        // Swap the off-diagonal elements of each 2x2 sub-block...
-        var a0 = Vector128.ConditionalSelect(even, r0, Vector128.Shuffle(r1, Vector128.Create(0u, 0, 2, 2)));
-        var a1 = Vector128.ConditionalSelect(even, Vector128.Shuffle(r0, Vector128.Create(1u, 1, 3, 3)), r1);
-        var b0 = Vector128.ConditionalSelect(even, r2, Vector128.Shuffle(r3, Vector128.Create(0u, 0, 2, 2)));
-        var b1 = Vector128.ConditionalSelect(even, Vector128.Shuffle(r2, Vector128.Create(1u, 1, 3, 3)), r3);
-
-        // ...then swap the off-diagonal 2x2 sub-blocks.
-        Vector128.ConditionalSelect(low, a0, Vector128.Shuffle(b0, Vector128.Create(0u, 1, 0, 1))).Store(lowest);
-        Vector128.ConditionalSelect(low, a1, Vector128.Shuffle(b1, Vector128.Create(0u, 1, 0, 1))).Store(lowest + stepX);
-        Vector128.ConditionalSelect(low, Vector128.Shuffle(a0, Vector128.Create(2u, 3, 2, 3)), b0).Store(lowest + (2 * stepX));
-        Vector128.ConditionalSelect(low, Vector128.Shuffle(a1, Vector128.Create(2u, 3, 2, 3)), b1).Store(lowest + (3 * stepX));
+        VectorShuffle.ZipLower(lo01, lo23).AsUInt32().Store(lowest);
+        VectorShuffle.ZipUpper(lo01, lo23).AsUInt32().Store(lowest + stepX);
+        VectorShuffle.ZipLower(hi01, hi23).AsUInt32().Store(lowest + (2 * stepX));
+        VectorShuffle.ZipUpper(hi01, hi23).AsUInt32().Store(lowest + (3 * stepX));
     }
 
     private static void TransposeInPlaceTiled<T>(T* data, int size, int tile)

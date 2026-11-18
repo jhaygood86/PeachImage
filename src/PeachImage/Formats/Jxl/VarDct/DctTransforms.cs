@@ -350,7 +350,7 @@ internal static class DctTransforms
         }
     }
 
-    private static void Identity(Span<float> coefficients, Span<float> pixels, int stride)
+    private static void Identity(ReadOnlySpan<float> coefficients, Span<float> pixels, int stride)
     {
         float block00 = coefficients[0];
         float block01 = coefficients[1];
@@ -445,7 +445,7 @@ internal static class DctTransforms
         }
     }
 
-    private static void AfvTransformToPixels(int kind, Span<float> coefficients, Span<float> pixels, int stride, Span<float> scratch)
+    private static void AfvTransformToPixels(int kind, ReadOnlySpan<float> coefficients, Span<float> pixels, int stride, Span<float> scratch)
     {
         int afvX = kind & 1;
         int afvY = kind / 2;

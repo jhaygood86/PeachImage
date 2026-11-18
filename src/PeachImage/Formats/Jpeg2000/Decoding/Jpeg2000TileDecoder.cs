@@ -1,5 +1,6 @@
 using System.Buffers;
 using PeachImage.Formats.Jpeg2000.Internal;
+using PeachImage.Formats.Shared.Arithmetic;
 using PeachImage.Formats.Shared.Parallelism;
 
 namespace PeachImage.Formats.Jpeg2000.Decoding;
@@ -359,8 +360,8 @@ internal sealed class J2kTileDecoder : IDisposable
             return false;
         }
 
-        long px = (CeilDivLong(x, (long)info.XRsiz << levelNo) >> ppx) - (res.X0 >> ppx);
-        long py = (CeilDivLong(y, (long)info.YRsiz << levelNo) >> ppy) - (res.Y0 >> ppy);
+        long px = (IntMath.CeilDiv(x, (long)info.XRsiz << levelNo) >> ppx) - (res.X0 >> ppx);
+        long py = (IntMath.CeilDiv(y, (long)info.YRsiz << levelNo) >> ppy) - (res.Y0 >> ppy);
         if (px < 0 || py < 0 || px >= res.PrecinctsWide || py >= res.PrecinctsHigh)
         {
             return false;
@@ -370,7 +371,6 @@ internal sealed class J2kTileDecoder : IDisposable
         return true;
     }
 
-    private static long CeilDivLong(long a, long b) => (a + b - 1) / b;
 
     // ------------------------------------------------------------------ packets
 

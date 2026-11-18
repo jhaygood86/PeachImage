@@ -24,6 +24,8 @@ internal sealed class Vector256ColorConverter : IColorConverter
     private static readonly Vector256<float> V1_402 = Vector256.Create(1.402f);
     private static readonly Vector256<float> V0_344136 = Vector256.Create(0.344136f);
     private static readonly Vector256<float> V0_714136 = Vector256.Create(0.714136f);
+    private static readonly Vector256<float> VNeg0_344136 = Vector256.Create(-0.344136f);
+    private static readonly Vector256<float> VNeg0_714136 = Vector256.Create(-0.714136f);
     private static readonly Vector256<float> V1_772 = Vector256.Create(1.772f);
     private static readonly Vector256<float> V128 = Vector256.Create(128f);
     private static readonly Vector256<float> VZero = Vector256<float>.Zero;
@@ -110,14 +112,14 @@ internal sealed class Vector256ColorConverter : IColorConverter
                 var crHi = Avx.Subtract(Avx.ConvertToVector256Single(Avx2.ConvertToVector256Int32(pcr + i + 8)), V128);
 
                 var red = PackChannel(
-                    ClampRound(Avx.Add(yLo, Avx.Multiply(V1_402, crLo))),
-                    ClampRound(Avx.Add(yHi, Avx.Multiply(V1_402, crHi))));
+                    ClampRound(Vector256.MultiplyAddEstimate(V1_402, crLo, yLo)),
+                    ClampRound(Vector256.MultiplyAddEstimate(V1_402, crHi, yHi)));
                 var green = PackChannel(
-                    ClampRound(Avx.Subtract(Avx.Subtract(yLo, Avx.Multiply(V0_344136, cbLo)), Avx.Multiply(V0_714136, crLo))),
-                    ClampRound(Avx.Subtract(Avx.Subtract(yHi, Avx.Multiply(V0_344136, cbHi)), Avx.Multiply(V0_714136, crHi))));
+                    ClampRound(Vector256.MultiplyAddEstimate(VNeg0_714136, crLo, Vector256.MultiplyAddEstimate(VNeg0_344136, cbLo, yLo))),
+                    ClampRound(Vector256.MultiplyAddEstimate(VNeg0_714136, crHi, Vector256.MultiplyAddEstimate(VNeg0_344136, cbHi, yHi))));
                 var blue = PackChannel(
-                    ClampRound(Avx.Add(yLo, Avx.Multiply(V1_772, cbLo))),
-                    ClampRound(Avx.Add(yHi, Avx.Multiply(V1_772, cbHi))));
+                    ClampRound(Vector256.MultiplyAddEstimate(V1_772, cbLo, yLo)),
+                    ClampRound(Vector256.MultiplyAddEstimate(V1_772, cbHi, yHi)));
 
                 byte* dst = pd + (i * 3);
                 Sse2.Store(dst, Sse2.Or(Sse2.Or(Ssse3.Shuffle(red, r0), Ssse3.Shuffle(green, g0)), Ssse3.Shuffle(blue, b0)));
@@ -152,9 +154,9 @@ internal sealed class Vector256ColorConverter : IColorConverter
             var cbv = LoadWidened(cb, i) - V128;
             var crv = LoadWidened(cr, i) - V128;
 
-            var rv = Clamp(yv + (V1_402 * crv));
-            var gv = Clamp(yv - (V0_344136 * cbv) - (V0_714136 * crv));
-            var bv = Clamp(yv + (V1_772 * cbv));
+            var rv = Clamp(Vector256.MultiplyAddEstimate(V1_402, crv, yv));
+            var gv = Clamp(Vector256.MultiplyAddEstimate(VNeg0_714136, crv, Vector256.MultiplyAddEstimate(VNeg0_344136, cbv, yv)));
+            var bv = Clamp(Vector256.MultiplyAddEstimate(V1_772, cbv, yv));
 
             StoreInterleavedRgb(rv, gv, bv, rgb, i * 3);
         }
@@ -178,9 +180,9 @@ internal sealed class Vector256ColorConverter : IColorConverter
             var cbv = LoadWidened(cb, i) - V128;
             var crv = LoadWidened(cr, i) - V128;
 
-            var rv = Clamp(yv + (V1_402 * crv));
-            var gv = Clamp(yv - (V0_344136 * cbv) - (V0_714136 * crv));
-            var bv = Clamp(yv + (V1_772 * cbv));
+            var rv = Clamp(Vector256.MultiplyAddEstimate(V1_402, crv, yv));
+            var gv = Clamp(Vector256.MultiplyAddEstimate(VNeg0_714136, crv, Vector256.MultiplyAddEstimate(VNeg0_344136, cbv, yv)));
+            var bv = Clamp(Vector256.MultiplyAddEstimate(V1_772, cbv, yv));
 
             // Round R/G/B first (matching ScalarColorConverter's byte-then-invert order exactly), then
             // invert — inverting the float before rounding can round the other way at a half-integer
@@ -257,7 +259,7 @@ internal sealed class Vector256ColorConverter : IColorConverter
         return Vector256.ConvertToSingle(Vector256.Create(uintLower, uintUpper));
     }
 
-    private static Vector256<int> ToRoundedInt(Vector256<float> value) => Vector256.ConvertToInt32(value + RoundingBias);
+    private static Vector256<int> ToRoundedInt(Vector256<float> value) => Vector256.ConvertToInt32Native(value + RoundingBias);
 
     /// <summary>Rounds <paramref name="value"/>'s <see cref="Lanes"/> lanes down to a <see cref="Vector64{Byte}"/> (int-&gt;uint-&gt;ushort-&gt;byte narrow, no scalar casts) — the same chain <see cref="StoreRounded"/>'s planar fast path uses.</summary>
     private static Vector64<byte> NarrowRounded(Vector256<float> value)

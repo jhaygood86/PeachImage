@@ -49,7 +49,7 @@ internal static class VectorMath
         p = (p * g) + Vector<float>.One;
         p = (p * g) + Vector<float>.One;
 
-        var scale = Vector.AsVectorSingle(Vector.ShiftLeft(Vector.ConvertToInt32(n) + new Vector<int>(127), 23));
+        var scale = Vector.AsVectorSingle(Vector.ShiftLeft(Vector.ConvertToInt32Native(n) + new Vector<int>(127), 23));
         return p * scale;
     }
 

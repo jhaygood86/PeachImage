@@ -37,7 +37,7 @@ internal static class Vp8LoopFilterThresholds
     }
 
     /// <summary>High-edge-variance test (RFC 6386 section 15.3, libwebp's <c>Hev</c>).</summary>
-    public static bool Hev(Span<byte> p, int pos, int step, int thresh)
+    public static bool Hev(ReadOnlySpan<byte> p, int pos, int step, int thresh)
     {
         int p1 = p[pos - (2 * step)];
         int p0 = p[pos - step];
@@ -47,7 +47,7 @@ internal static class Vp8LoopFilterThresholds
     }
 
     /// <summary>Simple-filter edge gate (RFC 6386 section 15.2, libwebp's <c>NeedsFilter_C</c>).</summary>
-    public static bool NeedsFilter(Span<byte> p, int pos, int step, int t)
+    public static bool NeedsFilter(ReadOnlySpan<byte> p, int pos, int step, int t)
     {
         int p1 = p[pos - (2 * step)];
         int p0 = p[pos - step];
@@ -57,7 +57,7 @@ internal static class Vp8LoopFilterThresholds
     }
 
     /// <summary>Normal-filter edge gate (RFC 6386 section 15.3, libwebp's <c>NeedsFilter2_C</c>).</summary>
-    public static bool NeedsFilter2(Span<byte> p, int pos, int step, int t, int it)
+    public static bool NeedsFilter2(ReadOnlySpan<byte> p, int pos, int step, int t, int it)
     {
         int p3 = p[pos - (4 * step)];
         int p2 = p[pos - (3 * step)];

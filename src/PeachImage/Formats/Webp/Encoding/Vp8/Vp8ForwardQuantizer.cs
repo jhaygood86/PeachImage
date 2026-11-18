@@ -77,7 +77,7 @@ internal static class Vp8ForwardQuantizer
         var value = Vector128.WidenLower(coefficients);
         var sign = Vector128.ShiftRightArithmetic(value, 31);
         var magnitude = Vector128.Abs(value);
-        var level = Vector128.ConvertToInt32(Vector128.ConvertToSingle(magnitude + half) / divisor);
+        var level = Vector128.ConvertToInt32Native(Vector128.ConvertToSingle(magnitude + half) / divisor);
 
         // Reapply the sign: (level ^ sign) - sign negates exactly where sign is -1.
         return (level ^ sign) - sign;

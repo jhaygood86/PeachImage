@@ -1,4 +1,3 @@
-#if NET10_0_OR_GREATER
 using BenchmarkDotNet.Attributes;
 using PeachImage.Formats.Jpeg;
 using PeachImage.Formats.Png;
@@ -148,4 +147,3 @@ public class SimdCodecsDecodeBenchmarks
     [Benchmark(Baseline = true)] [BenchmarkCategory("WebP-Lossless-Alpha")]
     public int SimdCodecs_Webp_LosslessAlpha() => Simd(_webpLosslessAlpha);
 }
-#endif

@@ -1,18 +1,18 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using PeachImage.Formats.Shared.Vectors;
 
 namespace PeachImage.Formats.Shared.Orientation;
 
 /// <summary>
 /// Reverses the order of a run of whole pixels, the primitive behind horizontal mirroring (one row at a time) and a 180 degree
 /// rotation (the whole buffer at once, since reversing every pixel of a tightly packed image is exactly that rotation).
-/// Pixel sizes that divide 16 reverse a <see cref="Vector128{T}"/> at a time with a byte shuffle that reverses the pixels within
-/// the vector; 3-byte pixels use the same shuffle on 4-pixel groups; everything else, and any machine without
+/// Pixel sizes that divide 16 reverse a <see cref="Vector128{T}"/> at a time, reversing its elements at the pixel's width;
+/// 3-byte pixels use a byte shuffle on 4-pixel groups; everything else, and any machine without
 /// <see cref="Vector128.IsHardwareAccelerated"/>, takes the typed scalar loops.
 /// </summary>
 internal static unsafe class PixelReverser
 {
-    private static readonly Vector128<byte>[] PowerOfTwoMasks = BuildPowerOfTwoMasks();
-
     // Within a 16-byte vector holding 16/bpp pixels: output pixel p takes input pixel (16/bpp - 1 - p), keeping its bytes in order.
     private static readonly Vector128<byte> Mask3 = Vector128.Create(
         (byte)9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2, 12, 13, 14, 15);
@@ -73,10 +73,13 @@ internal static unsafe class PixelReverser
             return;
         }
 
-        var mask = PowerOfTwoMasks[bytesPerPixel];
-        for (int i = 0; i < vectors; i++)
+        switch (bytesPerPixel)
         {
-            Vector128.Shuffle(Vector128.Load(src + (i * 16)), mask).Store(dst + totalBytes - ((i + 1) * 16));
+            case 1: ReverseVectors<byte>(src, dst, vectors, totalBytes); break;
+            case 2: ReverseVectors<ushort>(src, dst, vectors, totalBytes); break;
+            case 4: ReverseVectors<uint>(src, dst, vectors, totalBytes); break;
+            case 8: ReverseVectors<ulong>(src, dst, vectors, totalBytes); break;
+            default: ReverseVectors<UInt128>(src, dst, vectors, totalBytes); break;
         }
 
         // The leftover pixels at the end of the source become the start of the destination.
@@ -94,20 +97,46 @@ internal static unsafe class PixelReverser
             return;
         }
 
-        var mask = PowerOfTwoMasks[bytesPerPixel];
+        switch (bytesPerPixel)
+        {
+            case 1: SwapReversedVectors<byte>(data, pairs, totalBytes); break;
+            case 2: SwapReversedVectors<ushort>(data, pairs, totalBytes); break;
+            case 4: SwapReversedVectors<uint>(data, pairs, totalBytes); break;
+            case 8: SwapReversedVectors<ulong>(data, pairs, totalBytes); break;
+            default: SwapReversedVectors<UInt128>(data, pairs, totalBytes); break;
+        }
+
+        int done = pairs * 16;
+        ReverseInPlaceScalar(data + done, (totalBytes - (2 * done)) / bytesPerPixel, bytesPerPixel);
+    }
+
+    // Writes source vector i, its T-sized pixels reversed, to the i-th vector from the end of dst.
+    private static void ReverseVectors<T>(byte* src, byte* dst, int vectors, int totalBytes)
+    {
+        for (int i = 0; i < vectors; i++)
+        {
+            ReversePixels<T>(Vector128.Load(src + (i * 16))).Store(dst + totalBytes - ((i + 1) * 16));
+        }
+    }
+
+    // Swaps the i-th vector from each end of data, reversing the T-sized pixels within each.
+    private static void SwapReversedVectors<T>(byte* data, int pairs, int totalBytes)
+    {
         for (int i = 0; i < pairs; i++)
         {
             byte* left = data + (i * 16);
             byte* right = data + totalBytes - ((i + 1) * 16);
             var l = Vector128.Load(left);
             var r = Vector128.Load(right);
-            Vector128.Shuffle(r, mask).Store(left);
-            Vector128.Shuffle(l, mask).Store(right);
+            ReversePixels<T>(r).Store(left);
+            ReversePixels<T>(l).Store(right);
         }
-
-        int done = pairs * 16;
-        ReverseInPlaceScalar(data + done, (totalBytes - (2 * done)) / bytesPerPixel, bytesPerPixel);
     }
+
+    // A 16-byte pixel fills the vector, so only the vector order reverses; smaller pixels reverse within it.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<byte> ReversePixels<T>(Vector128<byte> v) =>
+        typeof(T) == typeof(UInt128) ? v : VectorShuffle.Reverse(v.As<byte, T>()).AsByte();
 
     // 4 pixels (12 bytes) per step through a 16-byte shuffle. The vector's last 4 bytes are junk (or neighbours), so each step
     // handles them differently from the power-of-two path: see the comments in the two methods.
@@ -230,20 +259,4 @@ internal static unsafe class PixelReverser
         }
     }
 
-    private static Vector128<byte>[] BuildPowerOfTwoMasks()
-    {
-        var masks = new Vector128<byte>[17];
-        Span<byte> indices = stackalloc byte[16];
-        for (int bytesPerPixel = 1; bytesPerPixel <= 16; bytesPerPixel <<= 1)
-        {
-            for (int i = 0; i < 16; i++)
-            {
-                indices[i] = (byte)(16 - (bytesPerPixel * ((i / bytesPerPixel) + 1)) + (i % bytesPerPixel));
-            }
-
-            masks[bytesPerPixel] = Vector128.Create<byte>(indices);
-        }
-
-        return masks;
-    }
 }

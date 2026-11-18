@@ -229,7 +229,7 @@ internal static class ProgressiveScanEncoder
         FlushAcFirstEobRun(writer, emitSymbol, ref pendingEobRun, ref haveTrigger);
     }
 
-    private static bool EncodeAcFirstBlock(JpegEntropyWriter writer, Action<byte> emitSymbol, Span<short> block, int ss, int se, int al)
+    private static bool EncodeAcFirstBlock(JpegEntropyWriter writer, Action<byte> emitSymbol, ReadOnlySpan<short> block, int ss, int se, int al)
     {
         int r = 0;
         for (int k = ss; k <= se; k++)
@@ -378,7 +378,7 @@ internal static class ProgressiveScanEncoder
     private static bool EncodeAcRefineBlock(
         JpegEntropyWriter writer,
         Action<byte> emitSymbol,
-        Span<short> block,
+        ReadOnlySpan<short> block,
         int ss,
         int se,
         int ah,

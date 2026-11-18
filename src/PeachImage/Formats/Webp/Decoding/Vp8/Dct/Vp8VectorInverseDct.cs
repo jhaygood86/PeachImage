@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using PeachImage.Formats.Shared.Vectors;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8.Dct;
 
@@ -29,8 +30,8 @@ namespace PeachImage.Formats.Webp.Decoding.Vp8.Dct;
 /// </remarks>
 internal static class Vp8VectorInverseDct
 {
-    /// <summary>Whether <see cref="TransformFullAndAdd(ReadOnlySpan{short}, Span{byte}, int, int)"/> is usable — the 4x4 transpose is built from <see cref="Vp8Interleave.UnpackLow(Vector128{int}, Vector128{int})"/>/<see cref="Vp8Interleave.UnpackHigh(Vector128{int}, Vector128{int})"/>, which map to <c>punpck*</c> on x86 and <c>zip1/zip2</c> on Arm64 (the portable vector API has no two-vector interleave).</summary>
-    public static bool CanTransform => Vp8Interleave.IsSupported;
+    /// <summary>Whether <see cref="TransformFullAndAdd(ReadOnlySpan{short}, Span{byte}, int, int)"/> is usable — the 4x4 transpose is built from <see cref="VectorShuffle"/>'s two-vector interleaves.</summary>
+    public static bool CanTransform => VectorShuffle.IsSupported;
 
     private static readonly Vector128<int> C1 = Vector128.Create(Vp8InverseTransformConstants.C1);
     private static readonly Vector128<int> C2 = Vector128.Create(Vp8InverseTransformConstants.C2);
@@ -264,26 +265,23 @@ internal static class Vp8VectorInverseDct
     private static Vector128<int> Mul2(Vector128<int> v) => Vector128.ShiftRightArithmetic(v * C2, 16);
 
     /// <summary>
-    /// A true 4x4 transpose: <c>colK[i] == rowI[k]</c> for every <c>i, k</c>. The standard two-round SSE2
-    /// shape — interleave adjacent rows as 32-bit lanes, then combine those as 64-bit lanes — needs no
-    /// portable equivalent search, since .NET's cross-platform <c>Vector128</c> API has no two-vector
-    /// interleave at all (only single-vector <c>Shuffle</c>); this is the same gap
-    /// <c>Vp8VectorLoopFilter</c>'s 16x8 transpose already documents and works around the same way.
+    /// A true 4x4 transpose: <c>colK[i] == rowI[k]</c> for every <c>i, k</c>. The standard two-round shape:
+    /// interleave adjacent rows as 32-bit lanes, then combine those as 64-bit lanes.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static void Transpose4x4(
         Vector128<int> row0, Vector128<int> row1, Vector128<int> row2, Vector128<int> row3,
         out Vector128<int> col0, out Vector128<int> col1, out Vector128<int> col2, out Vector128<int> col3)
     {
-        var lo01 = Vp8Interleave.UnpackLow(row0, row1);
-        var hi01 = Vp8Interleave.UnpackHigh(row0, row1);
-        var lo23 = Vp8Interleave.UnpackLow(row2, row3);
-        var hi23 = Vp8Interleave.UnpackHigh(row2, row3);
+        var lo01 = VectorShuffle.ZipLower(row0, row1);
+        var hi01 = VectorShuffle.ZipUpper(row0, row1);
+        var lo23 = VectorShuffle.ZipLower(row2, row3);
+        var hi23 = VectorShuffle.ZipUpper(row2, row3);
 
-        col0 = Vp8Interleave.UnpackLow(lo01.AsInt64(), lo23.AsInt64()).AsInt32();
-        col1 = Vp8Interleave.UnpackHigh(lo01.AsInt64(), lo23.AsInt64()).AsInt32();
-        col2 = Vp8Interleave.UnpackLow(hi01.AsInt64(), hi23.AsInt64()).AsInt32();
-        col3 = Vp8Interleave.UnpackHigh(hi01.AsInt64(), hi23.AsInt64()).AsInt32();
+        col0 = VectorShuffle.ZipLower(lo01.AsInt64(), lo23.AsInt64()).AsInt32();
+        col1 = VectorShuffle.ZipUpper(lo01.AsInt64(), lo23.AsInt64()).AsInt32();
+        col2 = VectorShuffle.ZipLower(hi01.AsInt64(), hi23.AsInt64()).AsInt32();
+        col3 = VectorShuffle.ZipUpper(hi01.AsInt64(), hi23.AsInt64()).AsInt32();
     }
 
     /// <summary>Shifts a row's 4 pixel deltas by the final descale, adds them to the existing prediction, clamps to [0,255], and stores.</summary>

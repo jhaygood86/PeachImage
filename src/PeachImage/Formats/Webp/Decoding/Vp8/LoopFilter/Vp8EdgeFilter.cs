@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using PeachImage.Formats.Shared.Vectors;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8.LoopFilter;
 
@@ -113,69 +114,69 @@ internal static class Vp8EdgeFilter
         var r7 = Row2(ref upper, ref lower, 7, stride);
 
         // Byte-interleave row pairs: the low halves carry the upper block, the high halves the lower block.
-        var l01 = Sse2.UnpackLow(r0, r1);
-        var h01 = Sse2.UnpackHigh(r0, r1);
-        var l23 = Sse2.UnpackLow(r2, r3);
-        var h23 = Sse2.UnpackHigh(r2, r3);
-        var l45 = Sse2.UnpackLow(r4, r5);
-        var h45 = Sse2.UnpackHigh(r4, r5);
-        var l67 = Sse2.UnpackLow(r6, r7);
-        var h67 = Sse2.UnpackHigh(r6, r7);
+        var l01 = VectorShuffle.ZipLower(r0, r1);
+        var h01 = VectorShuffle.ZipUpper(r0, r1);
+        var l23 = VectorShuffle.ZipLower(r2, r3);
+        var h23 = VectorShuffle.ZipUpper(r2, r3);
+        var l45 = VectorShuffle.ZipLower(r4, r5);
+        var h45 = VectorShuffle.ZipUpper(r4, r5);
+        var l67 = VectorShuffle.ZipLower(r6, r7);
+        var h67 = VectorShuffle.ZipUpper(r6, r7);
 
         // Group them into fours of rows, then complete the eight: each 64-bit half is then one column.
-        var xl0 = Sse2.UnpackLow(l01.AsUInt16(), l23.AsUInt16());
-        var xl1 = Sse2.UnpackHigh(l01.AsUInt16(), l23.AsUInt16());
-        var xl2 = Sse2.UnpackLow(l45.AsUInt16(), l67.AsUInt16());
-        var xl3 = Sse2.UnpackHigh(l45.AsUInt16(), l67.AsUInt16());
-        var xh0 = Sse2.UnpackLow(h01.AsUInt16(), h23.AsUInt16());
-        var xh1 = Sse2.UnpackHigh(h01.AsUInt16(), h23.AsUInt16());
-        var xh2 = Sse2.UnpackLow(h45.AsUInt16(), h67.AsUInt16());
-        var xh3 = Sse2.UnpackHigh(h45.AsUInt16(), h67.AsUInt16());
+        var xl0 = VectorShuffle.ZipLower(l01.AsUInt16(), l23.AsUInt16());
+        var xl1 = VectorShuffle.ZipUpper(l01.AsUInt16(), l23.AsUInt16());
+        var xl2 = VectorShuffle.ZipLower(l45.AsUInt16(), l67.AsUInt16());
+        var xl3 = VectorShuffle.ZipUpper(l45.AsUInt16(), l67.AsUInt16());
+        var xh0 = VectorShuffle.ZipLower(h01.AsUInt16(), h23.AsUInt16());
+        var xh1 = VectorShuffle.ZipUpper(h01.AsUInt16(), h23.AsUInt16());
+        var xh2 = VectorShuffle.ZipLower(h45.AsUInt16(), h67.AsUInt16());
+        var xh3 = VectorShuffle.ZipUpper(h45.AsUInt16(), h67.AsUInt16());
 
-        var zl0 = Sse2.UnpackLow(xl0.AsUInt32(), xl2.AsUInt32());
-        var zl1 = Sse2.UnpackHigh(xl0.AsUInt32(), xl2.AsUInt32());
-        var zl2 = Sse2.UnpackLow(xl1.AsUInt32(), xl3.AsUInt32());
-        var zl3 = Sse2.UnpackHigh(xl1.AsUInt32(), xl3.AsUInt32());
-        var zh0 = Sse2.UnpackLow(xh0.AsUInt32(), xh2.AsUInt32());
-        var zh1 = Sse2.UnpackHigh(xh0.AsUInt32(), xh2.AsUInt32());
-        var zh2 = Sse2.UnpackLow(xh1.AsUInt32(), xh3.AsUInt32());
-        var zh3 = Sse2.UnpackHigh(xh1.AsUInt32(), xh3.AsUInt32());
+        var zl0 = VectorShuffle.ZipLower(xl0.AsUInt32(), xl2.AsUInt32());
+        var zl1 = VectorShuffle.ZipUpper(xl0.AsUInt32(), xl2.AsUInt32());
+        var zl2 = VectorShuffle.ZipLower(xl1.AsUInt32(), xl3.AsUInt32());
+        var zl3 = VectorShuffle.ZipUpper(xl1.AsUInt32(), xl3.AsUInt32());
+        var zh0 = VectorShuffle.ZipLower(xh0.AsUInt32(), xh2.AsUInt32());
+        var zh1 = VectorShuffle.ZipUpper(xh0.AsUInt32(), xh2.AsUInt32());
+        var zh2 = VectorShuffle.ZipLower(xh1.AsUInt32(), xh3.AsUInt32());
+        var zh3 = VectorShuffle.ZipUpper(xh1.AsUInt32(), xh3.AsUInt32());
 
         // Tap k as sixteen lanes: the upper block's column k (low half) beside the lower block's (high half).
-        var p3 = Sse2.UnpackLow(zl0.AsUInt64(), zh0.AsUInt64()).AsByte();
-        var p2 = Sse2.UnpackHigh(zl0.AsUInt64(), zh0.AsUInt64()).AsByte();
-        var p1 = Sse2.UnpackLow(zl1.AsUInt64(), zh1.AsUInt64()).AsByte();
-        var p0 = Sse2.UnpackHigh(zl1.AsUInt64(), zh1.AsUInt64()).AsByte();
-        var q0 = Sse2.UnpackLow(zl2.AsUInt64(), zh2.AsUInt64()).AsByte();
-        var q1 = Sse2.UnpackHigh(zl2.AsUInt64(), zh2.AsUInt64()).AsByte();
-        var q2 = Sse2.UnpackLow(zl3.AsUInt64(), zh3.AsUInt64()).AsByte();
-        var q3 = Sse2.UnpackHigh(zl3.AsUInt64(), zh3.AsUInt64()).AsByte();
+        var p3 = VectorShuffle.ZipLower(zl0.AsUInt64(), zh0.AsUInt64()).AsByte();
+        var p2 = VectorShuffle.ZipUpper(zl0.AsUInt64(), zh0.AsUInt64()).AsByte();
+        var p1 = VectorShuffle.ZipLower(zl1.AsUInt64(), zh1.AsUInt64()).AsByte();
+        var p0 = VectorShuffle.ZipUpper(zl1.AsUInt64(), zh1.AsUInt64()).AsByte();
+        var q0 = VectorShuffle.ZipLower(zl2.AsUInt64(), zh2.AsUInt64()).AsByte();
+        var q1 = VectorShuffle.ZipUpper(zl2.AsUInt64(), zh2.AsUInt64()).AsByte();
+        var q2 = VectorShuffle.ZipLower(zl3.AsUInt64(), zh3.AsUInt64()).AsByte();
+        var q3 = VectorShuffle.ZipUpper(zl3.AsUInt64(), zh3.AsUInt64()).AsByte();
 
         var r = Vp8ByteLoopFilter.Filter(p3, p2, p1, p0, q0, q1, q2, q3, thresh, interiorLimit, hevThreshold, macroblockEdge);
 
         // Back to rows: interleave taps in pairs, then fours, then eights; p3 and q3 are unmodified and go back as read.
-        var a0 = Sse2.UnpackLow(p3, r.P2);
-        var b0 = Sse2.UnpackHigh(p3, r.P2);
-        var a1 = Sse2.UnpackLow(r.P1, r.P0);
-        var b1 = Sse2.UnpackHigh(r.P1, r.P0);
-        var a2 = Sse2.UnpackLow(r.Q0, r.Q1);
-        var b2 = Sse2.UnpackHigh(r.Q0, r.Q1);
-        var a3 = Sse2.UnpackLow(r.Q2, q3);
-        var b3 = Sse2.UnpackHigh(r.Q2, q3);
+        var a0 = VectorShuffle.ZipLower(p3, r.P2);
+        var b0 = VectorShuffle.ZipUpper(p3, r.P2);
+        var a1 = VectorShuffle.ZipLower(r.P1, r.P0);
+        var b1 = VectorShuffle.ZipUpper(r.P1, r.P0);
+        var a2 = VectorShuffle.ZipLower(r.Q0, r.Q1);
+        var b2 = VectorShuffle.ZipUpper(r.Q0, r.Q1);
+        var a3 = VectorShuffle.ZipLower(r.Q2, q3);
+        var b3 = VectorShuffle.ZipUpper(r.Q2, q3);
 
-        var c0 = Sse2.UnpackLow(a0.AsUInt16(), a1.AsUInt16());
-        var c1 = Sse2.UnpackHigh(a0.AsUInt16(), a1.AsUInt16());
-        var d0 = Sse2.UnpackLow(a2.AsUInt16(), a3.AsUInt16());
-        var d1 = Sse2.UnpackHigh(a2.AsUInt16(), a3.AsUInt16());
-        var e0 = Sse2.UnpackLow(b0.AsUInt16(), b1.AsUInt16());
-        var e1 = Sse2.UnpackHigh(b0.AsUInt16(), b1.AsUInt16());
-        var f0 = Sse2.UnpackLow(b2.AsUInt16(), b3.AsUInt16());
-        var f1 = Sse2.UnpackHigh(b2.AsUInt16(), b3.AsUInt16());
+        var c0 = VectorShuffle.ZipLower(a0.AsUInt16(), a1.AsUInt16());
+        var c1 = VectorShuffle.ZipUpper(a0.AsUInt16(), a1.AsUInt16());
+        var d0 = VectorShuffle.ZipLower(a2.AsUInt16(), a3.AsUInt16());
+        var d1 = VectorShuffle.ZipUpper(a2.AsUInt16(), a3.AsUInt16());
+        var e0 = VectorShuffle.ZipLower(b0.AsUInt16(), b1.AsUInt16());
+        var e1 = VectorShuffle.ZipUpper(b0.AsUInt16(), b1.AsUInt16());
+        var f0 = VectorShuffle.ZipLower(b2.AsUInt16(), b3.AsUInt16());
+        var f1 = VectorShuffle.ZipUpper(b2.AsUInt16(), b3.AsUInt16());
 
-        StoreRows(ref upper, stride, Sse2.UnpackLow(c0.AsUInt32(), d0.AsUInt32()), Sse2.UnpackHigh(c0.AsUInt32(), d0.AsUInt32()),
-            Sse2.UnpackLow(c1.AsUInt32(), d1.AsUInt32()), Sse2.UnpackHigh(c1.AsUInt32(), d1.AsUInt32()));
-        StoreRows(ref lower, stride, Sse2.UnpackLow(e0.AsUInt32(), f0.AsUInt32()), Sse2.UnpackHigh(e0.AsUInt32(), f0.AsUInt32()),
-            Sse2.UnpackLow(e1.AsUInt32(), f1.AsUInt32()), Sse2.UnpackHigh(e1.AsUInt32(), f1.AsUInt32()));
+        StoreRows(ref upper, stride, VectorShuffle.ZipLower(c0.AsUInt32(), d0.AsUInt32()), VectorShuffle.ZipUpper(c0.AsUInt32(), d0.AsUInt32()),
+            VectorShuffle.ZipLower(c1.AsUInt32(), d1.AsUInt32()), VectorShuffle.ZipUpper(c1.AsUInt32(), d1.AsUInt32()));
+        StoreRows(ref lower, stride, VectorShuffle.ZipLower(e0.AsUInt32(), f0.AsUInt32()), VectorShuffle.ZipUpper(e0.AsUInt32(), f0.AsUInt32()),
+            VectorShuffle.ZipLower(e1.AsUInt32(), f1.AsUInt32()), VectorShuffle.ZipUpper(e1.AsUInt32(), f1.AsUInt32()));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

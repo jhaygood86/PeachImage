@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using PeachImage.Formats.Shared.Vectors;
 
 namespace PeachImage.Formats.Webp.Decoding.Vp8.LoopFilter;
 
@@ -101,8 +102,8 @@ internal static class Vp8ByteLoopFilter
 
         // The rest get the strong filter across three pixels either side: 27/18/9 times the delta (+63) >> 7.
         var strong = Sse2.And(delta.AsByte(), Sse2.And(notHev, mask));
-        var lo = Sse2.UnpackLow(zero, strong).AsInt16();
-        var hi = Sse2.UnpackHigh(zero, strong).AsInt16();
+        var lo = VectorShuffle.ZipLower(zero, strong).AsInt16();
+        var hi = VectorShuffle.ZipUpper(zero, strong).AsInt16();
         var k9 = Vector128.Create((short)0x0900);
         var k63 = Vector128.Create((short)63);
         var f9Lo = Sse2.MultiplyHigh(lo, k9);
@@ -133,8 +134,8 @@ internal static class Vp8ByteLoopFilter
     private static Vector128<sbyte> SignedShift3(Vector128<sbyte> x)
     {
         var zero = Vector128<byte>.Zero;
-        var lo = Sse2.ShiftRightArithmetic(Sse2.UnpackLow(zero, x.AsByte()).AsInt16(), 3 + 8);
-        var hi = Sse2.ShiftRightArithmetic(Sse2.UnpackHigh(zero, x.AsByte()).AsInt16(), 3 + 8);
+        var lo = Sse2.ShiftRightArithmetic(VectorShuffle.ZipLower(zero, x.AsByte()).AsInt16(), 3 + 8);
+        var hi = Sse2.ShiftRightArithmetic(VectorShuffle.ZipUpper(zero, x.AsByte()).AsInt16(), 3 + 8);
         return Sse2.PackSignedSaturate(lo, hi);
     }
 

@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Numerics;
 using PeachImage.Formats.Jpeg2000.Decoding;
 using PeachImage.Formats.Jpeg2000.Internal;
+using PeachImage.Formats.Shared.Arithmetic;
 using PeachImage.Formats.Shared.IO;
 using PeachImage.Formats.Shared.Orientation;
 using PeachImage.Formats.Shared.Parallelism;
@@ -108,10 +109,10 @@ internal static class Jpeg2000Decoder
         for (int c = 0; c < count; c++)
         {
             var info = siz.Components[c];
-            int x0 = CeilDivPow2(J2kSiz.CeilDiv(siz.XOsiz, info.XRsiz), reduce);
-            int y0 = CeilDivPow2(J2kSiz.CeilDiv(siz.YOsiz, info.YRsiz), reduce);
-            int x1 = CeilDivPow2(J2kSiz.CeilDiv(siz.Xsiz, info.XRsiz), reduce);
-            int y1 = CeilDivPow2(J2kSiz.CeilDiv(siz.Ysiz, info.YRsiz), reduce);
+            int x0 = CeilDivPow2(IntMath.CeilDiv(siz.XOsiz, info.XRsiz), reduce);
+            int y0 = CeilDivPow2(IntMath.CeilDiv(siz.YOsiz, info.YRsiz), reduce);
+            int x1 = CeilDivPow2(IntMath.CeilDiv(siz.Xsiz, info.XRsiz), reduce);
+            int y1 = CeilDivPow2(IntMath.CeilDiv(siz.Ysiz, info.YRsiz), reduce);
             planeWidths[c] = Math.Max(1, x1 - x0);
             planeHeights[c] = Math.Max(1, y1 - y0);
             planeOriginX[c] = x0;

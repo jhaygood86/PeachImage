@@ -472,12 +472,12 @@ internal static class Av1YuvToRgbConverter
 
     /// <summary>Tabulated <see cref="ScaleSample"/>; falls back to the direct computation for a sample beyond the table (an alpha plane may carry more bits than the color planes).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int AlphaOut(Span<int> table, int sample, int srcMax, int outMax) =>
+    private static int AlphaOut(ReadOnlySpan<int> table, int sample, int srcMax, int outMax) =>
         (uint)sample < (uint)table.Length ? table[sample] : ScaleSample(sample, srcMax, outMax);
 
     /// <summary><c>(sample - lo) / range</c> through the table; samples outside it (never produced by a conforming decode, but possible from unclamped tile padding) take the direct computation, so results never differ from the scalar path.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static double Normalized(Span<double> table, int sample, double lo, double range) =>
+    private static double Normalized(ReadOnlySpan<double> table, int sample, double lo, double range) =>
         (uint)sample < (uint)table.Length ? table[sample] : (sample - lo) / range;
 
     private static int ScaleSample(int sample, int srcMax, int outMax) =>

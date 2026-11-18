@@ -249,14 +249,11 @@ internal static class Vp8ForwardColorConverter
         var low = Vector128.WidenLower(row0) + Vector128.WidenLower(row1);
         var high = Vector128.WidenUpper(row0) + Vector128.WidenUpper(row1);
 
-        // Even and odd columns of the low and high halves, four 16-bit lanes each, joined into eight.
-        var even = Vector128.Create(Vector128.Shuffle(low, EvenLanes).GetLower(), Vector128.Shuffle(high, EvenLanes).GetLower());
-        var odd = Vector128.Create(Vector128.Shuffle(low, OddLanes).GetLower(), Vector128.Shuffle(high, OddLanes).GetLower());
-        return even + odd;
+        // Each 32-bit lane holds an even column (low 16 bits) and the odd column next to it (high 16 bits); their sum
+        // (at most 4 * 255 * 2) fits back in 16 bits.
+        static Vector128<uint> PairSums(Vector128<ushort> v) => (v.AsUInt32() & Vector128.Create(0xFFFFu)) + (v.AsUInt32() >> 16);
+        return Vector128.Narrow(PairSums(low), PairSums(high));
     }
-
-    private static readonly Vector128<ushort> EvenLanes = Vector128.Create((ushort)0, 2, 4, 6, 255, 255, 255, 255);
-    private static readonly Vector128<ushort> OddLanes = Vector128.Create((ushort)1, 3, 5, 7, 255, 255, 255, 255);
 
     /// <summary>One chroma output group (four samples): <c>ClipUv(kr * r + kg * g + kb * b)</c> over the low or high four of the 2x2 sums.</summary>
     private static Vector128<int> ChromaGroup(Vector128<ushort> rs, Vector128<ushort> gs, Vector128<ushort> bs, bool upper, int kr, int kg, int kb)

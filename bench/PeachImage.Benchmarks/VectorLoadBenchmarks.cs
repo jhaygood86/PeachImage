@@ -10,10 +10,9 @@ namespace PeachImage.Benchmarks;
 /// Compares <c>Vector128/256.Create(ReadOnlySpan&lt;T&gt;)</c> (bounds-checked span load) against
 /// <c>Vector128/256.LoadUnsafe(ref T)</c> (unchecked load) for the exact access pattern the WebP VP8L
 /// transform kernels and JPEG DCT kernels use: a fixed-width vector loaded from a known-in-bounds offset
-/// inside a tight loop. Exists to settle whether switching those call sites to <c>LoadUnsafe</c> — required
-/// for .NET 8 compatibility, since <c>Create(Span&lt;T&gt;)</c> over a *mutable* span only resolves on
-/// .NET 9+ — is a regression, a wash, or a genuine win, so the choice is made from a measurement rather
-/// than an assumption. Covers the three element types those call sites actually use (uint, byte, float) at
+/// inside a tight loop. Exists to settle whether <c>LoadUnsafe</c> at those call sites is a regression, a wash,
+/// or a genuine win over the bounds-checked form, so the choice is made from a measurement rather than an
+/// assumption. Covers the three element types those call sites actually use (uint, byte, float) at
 /// both vector widths.
 /// </summary>
 [MemoryDiagnoser]

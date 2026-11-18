@@ -61,7 +61,7 @@ internal sealed class Vector256ForwardDct : IForwardDctKernel
                 row[spatial] = (float)Math.Cos((((2 * spatial) + 1) * freq * Math.PI) / 16.0);
             }
 
-            rows[freq] = Vector256.Create((ReadOnlySpan<float>)row);
+            rows[freq] = Vector256.Create(row);
         }
 
         return rows;

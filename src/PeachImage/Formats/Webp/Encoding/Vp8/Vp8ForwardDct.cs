@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using PeachImage.Formats.Shared.Vectors;
 using PeachImage.Formats.Webp.Decoding.Vp8;
 using PeachImage.Formats.Webp.Decoding.Vp8.Dct;
 
@@ -24,7 +25,7 @@ internal static class Vp8ForwardDct
         ReadOnlySpan<byte> prediction, int predictionOffset, int predictionStride,
         Span<short> output)
     {
-        if (Vp8Interleave.IsSupported)
+        if (VectorShuffle.IsSupported)
         {
             TransformVector(source, sourceOffset, sourceStride, prediction, predictionOffset, predictionStride, output);
             return;

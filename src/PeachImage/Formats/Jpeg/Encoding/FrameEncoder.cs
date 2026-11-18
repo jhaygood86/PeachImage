@@ -1,9 +1,10 @@
-using PeachImage.Formats.Shared.Metadata;
 using System.Buffers;
 using PeachImage.Formats.Jpeg.ColorConversion;
 using PeachImage.Formats.Jpeg.Dct;
 using PeachImage.Formats.Jpeg.Entropy;
 using PeachImage.Formats.Jpeg.Markers;
+using PeachImage.Formats.Shared.Arithmetic;
+using PeachImage.Formats.Shared.Metadata;
 
 namespace PeachImage.Formats.Jpeg.Encoding;
 
@@ -153,7 +154,6 @@ internal static class FrameEncoder
         _ => throw new ArgumentOutOfRangeException(nameof(subsampling)),
     };
 
-    private static int CeilDiv(int a, int b) => (a + b - 1) / b;
 
     // Actual (pre-MCU-padding) block extents per component, needed only by progressive encode's
     // non-interleaved AC scans, which must stop at a component's true block grid rather than walking
@@ -162,17 +162,17 @@ internal static class FrameEncoder
     {
         if (grayscale)
         {
-            int blocksWide = CeilDiv(width, 8);
-            int blocksHigh = CeilDiv(height, 8);
+            int blocksWide = IntMath.CeilDiv(width, 8);
+            int blocksHigh = IntMath.CeilDiv(height, 8);
             return [new ComponentPlan(0, 1, 1, 1, 0, 0, mcusAcross, mcusDown, blocksWide, blocksHigh)];
         }
 
-        int yBlocksWide = CeilDiv(width, 8);
-        int yBlocksHigh = CeilDiv(height, 8);
-        int chromaWidth = CeilDiv(width, hMax);
-        int chromaHeight = CeilDiv(height, vMax);
-        int cBlocksWide = CeilDiv(chromaWidth, 8);
-        int cBlocksHigh = CeilDiv(chromaHeight, 8);
+        int yBlocksWide = IntMath.CeilDiv(width, 8);
+        int yBlocksHigh = IntMath.CeilDiv(height, 8);
+        int chromaWidth = IntMath.CeilDiv(width, hMax);
+        int chromaHeight = IntMath.CeilDiv(height, vMax);
+        int cBlocksWide = IntMath.CeilDiv(chromaWidth, 8);
+        int cBlocksHigh = IntMath.CeilDiv(chromaHeight, 8);
 
         return
         [

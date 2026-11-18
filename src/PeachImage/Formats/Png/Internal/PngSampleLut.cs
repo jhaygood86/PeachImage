@@ -62,7 +62,7 @@ internal static class PngSampleLut
     /// </remarks>
     private static readonly ConcurrentDictionary<double, ushort[]> CorrectedTables = new();
 
-    private static readonly object CorrectedTablesLock = new();
+    private static readonly Lock CorrectedTablesLock = new();
 
     /// <summary>
     /// The table for these inputs, which may be a cached instance shared with every other decode

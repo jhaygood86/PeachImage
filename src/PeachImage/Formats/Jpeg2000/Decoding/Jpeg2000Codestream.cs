@@ -1,4 +1,5 @@
 using PeachImage.Formats.Jpeg2000.Internal;
+using PeachImage.Formats.Shared.Arithmetic;
 
 namespace PeachImage.Formats.Jpeg2000.Decoding;
 
@@ -26,11 +27,10 @@ internal sealed class J2kSiz
 
     public required J2kComponentInfo[] Components { get; init; }
 
-    public int TilesWide => CeilDiv(Xsiz - XTOsiz, XTsiz);
+    public int TilesWide => IntMath.CeilDiv(Xsiz - XTOsiz, XTsiz);
 
-    public int TilesHigh => CeilDiv(Ysiz - YTOsiz, YTsiz);
+    public int TilesHigh => IntMath.CeilDiv(Ysiz - YTOsiz, YTsiz);
 
-    public static int CeilDiv(int a, int b) => (int)(((long)a + b - 1) / b);
 }
 
 /// <summary>The per-component coding style fields shared by the COD and COC marker segments.</summary>

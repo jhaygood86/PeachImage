@@ -1,5 +1,6 @@
 using PeachImage.Formats.Jxl.Bitstream;
 using PeachImage.Formats.Jxl.Headers;
+using PeachImage.Formats.Shared.Arithmetic;
 
 namespace PeachImage.Formats.Jxl.Frame;
 
@@ -227,16 +228,16 @@ internal readonly struct JxlFrameDimensions
         DcGroupDimension = GroupDimension * BlockDim;
         XSizeUpsampled = (int)xsizePx;
         YSizeUpsampled = (int)ysizePx;
-        XSize = (int)DivCeil(xsizePx, upsampling);
-        YSize = (int)DivCeil(ysizePx, upsampling);
-        XSizeBlocks = (int)(DivCeil(XSize, BlockDim << maxHShift) << maxHShift);
-        YSizeBlocks = (int)(DivCeil(YSize, BlockDim << maxVShift) << maxVShift);
+        XSize = (int)IntMath.CeilDiv((long)xsizePx, upsampling);
+        YSize = (int)IntMath.CeilDiv((long)ysizePx, upsampling);
+        XSizeBlocks = (int)(IntMath.CeilDiv((long)XSize, BlockDim << maxHShift) << maxHShift);
+        YSizeBlocks = (int)(IntMath.CeilDiv((long)YSize, BlockDim << maxVShift) << maxVShift);
         XSizePadded = modular ? XSize : XSizeBlocks * BlockDim;
         YSizePadded = modular ? YSize : YSizeBlocks * BlockDim;
-        XSizeGroups = (int)DivCeil(XSize, GroupDimension);
-        YSizeGroups = (int)DivCeil(YSize, GroupDimension);
-        XSizeDcGroups = (int)DivCeil(XSizeBlocks, GroupDimension);
-        YSizeDcGroups = (int)DivCeil(YSizeBlocks, GroupDimension);
+        XSizeGroups = (int)IntMath.CeilDiv((long)XSize, GroupDimension);
+        YSizeGroups = (int)IntMath.CeilDiv((long)YSize, GroupDimension);
+        XSizeDcGroups = (int)IntMath.CeilDiv((long)XSizeBlocks, GroupDimension);
+        YSizeDcGroups = (int)IntMath.CeilDiv((long)YSizeBlocks, GroupDimension);
         NumGroups = XSizeGroups * YSizeGroups;
         NumDcGroups = XSizeDcGroups * YSizeDcGroups;
     }
@@ -276,7 +277,6 @@ internal readonly struct JxlFrameDimensions
 
     public int NumDcGroups { get; }
 
-    private static long DivCeil(long a, long b) => (a + b - 1) / b;
 }
 
 /// <summary>A frame's header: encoding, flags, color transform, sizing, passes, blending, animation timing and loop filter.</summary>
