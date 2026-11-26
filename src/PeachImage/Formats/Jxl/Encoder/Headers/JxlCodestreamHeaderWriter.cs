@@ -14,6 +14,9 @@ namespace PeachImage.Formats.Jxl.Encoder.Headers;
 /// <param name="Orientation">EXIF-style orientation, 1 to 8.</param>
 /// <param name="IccProfile">An ICC profile describing the color space instead of the enumerated sRGB encoding, or <see langword="null"/>.</param>
 /// <param name="IsFloat">Whether samples are 32-bit IEEE floats (coded as their bit patterns when lossless).</param>
+/// <param name="IsHalf">With <paramref name="IsFloat"/>: the samples are IEEE binary16 (16 bits, 5 exponent bits) rather than binary32.</param>
+/// <param name="ColorSpace">An RGB space to declare with enums instead of an ICC profile, or <see langword="null"/> for sRGB.</param>
+/// <param name="IntensityTarget">The peak luminance in cd/m2 to declare in the tone mapping header, or <see langword="null"/> for the default (255).</param>
 internal readonly record struct JxlEncodedImageInfo(
     uint Width,
     uint Height,
@@ -23,7 +26,10 @@ internal readonly record struct JxlEncodedImageInfo(
     bool XybEncoded,
     int Orientation = 1,
     byte[]? IccProfile = null,
-    bool IsFloat = false);
+    bool IsFloat = false,
+    bool IsHalf = false,
+    NamedColorSpace? ColorSpace = null,
+    float? IntensityTarget = null);
 
 /// <summary>
 /// Writes everything a codestream carries before its first frame: the signature, <c>SizeHeader</c>,
@@ -100,14 +106,15 @@ internal static class JxlCodestreamHeaderWriter
 
     private static void WriteImageMetadata(JxlBitWriter writer, in JxlEncodedImageInfo info)
     {
-        bool allDefault = info.IccProfile is null && !info.IsFloat && !info.IsGray && !info.HasAlpha && info.BitsPerSample == 8 && info.XybEncoded && info.Orientation == 1;
+        bool defaultColor = info.ColorSpace is null or NamedColorSpace.Srgb;
+        bool allDefault = info.IccProfile is null && defaultColor && !info.IsFloat && !info.IsGray && !info.HasAlpha && info.BitsPerSample == 8 && info.XybEncoded && info.Orientation == 1;
         writer.WriteBool(allDefault);
         if (allDefault)
         {
             return;
         }
 
-        bool extraFields = info.Orientation != 1;
+        bool extraFields = info.Orientation != 1 || info.IntensityTarget is not null;
         writer.WriteBool(extraFields);
         if (extraFields)
         {
@@ -117,28 +124,47 @@ internal static class JxlCodestreamHeaderWriter
             writer.WriteBool(false); // have_animation
         }
 
-        WriteBitDepth(writer, info.BitsPerSample, info.IsFloat);
+        WriteBitDepth(writer, info.BitsPerSample, info.IsFloat, info.IsHalf);
         writer.WriteBool(!info.IsFloat && info.BitsPerSample <= 12); // modular_16bit_buffer_sufficient
 
         uint extraChannels = info.HasAlpha ? 1u : 0u;
         writer.WriteU32(extraChannels, U32Dist.Val(0), U32Dist.Val(1), U32Dist.BitsOffset(4, 2), U32Dist.BitsOffset(12, 1));
         if (info.HasAlpha)
         {
-            WriteAlphaChannel(writer, info.BitsPerSample, info.IsFloat);
+            WriteAlphaChannel(writer, info.BitsPerSample, info.IsFloat, info.IsHalf);
         }
 
         writer.WriteBool(info.XybEncoded);
-        WriteColorEncoding(writer, info.IsGray, info.IccProfile is not null);
+        WriteColorEncoding(writer, info.IsGray, info.IccProfile is not null, info.ColorSpace);
         if (extraFields)
         {
-            writer.WriteBool(true); // tone mapping: all_default
+            if (info.IntensityTarget is { } target)
+            {
+                writer.WriteBool(false); // tone mapping: explicit
+                writer.WriteF16(target); // intensity_target
+                writer.WriteF16(0f); // min_nits
+                writer.WriteBool(false); // relative_to_max_display
+                writer.WriteF16(0f); // linear_below
+            }
+            else
+            {
+                writer.WriteBool(true); // tone mapping: all_default
+            }
         }
 
         writer.WriteU64(0); // extensions
     }
 
-    private static void WriteBitDepth(JxlBitWriter writer, int bits, bool isFloat)
+    private static void WriteBitDepth(JxlBitWriter writer, int bits, bool isFloat, bool isHalf = false)
     {
+        if (isFloat && isHalf)
+        {
+            writer.WriteBool(true);
+            writer.WriteU32(16, U32Dist.Val(32), U32Dist.Val(16), U32Dist.Val(24), U32Dist.BitsOffset(6, 1));
+            writer.WriteBits(4, 4); // 5 exponent bits: IEEE binary16
+            return;
+        }
+
         if (isFloat)
         {
             writer.WriteBool(true);
@@ -156,7 +182,7 @@ internal static class JxlCodestreamHeaderWriter
         writer.WriteU32((uint)bits, U32Dist.Val(8), U32Dist.Val(10), U32Dist.Val(12), U32Dist.BitsOffset(6, 1));
     }
 
-    private static void WriteAlphaChannel(JxlBitWriter writer, int bits, bool isFloat)
+    private static void WriteAlphaChannel(JxlBitWriter writer, int bits, bool isFloat, bool isHalf = false)
     {
         if (bits == 8 && !isFloat)
         {
@@ -166,13 +192,22 @@ internal static class JxlCodestreamHeaderWriter
 
         writer.WriteBool(false);
         writer.WriteEnum(0); // Alpha
-        WriteBitDepth(writer, bits, isFloat);
+        WriteBitDepth(writer, bits, isFloat, isHalf);
         writer.WriteU32(0, U32Dist.Val(0), U32Dist.Val(3), U32Dist.Val(4), U32Dist.BitsOffset(3, 1)); // dim_shift
         writer.WriteName(string.Empty);
         writer.WriteBool(false); // alpha_associated
     }
 
-    private static void WriteColorEncoding(JxlBitWriter writer, bool isGray, bool wantIcc)
+    private static JxlTransferFunction TransferOf(NamedColorSpace? space) => space switch
+    {
+        null or NamedColorSpace.Srgb or NamedColorSpace.DisplayP3 => JxlTransferFunction.Srgb,
+        NamedColorSpace.LinearSrgb or NamedColorSpace.LinearDisplayP3 or NamedColorSpace.LinearRec2020 => JxlTransferFunction.Linear,
+        NamedColorSpace.Rec2020 => JxlTransferFunction.Bt709,
+        NamedColorSpace.Rec2100Pq => JxlTransferFunction.Pq,
+        _ => JxlTransferFunction.Hlg,
+    };
+
+    private static void WriteColorEncoding(JxlBitWriter writer, bool isGray, bool wantIcc, NamedColorSpace? named)
     {
         if (wantIcc)
         {
@@ -182,7 +217,7 @@ internal static class JxlCodestreamHeaderWriter
             return;
         }
 
-        if (!isGray)
+        if (!isGray && named is null or NamedColorSpace.Srgb)
         {
             writer.WriteBool(true); // all_default: sRGB, relative intent
             return;
@@ -190,10 +225,30 @@ internal static class JxlCodestreamHeaderWriter
 
         writer.WriteBool(false);
         writer.WriteBool(false); // want_icc
-        writer.WriteEnum((uint)JxlColorSpace.Gray);
+        if (isGray)
+        {
+            writer.WriteEnum((uint)JxlColorSpace.Gray);
+            writer.WriteEnum((uint)JxlWhitePoint.D65);
+            writer.WriteBool(false); // have_gamma
+            writer.WriteEnum((uint)TransferOf(named));
+            writer.WriteEnum((uint)JxlRenderingIntent.Relative);
+            return;
+        }
+
+        // An RGB space named by enums: the colors are written exactly as stored and a decoder reads them in this space.
+        var space = named!.Value;
+        var primaries = space switch
+        {
+            NamedColorSpace.Srgb or NamedColorSpace.LinearSrgb => JxlPrimaries.Srgb,
+            NamedColorSpace.DisplayP3 or NamedColorSpace.LinearDisplayP3 => JxlPrimaries.P3,
+            _ => JxlPrimaries.Bt2100,
+        };
+        var transfer = TransferOf(space);
+        writer.WriteEnum((uint)JxlColorSpace.Rgb);
         writer.WriteEnum((uint)JxlWhitePoint.D65);
+        writer.WriteEnum((uint)primaries);
         writer.WriteBool(false); // have_gamma
-        writer.WriteEnum((uint)JxlTransferFunction.Srgb);
+        writer.WriteEnum((uint)transfer);
         writer.WriteEnum((uint)JxlRenderingIntent.Relative);
     }
 }

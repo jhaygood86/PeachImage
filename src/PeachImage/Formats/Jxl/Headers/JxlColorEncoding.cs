@@ -109,6 +109,35 @@ internal sealed class JxlColorEncoding
     internal static JxlColorEncoding Create(JxlTransferFunction transferFunction, uint gamma = 0) =>
         new() { TransferFunction = transferFunction, HaveGamma = gamma != 0, Gamma = gamma };
 
+    /// <summary>
+    /// The ITU-T H.273 code points this encoding denotes, or <see langword="null"/> when it declares nothing beyond the default (sRGB), is described by an ICC
+    /// profile, is gray, or uses custom primaries, a custom white point or a plain gamma.
+    /// </summary>
+    public CicpCode? ToCicp()
+    {
+        if (!ReferenceEquals(this, Default) && !WantIcc && ColorSpace == JxlColorSpace.Gray && !HaveGamma && TransferFunction != JxlTransferFunction.Unknown)
+        {
+            // A gray encoding names a transfer function but no primaries: code point 2 is H.273 "unspecified".
+            return new CicpCode(2, (byte)(uint)TransferFunction);
+        }
+
+        if (ReferenceEquals(this, Default) || WantIcc || ColorSpace != JxlColorSpace.Rgb || HaveGamma || TransferFunction == JxlTransferFunction.Unknown)
+        {
+            return null;
+        }
+
+        int primaries = (Primaries, WhitePoint) switch
+        {
+            (JxlPrimaries.Srgb, JxlWhitePoint.D65) => 1,
+            (JxlPrimaries.Bt2100, JxlWhitePoint.D65) => 9,
+            (JxlPrimaries.P3, JxlWhitePoint.D65) => 12,
+            (JxlPrimaries.P3, JxlWhitePoint.Dci) => 11,
+            _ => 0,
+        };
+
+        return primaries == 0 ? null : new CicpCode((byte)primaries, (byte)(uint)TransferFunction);
+    }
+
     public static JxlColorEncoding Read(ref JxlBitReader reader)
     {
         if (reader.ReadBool())

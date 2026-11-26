@@ -33,7 +33,11 @@ internal static class JxlDecoder
             HasAlpha: metadata.AlphaChannelIndex >= 0,
             HasPreview: metadata.PreviewSize is not null,
             Orientation: ExifOrientationReader.FromValue(metadata.Orientation),
-            IsLosslessEncoding: IsLossless(container, metadata));
+            IsLosslessEncoding: IsLossless(container, metadata))
+        {
+            Cicp = metadata.ColorEncoding.ToCicp(),
+            ColorSpace = metadata.ColorEncoding.ToCicp() is { } code ? global::PeachImage.Internal.Color.NamedSpaces.Describe(code) : null,
+        };
     }
 
     /// <summary>
@@ -247,6 +251,11 @@ internal static class JxlDecoder
         if (headers.IccProfile is { } icc)
         {
             image.Metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Icc, Data = icc });
+        }
+
+        if (headers.IccProfile is null && headers.Metadata.ColorEncoding.ToCicp() is { } cicp)
+        {
+            image.Metadata.Cicp = cicp;
         }
 
         if (container.Exif is { } exif)
