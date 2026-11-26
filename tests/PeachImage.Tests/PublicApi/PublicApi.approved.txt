@@ -1,0 +1,779 @@
+enum PeachImage.AnchorPosition
+  field PeachImage.AnchorPosition BottomCenter static = 7
+  field PeachImage.AnchorPosition BottomLeft static = 6
+  field PeachImage.AnchorPosition BottomRight static = 8
+  field PeachImage.AnchorPosition MiddleCenter static = 4
+  field PeachImage.AnchorPosition MiddleLeft static = 3
+  field PeachImage.AnchorPosition MiddleRight static = 5
+  field PeachImage.AnchorPosition TopCenter static = 1
+  field PeachImage.AnchorPosition TopLeft static = 0
+  field PeachImage.AnchorPosition TopRight static = 2
+  field System.Int32 value__
+sealed class PeachImage.AnimatedImage
+  ctor .ctor(System.Collections.Generic.IEnumerable<PeachImage.AnimatedImageFrame> frames, System.Int32 width, System.Int32 height, System.Int32 loopCount)
+  method PeachImage.AnimatedImage Load(System.IO.Stream stream, PeachImage.DecoderOptions options = null) static
+  method PeachImage.AnimatedImage Load(System.String path, PeachImage.DecoderOptions options = null) static
+  method PeachImage.AnimatedImage Resize(System.Int32 width, System.Int32 height, PeachImage.ResizeOptions options = null)
+  method System.Void Save(System.IO.Stream stream, System.String formatName, PeachImage.EncoderOptions options = null)
+  method System.Void Save(System.String path, PeachImage.EncoderOptions options = null)
+  property System.Collections.Generic.IEnumerable<PeachImage.AnimatedImageFrame> Frames get
+  property System.Int32 Height get
+  property System.Int32 LoopCount get
+  property System.Int32 Width get
+sealed class PeachImage.AnimatedImageFrame
+  ctor .ctor(PeachImage.Image image, System.TimeSpan duration, PeachImage.FrameDisposalMethod disposal)
+  method PeachImage.AnimatedImageFrame Clone()
+  property PeachImage.FrameDisposalMethod Disposal get
+  property PeachImage.Image Image get
+  property System.TimeSpan Duration get
+enum PeachImage.BitmapColorSpaceConversion
+  field PeachImage.BitmapColorSpaceConversion Default static = 0
+  field PeachImage.BitmapColorSpaceConversion None static = 1
+  field System.Int32 value__
+enum PeachImage.BitmapOrientation
+  field PeachImage.BitmapOrientation FlipY static = 1
+  field PeachImage.BitmapOrientation FromImage static = 0
+  field PeachImage.BitmapOrientation None static = 2
+  field System.Int32 value__
+enum PeachImage.BitmapPremultiply
+  field PeachImage.BitmapPremultiply Default static = 0
+  field PeachImage.BitmapPremultiply None static = 1
+  field PeachImage.BitmapPremultiply Premultiply static = 2
+  field System.Int32 value__
+sealed class PeachImage.BitmapRequest
+  ctor .ctor()
+  property PeachImage.BitmapColorSpaceConversion ColorSpaceConversion get init
+  property PeachImage.BitmapOrientation Orientation get init
+  property PeachImage.BitmapPremultiply PremultiplyAlpha get init
+  property PeachImage.NamedColorSpace TargetColorSpace get init
+  property PeachImage.ResizeQuality ResizeQuality get init
+  property System.Collections.Generic.IReadOnlySet<System.String> AllowedFormats get init
+  property System.Double HdrPeakNits get init
+  property System.Int32 MaxDegreeOfParallelism get init
+  property System.Nullable<PeachImage.HdrToneMapping> HdrToneMapping get init
+  property System.Nullable<PeachImage.ImageRegion> Crop get init
+  property System.Nullable<PeachImage.PixelFormat> OutputFormat get init
+  property System.Nullable<System.Int32> ResizeHeight get init
+  property System.Nullable<System.Int32> ResizeWidth get init
+  property System.Nullable<System.Int64> MaxPixels get init
+  property System.Threading.Tasks.TaskScheduler TaskScheduler get init
+struct PeachImage.ChromaticityXy
+  ctor .ctor(System.Double X, System.Double Y)
+  method System.Boolean Equals(PeachImage.ChromaticityXy other)
+  method System.Boolean Equals(System.Object obj)
+  method System.Int32 GetHashCode()
+  method System.String ToString()
+  method System.Void Deconstruct(System.Double& X, System.Double& Y)
+  property System.Double X get init
+  property System.Double Y get init
+struct PeachImage.CicpCode
+  ctor .ctor(System.Byte ColorPrimaries, System.Byte TransferCharacteristics, System.Byte MatrixCoefficients = 0, System.Boolean FullRange = True)
+  method PeachImage.CicpCode Of(PeachImage.NamedColorSpace space) static
+  method System.Boolean Equals(PeachImage.CicpCode other)
+  method System.Boolean Equals(System.Object obj)
+  method System.Int32 GetHashCode()
+  method System.Nullable<PeachImage.NamedColorSpace> ToNamedColorSpace()
+  method System.String ToString()
+  method System.Void Deconstruct(System.Byte& ColorPrimaries, System.Byte& TransferCharacteristics, System.Byte& MatrixCoefficients, System.Boolean& FullRange)
+  property PeachImage.TransferFunction Transfer get
+  property System.Boolean FullRange get init
+  property System.Boolean IsHdr get
+  property System.Byte ColorPrimaries get init
+  property System.Byte MatrixCoefficients get init
+  property System.Byte TransferCharacteristics get init
+sealed class PeachImage.ColorConversionOptions
+  ctor .ctor()
+  property PeachImage.GamutHandling GamutHandling get set
+  property PeachImage.HdrToneMapping HdrToneMapping get set
+  property PeachImage.IccColorProfile SourceProfile get set
+  property PeachImage.NamedColorSpace AssumedSourceColorSpace get set
+  property System.Double HdrPeakNits get set
+  property System.Int32 MaxDegreeOfParallelism get set
+  property System.Nullable<PeachImage.IccRenderingIntent> RenderingIntent get set
+  property System.Nullable<PeachImage.NamedColorSpace> SourceColorSpace get set
+  property System.Nullable<PeachImage.PixelFormat> TargetPixelFormat get set
+  property System.Threading.Tasks.TaskScheduler TaskScheduler get set
+static class PeachImage.ColorProfiles
+  method PeachImage.IccColorProfile Get(PeachImage.NamedColorSpace space) static
+  method System.Boolean HasProfile(PeachImage.NamedColorSpace space) static
+  method System.ReadOnlyMemory<System.Byte> GetBytes(PeachImage.NamedColorSpace space) static
+struct PeachImage.ColorSpaceDescription
+  ctor .ctor(PeachImage.ChromaticityXy Red, PeachImage.ChromaticityXy Green, PeachImage.ChromaticityXy Blue, PeachImage.ChromaticityXy White, PeachImage.TransferFunction Transfer, System.Double Gamma = 0, System.Nullable<PeachImage.NamedColorSpace> Named = null)
+  method PeachImage.ColorSpaceDescription Of(PeachImage.NamedColorSpace space) static
+  method System.Boolean Equals(PeachImage.ColorSpaceDescription other)
+  method System.Boolean Equals(System.Object obj)
+  method System.Int32 GetHashCode()
+  method System.String ToString()
+  method System.Void Deconstruct(PeachImage.ChromaticityXy& Red, PeachImage.ChromaticityXy& Green, PeachImage.ChromaticityXy& Blue, PeachImage.ChromaticityXy& White, PeachImage.TransferFunction& Transfer, System.Double& Gamma, System.Nullable`1PeachImage.NamedColorSpace& Named)
+  property PeachImage.ChromaticityXy Blue get init
+  property PeachImage.ChromaticityXy Green get init
+  property PeachImage.ChromaticityXy Red get init
+  property PeachImage.ChromaticityXy White get init
+  property PeachImage.TransferFunction Transfer get init
+  property System.Boolean IsHdr get
+  property System.Double Gamma get init
+  property System.Nullable<PeachImage.NamedColorSpace> Named get init
+class PeachImage.DecoderOptions
+  ctor .ctor()
+  property PeachImage.IccColorProfile FallbackCmykProfile get init
+  property System.Action<PeachImage.Image> PreviewAvailable get init
+  property System.Boolean ApplyOrientation get init
+  property System.Boolean SkipMetadata get init
+  property System.Collections.Generic.IReadOnlyDictionary<System.String,System.Double> MaxExpansionRatios get init
+  property System.Collections.Generic.IReadOnlySet<System.String> AllowedFormats get init
+  property System.Int32 MaxDegreeOfParallelism get init
+  property System.Int32 ScaleDenominator get init
+  property System.Nullable<PeachImage.PixelFormat> TargetPixelFormat get init
+  property System.Nullable<System.Double> MaxExpansionRatio get init
+  property System.Nullable<System.Int64> MaxPixels get init
+  property System.Nullable<System.ValueTuple<System.Int32,System.Int32>> TargetSize get init
+  property System.Threading.Tasks.TaskScheduler TaskScheduler get init
+enum PeachImage.EncodePrecision
+  field PeachImage.EncodePrecision Auto static = 0
+  field PeachImage.EncodePrecision Eight static = 1
+  field PeachImage.EncodePrecision Sixteen static = 2
+  field System.Int32 value__
+abstract class PeachImage.EncoderOptions
+  ctor .ctor()
+  property PeachImage.EncodePrecision Precision get init
+  property PeachImage.IccColorProfile TargetColorProfile get init
+  property System.Boolean IncludeMetadata get init
+  property System.Int32 MaxDegreeOfParallelism get init
+  property System.Nullable<PeachImage.NamedColorSpace> TargetColorSpace get init
+  property System.Nullable<System.Boolean> IncludeIccProfile get init
+  property System.Threading.Tasks.TaskScheduler TaskScheduler get init
+struct PeachImage.ExifLocation
+  ctor .ctor(System.Nullable<System.Double> Latitude = null, System.Nullable<System.Char> LatitudeRef = null, System.Nullable<System.Double> Longitude = null, System.Nullable<System.Char> LongitudeRef = null, System.Nullable<System.Double> DestLatitude = null, System.Nullable<System.Char> DestLatitudeRef = null, System.Nullable<System.Double> DestLongitude = null, System.Nullable<System.Char> DestLongitudeRef = null)
+  method System.Boolean Equals(PeachImage.ExifLocation other)
+  method System.Boolean Equals(System.Object obj)
+  method System.Int32 GetHashCode()
+  method System.String ToString()
+  method System.Void Deconstruct(System.Nullable`1System.Double& Latitude, System.Nullable`1System.Char& LatitudeRef, System.Nullable`1System.Double& Longitude, System.Nullable`1System.Char& LongitudeRef, System.Nullable`1System.Double& DestLatitude, System.Nullable`1System.Char& DestLatitudeRef, System.Nullable`1System.Double& DestLongitude, System.Nullable`1System.Char& DestLongitudeRef)
+  property System.Nullable<System.Char> DestLatitudeRef get init
+  property System.Nullable<System.Char> DestLongitudeRef get init
+  property System.Nullable<System.Char> LatitudeRef get init
+  property System.Nullable<System.Char> LongitudeRef get init
+  property System.Nullable<System.Double> DestLatitude get init
+  property System.Nullable<System.Double> DestLongitude get init
+  property System.Nullable<System.Double> Latitude get init
+  property System.Nullable<System.Double> Longitude get init
+sealed class PeachImage.Formats.Avif.AvifDecoderOptions : PeachImage.DecoderOptions
+  ctor .ctor()
+sealed class PeachImage.Formats.Avif.AvifDecodingException : PeachImage.Formats.Avif.AvifFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Avif.AvifEncoderOptions : PeachImage.EncoderOptions
+  ctor .ctor()
+  property System.Boolean Lossless get init
+  property System.Int32 BitDepth get init
+  property System.Int32 Effort get init
+  property System.Int32 Quality get init
+  property System.Nullable<System.Int32> TileRowsLog2 get init
+  property System.Single QualityFraction get init
+sealed class PeachImage.Formats.Avif.AvifEncodingException : PeachImage.Formats.Avif.AvifFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+class PeachImage.Formats.Avif.AvifFormatException : PeachImage.ImageFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Avif.AvifUnsupportedFeatureException : PeachImage.Formats.Avif.AvifFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Bmp.BmpDecoderOptions : PeachImage.DecoderOptions
+  ctor .ctor()
+sealed class PeachImage.Formats.Bmp.BmpDecodingException : PeachImage.Formats.Bmp.BmpFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Bmp.BmpEncoderOptions : PeachImage.EncoderOptions
+  ctor .ctor()
+  property System.Boolean UseRunLengthEncoding get init
+sealed class PeachImage.Formats.Bmp.BmpEncodingException : PeachImage.Formats.Bmp.BmpFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+class PeachImage.Formats.Bmp.BmpFormatException : PeachImage.ImageFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Ccitt.CcittFaxDecoderOptions : PeachImage.DecoderOptions
+  ctor .ctor()
+  property System.Boolean BlackIs1 get init
+  property System.Boolean EncodedByteAlign get init
+  property System.Boolean EndOfBlock get init
+  property System.Boolean EndOfLine get init
+  property System.Boolean LsbFirst get init
+  property System.Int32 Columns get init
+  property System.Int32 DamagedRowsBeforeError get init
+  property System.Int32 K get init
+  property System.Int32 Rows get init
+sealed class PeachImage.Formats.Ccitt.CcittFaxDecodingException : PeachImage.Formats.Ccitt.CcittFaxFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+class PeachImage.Formats.Ccitt.CcittFaxFormatException : PeachImage.ImageFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Ccitt.CcittFaxUnsupportedFeatureException : PeachImage.Formats.Ccitt.CcittFaxFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Gif.GifDecoderOptions : PeachImage.DecoderOptions
+  ctor .ctor()
+sealed class PeachImage.Formats.Gif.GifDecodingException : PeachImage.Formats.Gif.GifFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Gif.GifEncoderOptions : PeachImage.EncoderOptions
+  ctor .ctor()
+  property System.Boolean Dither get init
+  property System.Int32 MaxColors get init
+sealed class PeachImage.Formats.Gif.GifEncodingException : PeachImage.Formats.Gif.GifFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+class PeachImage.Formats.Gif.GifFormatException : PeachImage.ImageFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+static class PeachImage.Formats.Gif.GifPassthrough
+  method System.Boolean TryRead(System.IO.Stream stream, PeachImage.Formats.Gif.GifPassthroughInfo& info) static
+struct PeachImage.Formats.Gif.GifPassthroughInfo
+  ctor .ctor(System.Int32 Width, System.Int32 Height, System.Int32 Left, System.Int32 Top, System.Int32 CanvasWidth, System.Int32 CanvasHeight, System.Byte MinCodeSize, System.Boolean Interlaced, System.Byte[] Palette, System.Nullable<System.Int32> TransparentColorIndex, System.Boolean IsAnimated, System.Byte[] LzwData)
+  method System.Boolean Equals(PeachImage.Formats.Gif.GifPassthroughInfo other)
+  method System.Boolean Equals(System.Object obj)
+  method System.Int32 GetHashCode()
+  method System.String ToString()
+  method System.Void Deconstruct(System.Int32& Width, System.Int32& Height, System.Int32& Left, System.Int32& Top, System.Int32& CanvasWidth, System.Int32& CanvasHeight, System.Byte& MinCodeSize, System.Boolean& Interlaced, System.Byte[]& Palette, System.Nullable`1System.Int32& TransparentColorIndex, System.Boolean& IsAnimated, System.Byte[]& LzwData)
+  property System.Boolean Interlaced get init
+  property System.Boolean IsAnimated get init
+  property System.Byte MinCodeSize get init
+  property System.Byte[] LzwData get init
+  property System.Byte[] Palette get init
+  property System.Int32 CanvasHeight get init
+  property System.Int32 CanvasWidth get init
+  property System.Int32 Height get init
+  property System.Int32 Left get init
+  property System.Int32 Top get init
+  property System.Int32 Width get init
+  property System.Nullable<System.Int32> TransparentColorIndex get init
+sealed class PeachImage.Formats.Jbig2.Jbig2DecoderOptions : PeachImage.DecoderOptions
+  ctor .ctor()
+  property System.Boolean Embedded get init
+  property System.Boolean InvertOutput get init
+  property System.ReadOnlyMemory<System.Byte> Globals get init
+sealed class PeachImage.Formats.Jbig2.Jbig2DecodingException : PeachImage.Formats.Jbig2.Jbig2FormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+class PeachImage.Formats.Jbig2.Jbig2FormatException : PeachImage.ImageFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Jbig2.Jbig2UnsupportedFeatureException : PeachImage.Formats.Jbig2.Jbig2FormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+enum PeachImage.Formats.Jpeg.JpegChromaSubsampling
+  field PeachImage.Formats.Jpeg.JpegChromaSubsampling Yuv411 static = 3
+  field PeachImage.Formats.Jpeg.JpegChromaSubsampling Yuv420 static = 2
+  field PeachImage.Formats.Jpeg.JpegChromaSubsampling Yuv422 static = 1
+  field PeachImage.Formats.Jpeg.JpegChromaSubsampling Yuv444 static = 0
+  field System.Int32 value__
+enum PeachImage.Formats.Jpeg.JpegColorSpace
+  field PeachImage.Formats.Jpeg.JpegColorSpace Cmyk static = 3
+  field PeachImage.Formats.Jpeg.JpegColorSpace Grayscale static = 0
+  field PeachImage.Formats.Jpeg.JpegColorSpace Rgb static = 2
+  field PeachImage.Formats.Jpeg.JpegColorSpace YCbCr static = 1
+  field PeachImage.Formats.Jpeg.JpegColorSpace Ycck static = 4
+  field System.Int32 value__
+sealed class PeachImage.Formats.Jpeg.JpegDecoderOptions : PeachImage.DecoderOptions
+  ctor .ctor()
+  property System.Boolean DecodeRawYcck get init
+  property System.Boolean FastUpsampling get init
+  property System.Boolean KeepAdobeCmykInverted get init
+sealed class PeachImage.Formats.Jpeg.JpegDecodingException : PeachImage.Formats.Jpeg.JpegFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Jpeg.JpegEncoderOptions : PeachImage.EncoderOptions
+  ctor .ctor()
+  property PeachImage.Formats.Jpeg.JpegChromaSubsampling Subsampling get init
+  property System.Boolean OptimizeHuffmanTables get init
+  property System.Boolean Progressive get init
+  property System.Int32 Quality get init
+  property System.Int32 RestartInterval get init
+  property System.Single QualityFraction get init
+sealed class PeachImage.Formats.Jpeg.JpegEncodingException : PeachImage.Formats.Jpeg.JpegFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+class PeachImage.Formats.Jpeg.JpegFormatException : PeachImage.ImageFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Jpeg.JpegMetadata
+  ctor .ctor()
+  property PeachImage.Formats.Jpeg.JpegColorSpace ColorSpace get init
+  property System.Boolean IsProgressive get init
+sealed class PeachImage.Formats.Jpeg2000.Jpeg2000DecoderOptions : PeachImage.DecoderOptions
+  ctor .ctor()
+  property System.Boolean IgnoreColorSpace get init
+  property System.Int32 ReduceResolutionLevels get init
+sealed class PeachImage.Formats.Jpeg2000.Jpeg2000DecodingException : PeachImage.Formats.Jpeg2000.Jpeg2000FormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+class PeachImage.Formats.Jpeg2000.Jpeg2000FormatException : PeachImage.ImageFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Jpeg2000.Jpeg2000UnsupportedFeatureException : PeachImage.Formats.Jpeg2000.Jpeg2000FormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Jxl.JxlDecoderOptions : PeachImage.DecoderOptions
+  ctor .ctor()
+sealed class PeachImage.Formats.Jxl.JxlDecodingException : PeachImage.Formats.Jxl.JxlFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Jxl.JxlEncoderOptions : PeachImage.EncoderOptions
+  ctor .ctor()
+  property System.Boolean AdaptiveQuantization get init
+  property System.Boolean Lossless get init
+  property System.Int32 Effort get init
+  property System.Int32 Quality get init
+  property System.Single QualityFraction get init
+sealed class PeachImage.Formats.Jxl.JxlEncodingException : PeachImage.Formats.Jxl.JxlFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+class PeachImage.Formats.Jxl.JxlFormatException : PeachImage.ImageFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+static class PeachImage.Formats.Jxl.JxlJpegRecompression
+  method System.Boolean TryRecompressJpeg(System.IO.Stream stream, System.Byte[]& jxl) static
+  method System.Boolean TryRecompressJpeg(System.IO.Stream stream, System.Int32 maxDegreeOfParallelism, System.Threading.Tasks.TaskScheduler taskScheduler, System.Byte[]& jxl) static
+  method System.Byte[] RecompressJpeg(System.IO.Stream stream) static
+  method System.Byte[] RecompressJpeg(System.IO.Stream stream, System.Int32 maxDegreeOfParallelism, System.Threading.Tasks.TaskScheduler taskScheduler = null) static
+  method System.Void RecompressJpeg(System.IO.Stream source, System.IO.Stream destination) static
+  method System.Void RecompressJpeg(System.IO.Stream source, System.IO.Stream destination, System.Int32 maxDegreeOfParallelism, System.Threading.Tasks.TaskScheduler taskScheduler = null) static
+static class PeachImage.Formats.Jxl.JxlJpegReconstruction
+  method System.Boolean HasJpegReconstructionData(System.IO.Stream stream) static
+  method System.Boolean TryReconstructJpeg(System.IO.Stream stream, System.Byte[]& jpeg) static
+  method System.Boolean TryReconstructJpeg(System.IO.Stream stream, System.Int32 maxDegreeOfParallelism, System.Threading.Tasks.TaskScheduler taskScheduler, System.Byte[]& jpeg) static
+  method System.Byte[] ReconstructJpeg(System.IO.Stream stream) static
+  method System.Byte[] ReconstructJpeg(System.IO.Stream stream, System.Int32 maxDegreeOfParallelism, System.Threading.Tasks.TaskScheduler taskScheduler = null) static
+  method System.Void ReconstructJpeg(System.IO.Stream source, System.IO.Stream destination) static
+  method System.Void ReconstructJpeg(System.IO.Stream source, System.IO.Stream destination, System.Int32 maxDegreeOfParallelism, System.Threading.Tasks.TaskScheduler taskScheduler = null) static
+sealed class PeachImage.Formats.Jxl.JxlUnsupportedFeatureException : PeachImage.Formats.Jxl.JxlFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+static class PeachImage.Formats.Png.PngAlphaSplit
+  method System.Boolean TryRead(System.IO.Stream stream, PeachImage.Formats.Png.PngAlphaSplitInfo& info) static
+  method System.Boolean TrySplit(PeachImage.Formats.Png.PngPassthroughInfo& passthrough, PeachImage.Formats.Png.PngAlphaSplitInfo& info) static
+struct PeachImage.Formats.Png.PngAlphaSplitInfo
+  ctor .ctor(System.Int32 Width, System.Int32 Height, System.Byte AlphaBitDepth, System.Byte[] AlphaData, System.Byte[] ColorData, System.Byte ColorBitDepth, System.Boolean ColorIsRgb)
+  method System.Boolean Equals(PeachImage.Formats.Png.PngAlphaSplitInfo other)
+  method System.Boolean Equals(System.Object obj)
+  method System.Int32 GetHashCode()
+  method System.String ToString()
+  method System.Void Deconstruct(System.Int32& Width, System.Int32& Height, System.Byte& AlphaBitDepth, System.Byte[]& AlphaData, System.Byte[]& ColorData, System.Byte& ColorBitDepth, System.Boolean& ColorIsRgb)
+  property System.Boolean ColorIsRgb get init
+  property System.Byte AlphaBitDepth get init
+  property System.Byte ColorBitDepth get init
+  property System.Byte[] AlphaData get init
+  property System.Byte[] ColorData get init
+  property System.Int32 Height get init
+  property System.Int32 Width get init
+enum PeachImage.Formats.Png.PngColorMode
+  field PeachImage.Formats.Png.PngColorMode Auto static = 0
+  field PeachImage.Formats.Png.PngColorMode Indexed static = 1
+  field PeachImage.Formats.Png.PngColorMode Truecolor static = 2
+  field System.Int32 value__
+enum PeachImage.Formats.Png.PngColorType
+  field PeachImage.Formats.Png.PngColorType Grayscale static = 0
+  field PeachImage.Formats.Png.PngColorType GrayscaleAlpha static = 4
+  field PeachImage.Formats.Png.PngColorType Palette static = 3
+  field PeachImage.Formats.Png.PngColorType Truecolor static = 2
+  field PeachImage.Formats.Png.PngColorType TruecolorAlpha static = 6
+  field System.Byte value__
+enum PeachImage.Formats.Png.PngCompressionLevel
+  field PeachImage.Formats.Png.PngCompressionLevel Default static = 1
+  field PeachImage.Formats.Png.PngCompressionLevel Fastest static = 0
+  field PeachImage.Formats.Png.PngCompressionLevel SmallestSize static = 2
+  field System.Int32 value__
+sealed class PeachImage.Formats.Png.PngDecoderOptions : PeachImage.DecoderOptions
+  ctor .ctor()
+  property System.Nullable<System.Double> ScreenGamma get init
+sealed class PeachImage.Formats.Png.PngDecodingException : PeachImage.Formats.Png.PngFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Png.PngEncoderOptions : PeachImage.EncoderOptions
+  ctor .ctor()
+  property PeachImage.Formats.Png.PngColorMode ColorMode get init
+  property PeachImage.Formats.Png.PngCompressionLevel CompressionLevel get init
+  property PeachImage.Formats.Png.PngFilterStrategy FilterStrategy get init
+  property System.Boolean Dither get init
+  property System.Boolean Interlace get init
+  property System.Int32 MaxColors get init
+  property System.Nullable<System.ValueTuple<System.Byte,System.Byte,System.Byte>> TransparentColor get init
+sealed class PeachImage.Formats.Png.PngEncodingException : PeachImage.Formats.Png.PngFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+enum PeachImage.Formats.Png.PngFilterStrategy
+  field PeachImage.Formats.Png.PngFilterStrategy Adaptive static = 0
+  field PeachImage.Formats.Png.PngFilterStrategy FixedAverage static = 4
+  field PeachImage.Formats.Png.PngFilterStrategy FixedNone static = 1
+  field PeachImage.Formats.Png.PngFilterStrategy FixedPaeth static = 5
+  field PeachImage.Formats.Png.PngFilterStrategy FixedSub static = 2
+  field PeachImage.Formats.Png.PngFilterStrategy FixedUp static = 3
+  field System.Int32 value__
+class PeachImage.Formats.Png.PngFormatException : PeachImage.ImageFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+static class PeachImage.Formats.Png.PngPassthrough
+  method System.Boolean TryRead(System.IO.Stream stream, PeachImage.Formats.Png.PngPassthroughInfo& info) static
+struct PeachImage.Formats.Png.PngPassthroughInfo
+  ctor .ctor(System.Int32 Width, System.Int32 Height, PeachImage.Formats.Png.PngColorType ColorType, System.Byte BitDepth, System.Boolean IsInterlaced, System.Boolean HasTrns, System.Boolean IsAnimated, System.Byte[] IdatData, System.Byte[] PaletteData, System.Byte[] TrnsData, System.Byte[] IccProfileData = null)
+  method System.Boolean Equals(PeachImage.Formats.Png.PngPassthroughInfo other)
+  method System.Boolean Equals(System.Object obj)
+  method System.Int32 GetHashCode()
+  method System.String ToString()
+  method System.Void Deconstruct(System.Int32& Width, System.Int32& Height, PeachImage.Formats.Png.PngColorType& ColorType, System.Byte& BitDepth, System.Boolean& IsInterlaced, System.Boolean& HasTrns, System.Boolean& IsAnimated, System.Byte[]& IdatData, System.Byte[]& PaletteData, System.Byte[]& TrnsData, System.Byte[]& IccProfileData)
+  property PeachImage.Formats.Png.PngColorType ColorType get init
+  property System.Boolean HasTrns get init
+  property System.Boolean IsAnimated get init
+  property System.Boolean IsInterlaced get init
+  property System.Byte BitDepth get init
+  property System.Byte[] IccProfileData get init
+  property System.Byte[] IdatData get init
+  property System.Byte[] PaletteData get init
+  property System.Byte[] TrnsData get init
+  property System.Int32 Height get init
+  property System.Int32 Width get init
+sealed class PeachImage.Formats.Png.PngTextEntry
+  ctor .ctor()
+  method System.Boolean TryParse(PeachImage.RawMetadataProfile profile, PeachImage.Formats.Png.PngTextEntry& entry) static
+  property System.Boolean WasCompressed get init
+  property System.String Keyword get init
+  property System.String LanguageTag get init
+  property System.String Text get init
+  property System.String TranslatedKeyword get init
+sealed class PeachImage.Formats.Tiff.TiffDecoderOptions : PeachImage.DecoderOptions
+  ctor .ctor()
+sealed class PeachImage.Formats.Tiff.TiffDecodingException : PeachImage.Formats.Tiff.TiffFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+class PeachImage.Formats.Tiff.TiffFormatException : PeachImage.ImageFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Tiff.TiffUnsupportedFeatureException : PeachImage.Formats.Tiff.TiffFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+enum PeachImage.Formats.Webp.WebpCompressionLevel
+  field PeachImage.Formats.Webp.WebpCompressionLevel Default static = 1
+  field PeachImage.Formats.Webp.WebpCompressionLevel Fastest static = 0
+  field PeachImage.Formats.Webp.WebpCompressionLevel SmallestSize static = 2
+  field System.Int32 value__
+sealed class PeachImage.Formats.Webp.WebpDecoderOptions : PeachImage.DecoderOptions
+  ctor .ctor()
+sealed class PeachImage.Formats.Webp.WebpDecodingException : PeachImage.Formats.Webp.WebpFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+sealed class PeachImage.Formats.Webp.WebpEncoderOptions : PeachImage.EncoderOptions
+  ctor .ctor()
+  property PeachImage.Formats.Webp.WebpCompressionLevel CompressionLevel get init
+  property System.Boolean Lossless get init
+  property System.Boolean UseColorCache get init
+  property System.Int32 Quality get init
+  property System.Single QualityFraction get init
+sealed class PeachImage.Formats.Webp.WebpEncodingException : PeachImage.Formats.Webp.WebpFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+class PeachImage.Formats.Webp.WebpFormatException : PeachImage.ImageFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+enum PeachImage.FrameDisposalMethod
+  field PeachImage.FrameDisposalMethod DoNotDispose static = 1
+  field PeachImage.FrameDisposalMethod None static = 0
+  field PeachImage.FrameDisposalMethod RestoreToBackground static = 2
+  field PeachImage.FrameDisposalMethod RestoreToPrevious static = 3
+  field System.Int32 value__
+enum PeachImage.GamutHandling
+  field PeachImage.GamutHandling Clip static = 0
+  field PeachImage.GamutHandling Preserve static = 1
+  field System.Int32 value__
+enum PeachImage.HdrToneMapping
+  field PeachImage.HdrToneMapping Preserve static = 0
+  field PeachImage.HdrToneMapping ToSdr static = 1
+  field System.Int32 value__
+sealed class PeachImage.IccColorProfile
+  ctor .ctor(System.ReadOnlySpan<System.Byte> profileBytes)
+  method System.Boolean TryConvertToSrgb(System.ReadOnlySpan<System.Single> deviceComponents, System.Single& r, System.Single& g, System.Single& b, System.Nullable<PeachImage.IccRenderingIntent> intent = null, System.Boolean blackPointCompensation = False)
+  method System.Boolean TryCreate(System.ReadOnlySpan<System.Byte> profileBytes, PeachImage.IccColorProfile& profile) static
+  method System.Nullable<PeachImage.ColorSpaceDescription> Describe()
+  method System.Nullable<PeachImage.NamedColorSpace> Identify()
+  method System.Void ConvertTo(PeachImage.IccColorProfile destination, System.ReadOnlySpan<System.Byte> deviceValues, System.Span<System.Byte> destinationValues, System.Int32 pixelCount, System.Nullable<PeachImage.IccRenderingIntent> intent = null, System.Boolean blackPointCompensation = False)
+  method System.Void ConvertToSrgb(System.ReadOnlySpan<System.Byte> deviceValues, System.Span<System.Byte> destination, System.Int32 pixelCount, System.Nullable<PeachImage.IccRenderingIntent> intent = null, System.Boolean blackPointCompensation = False)
+  property PeachImage.IccColorSpace DataColorSpace get
+  property PeachImage.IccRenderingIntent DefaultRenderingIntent get
+  property System.Int32 ChannelCount get
+  property System.ReadOnlyMemory<System.Byte> ProfileBytes get
+  property System.String Description get
+enum PeachImage.IccColorSpace
+  field PeachImage.IccColorSpace Cmyk static = 3
+  field PeachImage.IccColorSpace Gray static = 1
+  field PeachImage.IccColorSpace Rgb static = 2
+  field PeachImage.IccColorSpace Unknown static = 0
+  field System.Int32 value__
+sealed class PeachImage.IccProfileException : System.Exception
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+enum PeachImage.IccRenderingIntent
+  field PeachImage.IccRenderingIntent AbsoluteColorimetric static = 3
+  field PeachImage.IccRenderingIntent Perceptual static = 0
+  field PeachImage.IccRenderingIntent RelativeColorimetric static = 1
+  field PeachImage.IccRenderingIntent Saturation static = 2
+  field System.Int32 value__
+sealed class PeachImage.Image
+  method PeachImage.Image ApplyOrientation(PeachImage.ImageOrientation orientation)
+  method PeachImage.Image Clone()
+  method PeachImage.Image ConvertColorSpace(PeachImage.IccColorProfile target, PeachImage.ColorConversionOptions options = null)
+  method PeachImage.Image ConvertColorSpace(PeachImage.NamedColorSpace target, PeachImage.ColorConversionOptions options = null)
+  method PeachImage.Image ConvertTo(PeachImage.PixelFormat targetFormat)
+  method PeachImage.Image ConvertTo(PeachImage.PixelFormat targetFormat, PeachImage.PixelConversionOptions options)
+  method PeachImage.Image ConvertTo(PeachImage.PixelFormat targetFormat, System.Int32 maxDegreeOfParallelism, System.Threading.Tasks.TaskScheduler taskScheduler = null)
+  method PeachImage.Image ConvertToSrgb()
+  method PeachImage.Image ConvertToSrgb(PeachImage.IccColorProfile fallbackCmykProfile)
+  method PeachImage.Image Create(System.Int32 width, System.Int32 height, PeachImage.PixelFormat pixelFormat) static
+  method PeachImage.Image Crop(PeachImage.ImageRegion region)
+  method PeachImage.Image FromPixels(System.ReadOnlySpan<System.Byte> pixels, System.Int32 width, System.Int32 height, PeachImage.PixelFormat format, System.Int32 strideBytes = 0) static
+  method PeachImage.Image Load(System.IO.Stream stream, PeachImage.DecoderOptions options = null) static
+  method PeachImage.Image Load(System.ReadOnlySpan<System.Byte> data, PeachImage.DecoderOptions options = null) static
+  method PeachImage.Image Load(System.String path, PeachImage.DecoderOptions options = null) static
+  method PeachImage.Image LoadBitmap(System.IO.Stream stream, PeachImage.BitmapRequest request = null) static
+  method PeachImage.Image LoadBitmap(System.ReadOnlySpan<System.Byte> data, PeachImage.BitmapRequest request = null) static
+  method PeachImage.Image Resize(System.Int32 width, System.Int32 height, PeachImage.ResizeOptions options = null)
+  method PeachImage.Image Wrap(System.Byte[] pixels, System.Int32 width, System.Int32 height, PeachImage.PixelFormat format) static
+  method PeachImage.ImageFormatInfo GetFormatInfo(System.String formatName) static
+  method PeachImage.ImageInfo DecodeInto(System.IO.Stream stream, System.Span<System.Byte> destination, PeachImage.ImageMetadata& metadata, System.Int32 rowStride = 0, PeachImage.DecoderOptions options = null) static
+  method PeachImage.ImageInfo DecodeInto(System.ReadOnlySpan<System.Byte> data, System.Span<System.Byte> destination, PeachImage.ImageMetadata& metadata, System.Int32 rowStride = 0, PeachImage.DecoderOptions options = null) static
+  method PeachImage.ImageInfo Identify(System.IO.Stream stream) static
+  method PeachImage.ImageInfo Identify(System.IO.Stream stream, PeachImage.DecoderOptions options) static
+  method System.Boolean TryLoad(System.IO.Stream stream, PeachImage.Image& image, PeachImage.DecoderOptions options = null) static
+  method System.Span<System.Byte> GetPixelSpan()
+  method System.Span<System.Byte> GetRowSpan(System.Int32 y)
+  method System.Threading.Tasks.Task SaveAsync(System.IO.Stream stream, System.String formatName, PeachImage.EncoderOptions options = null, System.Threading.CancellationToken cancellationToken = null)
+  method System.Threading.Tasks.Task SaveAsync(System.String path, PeachImage.EncoderOptions options = null, System.Threading.CancellationToken cancellationToken = null)
+  method System.Threading.Tasks.Task<PeachImage.Image> LoadAsync(System.IO.Stream stream, PeachImage.DecoderOptions options = null, System.Threading.CancellationToken cancellationToken = null) static
+  method System.Void ApplyOrientation(PeachImage.ImageOrientation orientation, PeachImage.Image destination)
+  method System.Void ApplyOrientationInPlace(PeachImage.ImageOrientation orientation)
+  method System.Void CopyPixelsTo(System.Span<System.Byte> destination, System.Int32 strideBytes = 0)
+  method System.Void Dispose()
+  method System.Void Save(System.IO.Stream stream, System.String formatName, PeachImage.EncoderOptions options = null)
+  method System.Void Save(System.String path, PeachImage.EncoderOptions options = null)
+  property PeachImage.ImageMetadata Metadata get
+  property PeachImage.PixelFormat PixelFormat get
+  property System.Boolean HasAlpha get
+  property System.Boolean IsAnimated get
+  property System.Collections.Generic.IReadOnlyList<PeachImage.ImageFormatInfo> SupportedFormats get static
+  property System.Int32 Height get
+  property System.Int32 Width get
+  property System.Memory<System.Byte> PixelMemory get
+sealed class PeachImage.ImageDecoder
+  ctor .ctor(PeachImage.DecoderOptions options = null)
+  method PeachImage.ImageInfo DecodeInto(System.IO.Stream stream, System.Span<System.Byte> destination, PeachImage.ImageMetadata& metadata, System.Int32 rowStride = 0)
+  method PeachImage.ImageInfo DecodeInto(System.ReadOnlySpan<System.Byte> data, System.Span<System.Byte> destination, PeachImage.ImageMetadata& metadata, System.Int32 rowStride = 0)
+  method System.Boolean TryDecodeInto(System.ReadOnlySpan<System.Byte> data, System.Span<System.Byte> destination, PeachImage.ImageInfo& info, PeachImage.ImageMetadata& metadata, System.Int32 rowStride = 0)
+  method System.Void Dispose()
+static class PeachImage.ImageEncoder
+  method System.Void Encode(System.ReadOnlyMemory<System.Byte> pixels, System.Int32 width, System.Int32 height, PeachImage.PixelFormat format, System.IO.Stream destination, System.String formatName, PeachImage.EncoderOptions options = null, System.Int32 strideBytes = 0, System.Nullable<PeachImage.NamedColorSpace> colorSpace = null, PeachImage.ImageMetadata metadata = null) static
+  method System.Void Encode(System.ReadOnlySpan<System.Byte> pixels, System.Int32 width, System.Int32 height, PeachImage.PixelFormat format, System.IO.Stream destination, System.String formatName, PeachImage.EncoderOptions options = null, System.Int32 strideBytes = 0, System.Nullable<PeachImage.NamedColorSpace> colorSpace = null, PeachImage.ImageMetadata metadata = null) static
+class PeachImage.ImageFormatException : System.Exception
+  ctor .ctor()
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.Exception innerException)
+  ctor .ctor(System.String message, System.String formatName)
+  ctor .ctor(System.String message, System.String formatName, System.Exception innerException)
+  property System.String FormatName get
+struct PeachImage.ImageFormatInfo
+  ctor .ctor(System.String FormatName, System.Collections.Generic.IReadOnlyList<System.String> FileExtensions, System.Collections.Generic.IReadOnlyList<System.String> MimeTypes, System.Boolean CanDecode, System.Boolean CanEncode, System.Boolean CanDecodeTransparency, System.Boolean CanEncodeTransparency)
+  method System.Boolean Equals(PeachImage.ImageFormatInfo other)
+  method System.Boolean Equals(System.Object obj)
+  method System.Int32 GetHashCode()
+  method System.String ToString()
+  method System.Void Deconstruct(System.String& FormatName, System.Collections.Generic.IReadOnlyList`1System.String& FileExtensions, System.Collections.Generic.IReadOnlyList`1System.String& MimeTypes, System.Boolean& CanDecode, System.Boolean& CanEncode, System.Boolean& CanDecodeTransparency, System.Boolean& CanEncodeTransparency)
+  property System.Boolean CanDecode get init
+  property System.Boolean CanDecodeTransparency get init
+  property System.Boolean CanEncode get init
+  property System.Boolean CanEncodeTransparency get init
+  property System.Collections.Generic.IReadOnlyList<System.String> FileExtensions get init
+  property System.Collections.Generic.IReadOnlyList<System.String> MimeTypes get init
+  property System.String FormatName get init
+struct PeachImage.ImageInfo
+  ctor .ctor(System.Int32 Width, System.Int32 Height, PeachImage.PixelFormat PixelFormat, System.String FormatName, System.Boolean IsAnimated = False, System.Boolean HasAlpha = False, System.Boolean IsAdobeInvertedCmyk = False, System.Boolean IsYcck = False, System.Boolean IsLosslessEncoding = False, System.Boolean HasPreview = False, PeachImage.ImageOrientation Orientation = Normal, System.Boolean HasLocation = False, System.Nullable<PeachImage.ExifLocation> ExifLocation = null)
+  method System.Boolean Equals(PeachImage.ImageInfo other)
+  method System.Boolean Equals(System.Object obj)
+  method System.Int32 GetHashCode()
+  method System.Int32 GetRequiredBufferSize(PeachImage.DecoderOptions options = null, System.Int32 rowStride = 0)
+  method System.String ToString()
+  method System.Void Deconstruct(System.Int32& Width, System.Int32& Height, PeachImage.PixelFormat& PixelFormat, System.String& FormatName, System.Boolean& IsAnimated, System.Boolean& HasAlpha, System.Boolean& IsAdobeInvertedCmyk, System.Boolean& IsYcck, System.Boolean& IsLosslessEncoding, System.Boolean& HasPreview, PeachImage.ImageOrientation& Orientation, System.Boolean& HasLocation, System.Nullable`1PeachImage.ExifLocation& ExifLocation)
+  property PeachImage.ImageOrientation Orientation get init
+  property PeachImage.PixelFormat PixelFormat get init
+  property System.Boolean HasAlpha get init
+  property System.Boolean HasLocation get init
+  property System.Boolean HasPreview get init
+  property System.Boolean IsAdobeInvertedCmyk get init
+  property System.Boolean IsAnimated get init
+  property System.Boolean IsHdr get
+  property System.Boolean IsHighBitDepth get
+  property System.Boolean IsLosslessEncoding get init
+  property System.Boolean IsYcck get init
+  property System.Int32 BitsPerSample get
+  property System.Int32 Height get init
+  property System.Int32 Width get init
+  property System.Nullable<PeachImage.CicpCode> Cicp get init
+  property System.Nullable<PeachImage.ColorSpaceDescription> ColorSpace get init
+  property System.Nullable<PeachImage.ExifLocation> ExifLocation get init
+  property System.String FormatName get init
+sealed class PeachImage.ImageMetadata
+  ctor .ctor()
+  method PeachImage.IccColorProfile GetIccColorProfile()
+  method System.Nullable<PeachImage.ColorSpaceDescription> GetColorSpace()
+  method System.Nullable<PeachImage.NamedColorSpace> GetNamedColorSpace()
+  property System.Boolean HasLocation get
+  property System.Boolean IsHdr get
+  property System.Byte[] IccProfileBytes get
+  property System.Collections.Generic.IList<PeachImage.RawMetadataProfile> Profiles get
+  property System.Nullable<PeachImage.CicpCode> Cicp get set
+  property System.Nullable<PeachImage.ExifLocation> ExifLocation get
+  property System.Nullable<System.Double> HorizontalDpi get
+  property System.Nullable<System.Double> HorizontalResolution get set
+  property System.Nullable<System.Double> VerticalDpi get
+  property System.Nullable<System.Double> VerticalResolution get set
+enum PeachImage.ImageOrientation
+  field PeachImage.ImageOrientation MirrorHorizontal static = 2
+  field PeachImage.ImageOrientation MirrorVertical static = 4
+  field PeachImage.ImageOrientation Normal static = 1
+  field PeachImage.ImageOrientation Rotate180 static = 3
+  field PeachImage.ImageOrientation Rotate270 static = 8
+  field PeachImage.ImageOrientation Rotate90 static = 6
+  field PeachImage.ImageOrientation Transpose static = 5
+  field PeachImage.ImageOrientation Transverse static = 7
+  field System.Int32 value__
+struct PeachImage.ImageRegion
+  ctor .ctor(System.Int32 X, System.Int32 Y, System.Int32 Width, System.Int32 Height)
+  method System.Boolean Equals(PeachImage.ImageRegion other)
+  method System.Boolean Equals(System.Object obj)
+  method System.Int32 GetHashCode()
+  method System.String ToString()
+  method System.Void Deconstruct(System.Int32& X, System.Int32& Y, System.Int32& Width, System.Int32& Height)
+  property System.Int32 Height get init
+  property System.Int32 Width get init
+  property System.Int32 X get init
+  property System.Int32 Y get init
+sealed class PeachImage.ImageTooLargeException : PeachImage.ImageFormatException
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.String formatName)
+enum PeachImage.MetadataProfileKind
+  field PeachImage.MetadataProfileKind AdobeApp14 static = 4
+  field PeachImage.MetadataProfileKind Background static = 9
+  field PeachImage.MetadataProfileKind Chromaticity static = 6
+  field PeachImage.MetadataProfileKind Cicp static = 13
+  field PeachImage.MetadataProfileKind Exif static = 0
+  field PeachImage.MetadataProfileKind Gamma static = 5
+  field PeachImage.MetadataProfileKind Icc static = 1
+  field PeachImage.MetadataProfileKind Iptc static = 12
+  field PeachImage.MetadataProfileKind Jfif static = 3
+  field PeachImage.MetadataProfileKind Srgb static = 7
+  field PeachImage.MetadataProfileKind Text static = 10
+  field PeachImage.MetadataProfileKind Time static = 8
+  field PeachImage.MetadataProfileKind Unknown static = 11
+  field PeachImage.MetadataProfileKind Xmp static = 2
+  field System.Int32 value__
+enum PeachImage.NamedColorSpace
+  field PeachImage.NamedColorSpace DisplayP3 static = 2
+  field PeachImage.NamedColorSpace LinearDisplayP3 static = 3
+  field PeachImage.NamedColorSpace LinearRec2020 static = 5
+  field PeachImage.NamedColorSpace LinearSrgb static = 1
+  field PeachImage.NamedColorSpace Rec2020 static = 4
+  field PeachImage.NamedColorSpace Rec2100Hlg static = 7
+  field PeachImage.NamedColorSpace Rec2100Pq static = 6
+  field PeachImage.NamedColorSpace Srgb static = 0
+  field System.Int32 value__
+sealed class PeachImage.PixelConversionOptions
+  ctor .ctor()
+  property System.Boolean DecodeSrgb get set
+  property System.Boolean EncodeSrgb get set
+  property System.Int32 MaxDegreeOfParallelism get set
+  property System.Threading.Tasks.TaskScheduler TaskScheduler get set
+enum PeachImage.PixelFormat
+  field PeachImage.PixelFormat Cmyk32 static = 3
+  field PeachImage.PixelFormat Gray16 static = 4
+  field PeachImage.PixelFormat Gray8 static = 0
+  field PeachImage.PixelFormat GrayF32 static = 8
+  field PeachImage.PixelFormat PremultipliedRgba32 static = 12
+  field PeachImage.PixelFormat PremultipliedRgba64 static = 13
+  field PeachImage.PixelFormat PremultipliedRgbaF16 static = 14
+  field PeachImage.PixelFormat PremultipliedRgbaF32 static = 15
+  field PeachImage.PixelFormat Rgb24 static = 1
+  field PeachImage.PixelFormat Rgb48 static = 5
+  field PeachImage.PixelFormat RgbF32 static = 9
+  field PeachImage.PixelFormat Rgba32 static = 2
+  field PeachImage.PixelFormat Rgba64 static = 6
+  field PeachImage.PixelFormat RgbaF16 static = 11
+  field PeachImage.PixelFormat RgbaF32 static = 10
+  field PeachImage.PixelFormat Ycck32 static = 7
+  field System.Byte value__
+static class PeachImage.PixelFormatExtensions
+  method PeachImage.PixelFormat ToPremultipliedAlpha(PeachImage.PixelFormat format) static
+  method PeachImage.PixelFormat ToStraightAlpha(PeachImage.PixelFormat format) static
+  method System.Boolean HasAlpha(PeachImage.PixelFormat format) static
+  method System.Boolean IsFloat(PeachImage.PixelFormat format) static
+  method System.Boolean IsHalfFloat(PeachImage.PixelFormat format) static
+  method System.Boolean IsPremultiplied(PeachImage.PixelFormat format) static
+  method System.Int32 GetBytesPerPixel(PeachImage.PixelFormat format) static
+  method System.Int32 GetBytesPerSample(PeachImage.PixelFormat format) static
+  method System.Int32 GetChannelCount(PeachImage.PixelFormat format) static
+sealed class PeachImage.RawMetadataProfile
+  ctor .ctor()
+  property PeachImage.MetadataProfileKind Kind get init
+  property System.Byte[] Data get init
+enum PeachImage.ResamplingFilter
+  field PeachImage.ResamplingFilter Bicubic static = 0
+  field PeachImage.ResamplingFilter Bilinear static = 13
+  field PeachImage.ResamplingFilter Box static = 1
+  field PeachImage.ResamplingFilter CatmullRom static = 2
+  field PeachImage.ResamplingFilter Hermite static = 3
+  field PeachImage.ResamplingFilter Lanczos2 static = 4
+  field PeachImage.ResamplingFilter Lanczos3 static = 5
+  field PeachImage.ResamplingFilter Lanczos5 static = 6
+  field PeachImage.ResamplingFilter Lanczos8 static = 7
+  field PeachImage.ResamplingFilter MitchellNetravali static = 8
+  field PeachImage.ResamplingFilter NearestNeighbor static = 9
+  field PeachImage.ResamplingFilter Robidoux static = 10
+  field PeachImage.ResamplingFilter RobidouxSharp static = 11
+  field PeachImage.ResamplingFilter Spline static = 12
+  field PeachImage.ResamplingFilter Welch static = 14
+  field System.Int32 value__
+enum PeachImage.ResizeMode
+  field PeachImage.ResizeMode Crop static = 2
+  field PeachImage.ResizeMode Exact static = 0
+  field PeachImage.ResizeMode Max static = 1
+  field PeachImage.ResizeMode Pad static = 3
+  field System.Int32 value__
+class PeachImage.ResizeOptions
+  ctor .ctor()
+  property PeachImage.AnchorPosition Anchor get init
+  property PeachImage.ResamplingFilter Filter get init
+  property PeachImage.ResizeMode Mode get init
+  property System.Boolean AlwaysCopy get init
+  property System.Boolean CopyMetadata get init
+  property System.Int32 MaxDegreeOfParallelism get init
+  property System.Nullable<System.ValueTuple<System.Byte,System.Byte,System.Byte,System.Byte>> BackgroundColor get init
+  property System.Threading.Tasks.TaskScheduler TaskScheduler get init
+enum PeachImage.ResizeQuality
+  field PeachImage.ResizeQuality High static = 3
+  field PeachImage.ResizeQuality Low static = 1
+  field PeachImage.ResizeQuality Medium static = 2
+  field PeachImage.ResizeQuality Pixelated static = 0
+  field System.Int32 value__
+enum PeachImage.TransferFunction
+  field PeachImage.TransferFunction Bt709 static = 4
+  field PeachImage.TransferFunction Gamma static = 3
+  field PeachImage.TransferFunction Hlg static = 6
+  field PeachImage.TransferFunction Linear static = 1
+  field PeachImage.TransferFunction Pq static = 5
+  field PeachImage.TransferFunction Srgb static = 2
+  field PeachImage.TransferFunction Unknown static = 0
+  field System.Int32 value__
+sealed class PeachImage.UnknownImageFormatException : PeachImage.ImageFormatException
+  ctor .ctor()
+  ctor .ctor(System.String message)
+  ctor .ctor(System.String message, System.String formatName)
+sealed class PeachImage.UnsupportedFormatException : PeachImage.ImageFormatException
+  ctor .ctor(System.String formatName)
+  ctor .ctor(System.String message, System.String formatName)
