@@ -135,7 +135,7 @@ internal static class PngImageDecoder
         // byte swap, but skips the ushort-sample-buffer round trip and LUT indirection the general path
         // requires. This covers the overwhelmingly common real-world case (photos/screenshots/web
         // graphics) and skips one or two full O(width) passes per row.
-        bool directCopy8 = header.BitDepth == 8 && grayOrRgbTrnsKey is null &&
+        bool directCopy8 = header.BitDepth == 8 && grayOrRgbTrnsKey is null && !gammaCorrectionActive &&
             header.ColorType is PngColorType.Grayscale or PngColorType.Truecolor or PngColorType.TruecolorAlpha;
         bool directCopy16 = header.BitDepth == 16 && grayOrRgbTrnsKey is null && !gammaCorrectionActive &&
             header.ColorType is PngColorType.Grayscale or PngColorType.Truecolor or PngColorType.TruecolorAlpha;

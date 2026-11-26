@@ -41,6 +41,13 @@ internal static class PngAncillaryChunkReader
         {
             metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Background, Data = data });
         }
+        else if (type == PngChunkType.Cicp)
+        {
+            if (data.Length == 4)
+            {
+                metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Cicp, Data = data });
+            }
+        }
         else if (type == PngChunkType.Iccp)
         {
             TryReadIccp(data, metadata);
