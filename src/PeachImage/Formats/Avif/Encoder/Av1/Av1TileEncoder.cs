@@ -270,12 +270,13 @@ internal static class Av1TileEncoder
     /// <c>tools/PeachImage.LibaomParity</c>): invoked once per real leaf commit with a full
     /// <see cref="Av1BlockDecisionRecord"/> of that leaf's own decision. <see langword="null"/> in every
     /// production call site -- never allocates or checks anything beyond one null-check per leaf when unset.
+    /// <param name="bitDepth">Sample bit depth of every plane: 8, 10 or 12.</param>
     /// </param>
     public static byte[] EncodeTile(
         int[] yPlane, int yWidth, int yHeight,
         int[]? uPlane, int[]? vPlane, int chromaWidth, int chromaHeight,
         int[] reconY, int[]? reconU, int[]? reconV,
-        bool monoChrome, int baseQIdx, bool lossless = false, bool chroma444 = false, int effort = 2, bool allowScreenContentTools = false, bool allowIntrabc = false, int trueWidth = 0, int trueHeight = 0, Action<Av1BlockDecisionRecord>? onLeafCommitted = null)
+        bool monoChrome, int baseQIdx, bool lossless = false, bool chroma444 = false, int effort = 2, bool allowScreenContentTools = false, bool allowIntrabc = false, int trueWidth = 0, int trueHeight = 0, Action<Av1BlockDecisionRecord>? onLeafCommitted = null, int bitDepth = 8)
     {
         int miCols = yWidth / 4;
         int miRows = yHeight / 4;
@@ -331,6 +332,7 @@ internal static class Av1TileEncoder
             MiCols = miCols,
             MiRows = miRows,
             BaseQIdx = baseQIdx,
+            BitDepth = bitDepth,
             Lossless = lossless,
             Chroma444 = chroma444,
             SbMiMask = lossless ? 31 : 15,
@@ -373,7 +375,7 @@ internal static class Av1TileEncoder
             PaletteKMeansDataU = AvifBufferPool.SharedInt32.Rent(64 * 64),
             PaletteKMeansDataV = AvifBufferPool.SharedInt32.Rent(64 * 64),
             PaletteTopColors = new int[8],
-            PaletteCountBuf = new int[256],
+            PaletteCountBuf = new int[1 << bitDepth],
             YCoeffCtx = new Av1CoefficientWriter.PlaneContext(miCols, miRows),
             UCoeffCtx = monoChrome ? null : new Av1CoefficientWriter.PlaneContext(chroma444 ? miCols : miCols / 2, chroma444 ? miRows : miRows / 2),
             VCoeffCtx = monoChrome ? null : new Av1CoefficientWriter.PlaneContext(chroma444 ? miCols : miCols / 2, chroma444 ? miRows : miRows / 2),
@@ -392,7 +394,7 @@ internal static class Av1TileEncoder
             // (every use site reseeds before reading), so building it from defaults like this is fine.
             ScratchCdf = new Av1CdfContext(baseQIdx),
             AdaptingTrialSink = new Av1AdaptingTrialSymbolSink(),
-            Lambda = Av1RdCost.QIndexToLambda(baseQIdx),
+            Lambda = Av1RdCost.QIndexToLambda(baseQIdx, bitDepth),
 
             // Rented once for the whole tile and reused/overwritten across every block below, rather than
             // allocated fresh per block. Pred/BestPred must be sized for the largest leaf this encoder can
@@ -438,7 +440,7 @@ internal static class Av1TileEncoder
         if (lossless && allowIntrabc)
         {
             int maxBlockSize = speedFeatures.HashMax8x8IntrabcBlocks ? 8 : 128;
-            state.IntrabcHashTable = new Av1IntrabcHashTable(yPlane, yWidth, yHeight, maxBlockSize);
+            state.IntrabcHashTable = new Av1IntrabcHashTable(yPlane, yWidth, yHeight, maxBlockSize, bitDepth);
         }
 
         try
@@ -498,6 +500,9 @@ internal static class Av1TileEncoder
         public required int MiCols;
         public required int MiRows;
         public required int BaseQIdx;
+
+        /// <summary>Sample bit depth of the planes: 8, 10 or 12.</summary>
+        public required int BitDepth;
         public required bool Lossless;
         public required bool Chroma444;
 
@@ -1150,7 +1155,7 @@ internal static class Av1TileEncoder
         if (sizeMi == 16 && s.Lossless && s.SpeedFeatures.IntraCnnBasedPartPruneLevel > 0 && hasRows && hasCols)
         {
             childCnnCache = new Av1IntraCnnPartitionPruner.Cache();
-            Av1IntraCnnPartitionPruner.RunCnn(s.SourceY, s.YWidth, s.TrueMiCols * 4, s.TrueMiRows * 4, c * 4, r * 4, s.BaseQIdx, bitDepth: 8, childCnnCache);
+            Av1IntraCnnPartitionPruner.RunCnn(s.SourceY, s.YWidth, s.TrueMiCols * 4, s.TrueMiRows * 4, c * 4, r * 4, s.BaseQIdx, bitDepth: s.BitDepth, childCnnCache);
         }
 
         long costSplitChildren = DecidePartition(s, r, c, half, childCnnCache, (ownQuadTreeIdx * 4) + 1).Cost
@@ -1368,7 +1373,7 @@ internal static class Av1TileEncoder
         Span<int> residual = stackalloc int[16];
         Span<int> coeff = stackalloc int[16];
 
-        Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, x, y, bitDepth: 8);
+        Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, x, y, bitDepth: s.BitDepth);
         long satd = 0;
         for (int ty = 0; ty < sizePixels; ty += 4)
         {
@@ -1406,7 +1411,7 @@ internal static class Av1TileEncoder
         }
 
         bool angleDeltaAllowed = sizePixels >= 8;
-        Av1IntraPrediction.BuildEdges(above, left, edgeSource, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
+        Av1IntraPrediction.BuildEdges(above, left, edgeSource, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: s.BitDepth);
 
         // Two-phase, like libaom's own angle-delta refinement: score every mode at angle delta 0 first, then
         // only refine the other deltas for the best few directional modes. Candidates never scored keep
@@ -1585,8 +1590,8 @@ internal static class Av1TileEncoder
                 }
                 else
                 {
-                    Av1IntraPrediction.BuildEdges(above, left, s.SourceY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
-                    Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.EdgeMaxX, s.EdgeMaxY, x, y, bitDepth: 8);
+                    Av1IntraPrediction.BuildEdges(above, left, s.SourceY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.EdgeMaxX, s.EdgeMaxY, bitDepth: s.BitDepth);
+                    Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.EdgeMaxX, s.EdgeMaxY, x, y, bitDepth: s.BitDepth);
                     cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
                 }
 
@@ -1756,8 +1761,8 @@ internal static class Av1TileEncoder
 
                 var above = new Av1EdgeArray(16);
                 var left = new Av1EdgeArray(16);
-                Av1IntraPrediction.BuildEdges(above, left, s.SourceY, s.YWidth, subX, subY, 4, 4, availL, availU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
-                Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, subX, subY, bitDepth: 8);
+                Av1IntraPrediction.BuildEdges(above, left, s.SourceY, s.YWidth, subX, subY, 4, 4, availL, availU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: s.BitDepth);
+                Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, subX, subY, bitDepth: s.BitDepth);
 
                 for (int i = 0; i < 4; i++)
                 {
@@ -1770,7 +1775,7 @@ internal static class Av1TileEncoder
                 }
 
                 Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
-                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx, s.BitDepth);
 
                 int subX4 = subX >> 2;
                 int subY4 = subY >> 2;
@@ -1974,12 +1979,12 @@ internal static class Av1TileEncoder
 
         long CandidateCost(int mode, int angleDelta)
         {
-            Av1IntraPrediction.BuildEdges(above, left, s.SourceU!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: 8);
-            Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: 8);
+            Av1IntraPrediction.BuildEdges(above, left, s.SourceU!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: s.BitDepth);
+            Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: s.BitDepth);
             long cost = ComputeCandidateCost(s, s.SourceU!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.UCoeffCtx!);
 
-            Av1IntraPrediction.BuildEdges(above, left, s.SourceV!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: 8);
-            Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: 8);
+            Av1IntraPrediction.BuildEdges(above, left, s.SourceV!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight: false, haveBelowLeft: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: s.BitDepth);
+            Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: s.BitDepth);
             cost += ComputeCandidateCost(s, s.SourceV!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.VCoeffCtx!);
             return cost;
         }
@@ -2080,7 +2085,7 @@ internal static class Av1TileEncoder
 
         Span<int> cache = stackalloc int[16];
         int nCache = GetPaletteCacheColors(s, 0, r, c, availU, availL, cache);
-        Av1PaletteSearch.OptimizePaletteColors(cache[..nCache], nCache, trialColors.AsSpan(0, candN), candN);
+        Av1PaletteSearch.OptimizePaletteColors(cache[..nCache], nCache, trialColors.AsSpan(0, candN), candN, s.BitDepth);
 
         int numUnique = Av1PaletteSearch.RemoveDuplicates(trialColors.AsSpan(0, candN), candN);
         if (numUnique < Av1PaletteSearch.PaletteMinSize)
@@ -2238,7 +2243,7 @@ internal static class Av1TileEncoder
         allZeroResidual = false;
         cost = 0;
 
-        int colors = Av1PaletteSearch.CountColors(s.SourceY, s.YWidth, x, y, w, h, s.PaletteCountBuf);
+        int colors = Av1PaletteSearch.CountColors(s.SourceY, s.YWidth, x, y, w, h, s.PaletteCountBuf, 1 << s.BitDepth);
         if (colors <= 1 || colors > s.SpeedFeatures.ColorPaletteThresh)
         {
             return false;
@@ -2268,7 +2273,7 @@ internal static class Av1TileEncoder
         }
 
         int maxN = Math.Min(colors, Av1PaletteSearch.PaletteMaxSize);
-        Av1PaletteSearch.FindTopColors(s.PaletteCountBuf, maxN, s.PaletteTopColors);
+        Av1PaletteSearch.FindTopColors(s.PaletteCountBuf, maxN, s.PaletteTopColors, 1 << s.BitDepth);
 
         int bSize = BlockSizeFromWidthHeightMi(w / 4, h / 4);
         int bsizeCtx = GetPaletteBsizeCtx(bSize);
@@ -2439,8 +2444,8 @@ internal static class Av1TileEncoder
         allZeroResidual = false;
         cost = 0;
 
-        int colorsU = Av1PaletteSearch.CountColors(s.SourceU!, s.ChromaWidth, x, y, w, h, s.PaletteCountBuf);
-        int colorsV = Av1PaletteSearch.CountColors(s.SourceV!, s.ChromaWidth, x, y, w, h, s.PaletteCountBuf);
+        int colorsU = Av1PaletteSearch.CountColors(s.SourceU!, s.ChromaWidth, x, y, w, h, s.PaletteCountBuf, 1 << s.BitDepth);
+        int colorsV = Av1PaletteSearch.CountColors(s.SourceV!, s.ChromaWidth, x, y, w, h, s.PaletteCountBuf, 1 << s.BitDepth);
         int colorsThreshold = Math.Max(colorsU, colorsV);
         if (colorsThreshold <= 1 || colorsThreshold > s.SpeedFeatures.ColorPaletteThresh)
         {
@@ -2515,7 +2520,7 @@ internal static class Av1TileEncoder
 
             // optimize_palette_colors (palette.c:872): only ever snaps U -- confirmed by direct source
             // reading that V is never cached at all (Av1TileDecoder.ReadPaletteColorsUv's own remarks).
-            Av1PaletteSearch.OptimizePaletteColors(chromaCache[..nChromaCache], nChromaCache, centroidU[..nn], nn);
+            Av1PaletteSearch.OptimizePaletteColors(chromaCache[..nChromaCache], nChromaCache, centroidU[..nn], nn, s.BitDepth);
 
             SortChromaCentroidsByU(centroidU[..nn], centroidV[..nn]);
             Av1PaletteSearch.CalcIndices2D(dataU.AsSpan(0, nPixels), dataV.AsSpan(0, nPixels), centroidU[..nn], centroidV[..nn], s.PaletteTrialColorMap.AsSpan(0, nPixels), nPixels, nn);
@@ -2646,7 +2651,7 @@ internal static class Av1TileEncoder
                 }
 
                 Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
-                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx, s.BitDepth);
 
                 int subX4 = subX >> 2;
                 int subY4 = subY >> 2;
@@ -2717,7 +2722,7 @@ internal static class Av1TileEncoder
                 }
 
                 Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
-                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx, s.BitDepth);
 
                 for (int i = 0; i < 4; i++)
                 {
@@ -2725,7 +2730,7 @@ internal static class Av1TileEncoder
                 }
 
                 Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype, subC, subR, realCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
-                Av1LocalReconstructor.Reconstruct(recon, planeWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
+                Av1LocalReconstructor.Reconstruct(recon, planeWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true, bitDepth: s.BitDepth);
                 SetBlockDecoded(s, blockDecodedPlane, subR & s.SbMiMask, subC & s.SbMiMask, true);
             }
         }
@@ -2742,7 +2747,7 @@ internal static class Av1TileEncoder
     /// (<c>Av1TileDecoder.ReadPaletteColorsY</c>'s own <c>delta + 1</c>/<c>range - 1</c> convention) and 0
     /// for U (<c>ReadPaletteColorsUv</c>'s own unshifted convention).
     /// </summary>
-    private static long EstimateCacheAwareColorBits(ReadOnlySpan<int> cache, int nCache, ReadOnlySpan<int> colors, int n, int minVal)
+    private static long EstimateCacheAwareColorBits(ReadOnlySpan<int> cache, int nCache, ReadOnlySpan<int> colors, int n, int minVal, int bitDepth)
     {
         Span<bool> found = stackalloc bool[16];
         Span<int> explicitColors = stackalloc int[8];
@@ -2751,14 +2756,14 @@ internal static class Av1TileEncoder
         long bits = slotsChecked;
         if (nExplicit > 0)
         {
-            bits += 8;
+            bits += bitDepth;
             if (nExplicit > 1)
             {
                 bits += 2;
                 const int minBits = 5;
                 const int extraBits = 3;
                 int widthBits = minBits + extraBits;
-                int range = 256 - explicitColors[0] - minVal;
+                int range = (1 << bitDepth) - explicitColors[0] - minVal;
                 for (int idx = 1; idx < nExplicit; idx++)
                 {
                     bits += widthBits;
@@ -2776,7 +2781,7 @@ internal static class Av1TileEncoder
     {
         Span<int> cache = stackalloc int[16];
         int nCache = GetPaletteCacheColors(s, 0, r, c, availU, availL, cache);
-        return EstimateCacheAwareColorBits(cache[..nCache], nCache, colors.AsSpan(0, n), n, minVal: 1);
+        return EstimateCacheAwareColorBits(cache[..nCache], nCache, colors.AsSpan(0, n), n, minVal: 1, s.BitDepth);
     }
 
     /// <summary>Pure bit-count mirror of <see cref="WritePaletteColorsUv"/> -- see <see cref="EstimateCacheAwareColorBits"/>'s remarks for U; V stays its own flat, never-cached, never-delta-coded cost (unchanged).</summary>
@@ -2784,8 +2789,8 @@ internal static class Av1TileEncoder
     {
         Span<int> cache = stackalloc int[16];
         int nCache = GetPaletteCacheColors(s, 1, r, c, availU, availL, cache);
-        long bits = EstimateCacheAwareColorBits(cache[..nCache], nCache, uColors.AsSpan(0, n), n, minVal: 0);
-        bits += 1 + (n * 8);
+        long bits = EstimateCacheAwareColorBits(cache[..nCache], nCache, uColors.AsSpan(0, n), n, minVal: 0, s.BitDepth);
+        bits += 1 + (n * s.BitDepth);
         return bits;
     }
 
@@ -3098,7 +3103,7 @@ internal static class Av1TileEncoder
             }
 
             Av1ForwardTransform.Forward2D(residual, coeff, sizePixels);
-            Av1ForwardQuantizer.Quantize(coeff, levels, sizePixels, s.BaseQIdx);
+            Av1ForwardQuantizer.Quantize(coeff, levels, sizePixels, s.BaseQIdx, s.BitDepth);
 
             int w4 = sizePixels >> 2;
             scratch.SeedFrom(realCtx, x4, w4, y4, w4);
@@ -3139,7 +3144,7 @@ internal static class Av1TileEncoder
                 }
 
                 Av1ForwardWht.Forward4x4(subResidual.AsSpan(0, 16), coeff.AsSpan(0, 16));
-                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx, s.BitDepth);
 
                 int subX4 = (x + bx) >> 2;
                 int subY4 = (y + by) >> 2;
@@ -3306,10 +3311,10 @@ internal static class Av1TileEncoder
 
                 var above = new Av1EdgeArray(16);
                 var left = new Av1EdgeArray(16);
-                Av1IntraPrediction.BuildEdges(above, left, source, planeWidth, subX, subY, 4, 4, availL, availU, haveAboveRight, haveBelowLeft, edgeMaxX, edgeMaxY, bitDepth: 8);
+                Av1IntraPrediction.BuildEdges(above, left, source, planeWidth, subX, subY, 4, 4, availL, availU, haveAboveRight, haveBelowLeft, edgeMaxX, edgeMaxY, bitDepth: s.BitDepth);
 
                 var pred = s.Pred;
-                Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, mode, availL, availU, useFilterIntra, filterIntraMode, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, edgeMaxX, edgeMaxY, subX, subY, bitDepth: 8);
+                Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, mode, availL, availU, useFilterIntra, filterIntraMode, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, edgeMaxX, edgeMaxY, subX, subY, bitDepth: s.BitDepth);
 
                 var residual = s.Residual;
                 for (int i = 0; i < 16; i++)
@@ -3320,7 +3325,7 @@ internal static class Av1TileEncoder
                 var coeff = s.Coeff;
                 Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
                 var levels = s.Levels;
-                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx, s.BitDepth);
 
                 int subX4 = subX >> 2;
                 int subY4 = subY >> 2;
@@ -3406,10 +3411,10 @@ internal static class Av1TileEncoder
 
                 var above = new Av1EdgeArray(16);
                 var left = new Av1EdgeArray(16);
-                Av1IntraPrediction.BuildEdges(above, left, source, planeWidth, subX, subY, 4, 4, availL, availU, haveAboveRight, haveBelowLeft, edgeMaxX, edgeMaxY, bitDepth: 8);
+                Av1IntraPrediction.BuildEdges(above, left, source, planeWidth, subX, subY, 4, 4, availL, availU, haveAboveRight, haveBelowLeft, edgeMaxX, edgeMaxY, bitDepth: s.BitDepth);
 
                 var pred = s.Pred;
-                Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, mode, availL, availU, useFilterIntra, filterIntraMode, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, edgeMaxX, edgeMaxY, subX, subY, bitDepth: 8);
+                Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, mode, availL, availU, useFilterIntra, filterIntraMode, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, edgeMaxX, edgeMaxY, subX, subY, bitDepth: s.BitDepth);
 
                 for (int i = 0; i < 16; i++)
                 {
@@ -3444,7 +3449,7 @@ internal static class Av1TileEncoder
         var trial = s.TrialSink;
 
         Av1ForwardTransform.Forward2D(residual, coeff, sizePixels, txType);
-        Av1ForwardQuantizer.Quantize(coeff, levels, sizePixels, s.BaseQIdx);
+        Av1ForwardQuantizer.Quantize(coeff, levels, sizePixels, s.BaseQIdx, s.BitDepth);
 
         int w4 = sizePixels >> 2;
         scratch.SeedFrom(realCtx, x4, w4, y4, w4);
@@ -3517,8 +3522,8 @@ internal static class Av1TileEncoder
     private static void OptimizeCoeffTrellis(TileState s, int[] coeff, int[] levels, int sizePixels, int ptype, int x4, int y4, Av1CoefficientWriter.PlaneContext realCtx)
     {
         int txSz = Av1ForwardTransform.SizeToTxSz(sizePixels);
-        int dcQ = Av1Dequantizer.DcQ(s.BaseQIdx, 8);
-        int acQ = Av1Dequantizer.AcQ(s.BaseQIdx, 8);
+        int dcQ = Av1Dequantizer.DcQ(s.BaseQIdx, s.BitDepth);
+        int acQ = Av1Dequantizer.AcQ(s.BaseQIdx, s.BitDepth);
         int dqDenom = txSz == Av1TxSize.Tx32x32 ? 2 : 1;
         int planeMult = ptype == 0 ? 17 : 13;
         double trellisLambda = s.Lambda * planeMult / 4.0;
@@ -3717,12 +3722,12 @@ internal static class Av1TileEncoder
                 }
                 else
                 {
-                    Av1IntraPrediction.BuildEdges(above, left, s.ReconU!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: 8);
-                    Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: 8);
+                    Av1IntraPrediction.BuildEdges(above, left, s.ReconU!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: s.BitDepth);
+                    Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: s.BitDepth);
                     cost = ComputeCandidateCost(s, s.SourceU!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.UCoeffCtx!);
 
-                    Av1IntraPrediction.BuildEdges(above, left, s.ReconV!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: 8);
-                    Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: 8);
+                    Av1IntraPrediction.BuildEdges(above, left, s.ReconV!, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: s.BitDepth);
+                    Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: s.BitDepth);
                     cost += ComputeCandidateCost(s, s.SourceV!, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, s.VCoeffCtx!);
                 }
 
@@ -3839,8 +3844,8 @@ internal static class Av1TileEncoder
     /// <summary>One plane's real, trial-costed CFL alpha search -- see <see cref="TryCflCandidate"/>'s remarks.</summary>
     private static long TryCflPlane(TileState s, int[] reconPlane, int[] source, Av1CoefficientWriter.PlaneContext ctx, int cx, int cy, int chromaSizePixels, int log2Size, bool availL, bool availU, bool haveAboveRight, bool haveBelowLeft, bool filterTypeSmooth, Av1EdgeArray above, Av1EdgeArray left, int[] pred, int[] lumaAc, long lumaAvg, out int bestAlpha)
     {
-        Av1IntraPrediction.BuildEdges(above, left, reconPlane, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: 8);
-        Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, Av1IntraMode.DcPred, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: 8);
+        Av1IntraPrediction.BuildEdges(above, left, reconPlane, s.ChromaWidth, cx, cy, chromaSizePixels, chromaSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: s.BitDepth);
+        Av1IntraPrediction.Predict(pred, chromaSizePixels, chromaSizePixels, log2Size, log2Size, above, left, Av1IntraMode.DcPred, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: s.BitDepth);
 
         // DC_PRED produces one constant value across the whole predicted block, so a single sample stands in
         // for the entire buffer -- avoids needing a second scratch buffer to remember the DC baseline across
@@ -3882,7 +3887,7 @@ internal static class Av1TileEncoder
                 continue; // never spec-legal to signal alone (see TryCflCandidate) and never useful either
             }
 
-            ApplyCflAlpha(pred, lumaAc, lumaAvg, total, dcConstant, alpha, bitDepth: 8);
+            ApplyCflAlpha(pred, lumaAc, lumaAvg, total, dcConstant, alpha, bitDepth: s.BitDepth);
             long cost = ComputeCandidateCost(s, source, s.ChromaWidth, pred, cx, cy, chromaSizePixels, ptype: 1, ctx);
             if (cost < bestCost)
             {
@@ -4118,8 +4123,8 @@ internal static class Av1TileEncoder
                 }
                 else
                 {
-                    Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
-                    Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, x, y, bitDepth: 8);
+                    Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: s.BitDepth);
+                    Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, mode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, x, y, bitDepth: s.BitDepth);
                     cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
                 }
 
@@ -4194,8 +4199,8 @@ internal static class Av1TileEncoder
                     continue;
                 }
 
-                Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
-                Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, Av1IntraMode.DcPred, availL, availU, useFilterIntra: true, filterIntraMode: filterMode, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, x, y, bitDepth: 8);
+                Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: s.BitDepth);
+                Av1IntraPrediction.Predict(pred, sizePixels, sizePixels, log2Size, log2Size, above, left, Av1IntraMode.DcPred, availL, availU, useFilterIntra: true, filterIntraMode: filterMode, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, x, y, bitDepth: s.BitDepth);
 
                 long cost = ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
 
@@ -4353,7 +4358,7 @@ internal static class Av1TileEncoder
 
             int[] earlyCoeff = s.Coeff;
             Av1ForwardTransform.Forward2D(earlyResidual, earlyCoeff, sizePixels, bestTxType);
-            Av1ForwardQuantizer.Quantize(earlyCoeff, s.LumaLevels, sizePixels, s.BaseQIdx);
+            Av1ForwardQuantizer.Quantize(earlyCoeff, s.LumaLevels, sizePixels, s.BaseQIdx, s.BitDepth);
             OptimizeCoeffTrellis(s, earlyCoeff, s.LumaLevels, sizePixels, ptype: 0, c, r, s.YCoeffCtx);
 
             // Write the prediction into the reconstruction buffer before Reconstruct() adds the residual --
@@ -4363,7 +4368,7 @@ internal static class Av1TileEncoder
                 Array.Copy(bestPred, i * sizePixels, s.ReconY, ((y + i) * s.YWidth) + x, sizePixels);
             }
 
-            Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, x, y, sizePixels, s.LumaLevels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: false, bestTxType);
+            Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, x, y, sizePixels, s.LumaLevels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: false, bestTxType, bitDepth: s.BitDepth);
         }
 
         int bestUvMode = Av1IntraMode.DcPred;
@@ -5314,8 +5319,8 @@ internal static class Av1TileEncoder
                 bool haveAboveRight = GetBlockDecoded(s, 0, subBlockMiRow - 1, subBlockMiCol + 1);
                 bool haveBelowLeft = GetBlockDecoded(s, 0, subBlockMiRow + 1, subBlockMiCol - 1);
 
-                Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, subX, subY, 4, 4, subAvailL, subAvailU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
-                Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, writtenYMode, subAvailL, subAvailU, useFilterIntra: false, filterIntraMode: 0, angleDelta: residualAngleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, subX, subY, bitDepth: 8);
+                Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, subX, subY, 4, 4, subAvailL, subAvailU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: s.BitDepth);
+                Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, writtenYMode, subAvailL, subAvailU, useFilterIntra: false, filterIntraMode: 0, angleDelta: residualAngleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, subX, subY, bitDepth: s.BitDepth);
 
                 for (int i = 0; i < 4; i++)
                 {
@@ -5328,7 +5333,7 @@ internal static class Av1TileEncoder
                 }
 
                 Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
-                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx, s.BitDepth);
 
                 for (int i = 0; i < 4; i++)
                 {
@@ -5336,7 +5341,7 @@ internal static class Av1TileEncoder
                 }
 
                 Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: widthPixels, blockHeight: heightPixels);
-                Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
+                Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true, bitDepth: s.BitDepth);
                 SetBlockDecoded(s, 0, subBlockMiRow, subBlockMiCol, true);
             }
         }
@@ -5376,8 +5381,8 @@ internal static class Av1TileEncoder
                         bool haveAboveRight = GetBlockDecoded(s, 1, subBlockMiRow - 1, subBlockMiCol + 1);
                         bool haveBelowLeft = GetBlockDecoded(s, 1, subBlockMiRow + 1, subBlockMiCol - 1);
 
-                        Av1IntraPrediction.BuildEdges(above, left, recon, s.ChromaWidth, subX, subY, 4, 4, subAvailL, subAvailU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: 8);
-                        Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, Av1IntraMode.DcPred, subAvailL, subAvailU, useFilterIntra: false, filterIntraMode: 0, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, subX, subY, bitDepth: 8);
+                        Av1IntraPrediction.BuildEdges(above, left, recon, s.ChromaWidth, subX, subY, 4, 4, subAvailL, subAvailU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: s.BitDepth);
+                        Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, Av1IntraMode.DcPred, subAvailL, subAvailU, useFilterIntra: false, filterIntraMode: 0, angleDelta: 0, enableIntraEdgeFilter: true, filterTypeSmooth: false, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, subX, subY, bitDepth: s.BitDepth);
 
                         for (int i = 0; i < 4; i++)
                         {
@@ -5390,7 +5395,7 @@ internal static class Av1TileEncoder
                         }
 
                         Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
-                        Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+                        Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx, s.BitDepth);
 
                         for (int i = 0; i < 4; i++)
                         {
@@ -5400,7 +5405,7 @@ internal static class Av1TileEncoder
                         int chromaBlockSizeArg = (nW * nH > 1) ? widthPixels : 0;
                         int chromaBlockHeightArg = (nW * nH > 1) ? heightPixels : 0;
                         Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype: 1, subC, subR, ctx, writeLumaTxType: null, blockSize: chromaBlockSizeArg, blockHeight: chromaBlockHeightArg);
-                        Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
+                        Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true, bitDepth: s.BitDepth);
                         SetBlockDecoded(s, 1, subBlockMiRow, subBlockMiCol, true);
                         SetBlockDecoded(s, 2, subBlockMiRow, subBlockMiCol, true);
                     }
@@ -6135,7 +6140,7 @@ internal static class Av1TileEncoder
     private static long ComputeIntrabcLumaCost(TileState s, int x, int y, int mvRow, int mvCol, int sizePixels)
     {
         var pred = s.BestPred;
-        Av1InterPrediction.PredictIntrabc(pred, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, mvRow, mvCol, subX: 0, subY: 0, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
+        Av1InterPrediction.PredictIntrabc(pred, s.ReconY, s.YWidth, x, y, sizePixels, sizePixels, mvRow, mvCol, subX: 0, subY: 0, s.EdgeMaxX, s.EdgeMaxY, bitDepth: s.BitDepth);
         return ComputeCandidateCost(s, s.SourceY, s.YWidth, pred, x, y, sizePixels, ptype: 0, s.YCoeffCtx);
     }
 
@@ -6187,7 +6192,7 @@ internal static class Av1TileEncoder
                 // The trailing 0, 0 are PredictIntrabc's own chroma-subsampling-shift parameters (always 0
                 // for luma) -- passed positionally here, not as subX:/subY:, since this loop already has
                 // locals named subX/subY for the sub-block's pixel position.
-                Av1InterPrediction.PredictIntrabc(pred, s.ReconY, s.YWidth, subX, subY, 4, 4, mvRow, mvCol, 0, 0, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
+                Av1InterPrediction.PredictIntrabc(pred, s.ReconY, s.YWidth, subX, subY, 4, 4, mvRow, mvCol, 0, 0, s.EdgeMaxX, s.EdgeMaxY, bitDepth: s.BitDepth);
 
                 var residual = s.Residual;
                 for (int i = 0; i < 4; i++)
@@ -6203,7 +6208,7 @@ internal static class Av1TileEncoder
                 var coeff = s.Coeff;
                 Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
                 var levels = s.Levels;
-                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx, s.BitDepth);
 
                 for (int i = 0; i < 4; i++)
                 {
@@ -6211,7 +6216,7 @@ internal static class Av1TileEncoder
                 }
 
                 Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: sizePixels);
-                Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
+                Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true, bitDepth: s.BitDepth);
 
                 SetBlockDecoded(s, 0, subR & s.SbMiMask, subC & s.SbMiMask, true);
             }
@@ -6255,7 +6260,7 @@ internal static class Av1TileEncoder
                     // Same fix as the luma loop above: predicted fresh per 4x4 sub-block from recon
                     // (progressively updated by this same leaf's own earlier sub-blocks), not once for the
                     // whole chroma region.
-                    Av1InterPrediction.PredictIntrabc(cpred, recon, s.ChromaWidth, subCx, subCy, 4, 4, mvRow, mvCol, subXc, subXc, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: 8);
+                    Av1InterPrediction.PredictIntrabc(cpred, recon, s.ChromaWidth, subCx, subCy, 4, 4, mvRow, mvCol, subXc, subXc, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: s.BitDepth);
 
                     var residual = s.Residual;
                     for (int i = 0; i < 4; i++)
@@ -6271,7 +6276,7 @@ internal static class Av1TileEncoder
                     var coeff = s.Coeff;
                     Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
                     var levels = s.Levels;
-                    Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+                    Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx, s.BitDepth);
 
                     for (int i = 0; i < 4; i++)
                     {
@@ -6280,7 +6285,7 @@ internal static class Av1TileEncoder
 
                     int chromaBlockSizeArg = chromaN > 1 ? chromaSize : 0;
                     Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null, blockSize: chromaBlockSizeArg);
-                    Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, subCx, subCy, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
+                    Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, subCx, subCy, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true, bitDepth: s.BitDepth);
                 }
             }
         }
@@ -6901,14 +6906,14 @@ internal static class Av1TileEncoder
 
         if (nExplicit > 0)
         {
-            s.Symbols.WriteLiteral((uint)explicitColors[0], 8);
+            s.Symbols.WriteLiteral((uint)explicitColors[0], s.BitDepth);
             if (nExplicit > 1)
             {
-                const int minBits = 5; // bitDepth(8) - 3
+                int minBits = s.BitDepth - 3;
                 const int extraBits = 3; // always the maximum -- see WritePaletteColorsY's own remarks on why this is always safe as the *starting* width; it only ever shrinks from here, identically on both sides.
                 s.Symbols.WriteLiteral(extraBits, 2);
                 int bits = minBits + extraBits;
-                int range = 256 - explicitColors[0] - minVal;
+                int range = (1 << s.BitDepth) - explicitColors[0] - minVal;
                 for (int idx = 1; idx < nExplicit; idx++)
                 {
                     s.Symbols.WriteLiteral((uint)(explicitColors[idx] - explicitColors[idx - 1] - minVal), bits);
@@ -6946,7 +6951,7 @@ internal static class Av1TileEncoder
         s.Symbols.WriteBool(0); // not delta-encoded
         for (int i = 0; i < n; i++)
         {
-            s.Symbols.WriteLiteral((uint)vColors[i], 8);
+            s.Symbols.WriteLiteral((uint)vColors[i], s.BitDepth);
         }
     }
 
@@ -7099,7 +7104,7 @@ internal static class Av1TileEncoder
 
                     var above = new Av1EdgeArray(16);
                     var left = new Av1EdgeArray(16);
-                    Av1IntraPrediction.BuildEdges(above, left, recon, s.ChromaWidth, cx, cy, 4, 4, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: 8);
+                    Av1IntraPrediction.BuildEdges(above, left, recon, s.ChromaWidth, cx, cy, 4, 4, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: s.BitDepth);
 
                     // Reuses the same tile-wide scratch buffers luma just finished using for this leaf --
                     // safe because luma's use of them is already fully consumed (WriteCoeffs/Reconstruct
@@ -7110,13 +7115,13 @@ internal static class Av1TileEncoder
                     // UV_CFL_PRED-mapped-to-DC_PRED call, spec §7.11.2 -- mirrored from Av1TileDecoder's
                     // identical `mode = isCfl ? DcPred : uvMode` substitution), then adds the luma-derived AC
                     // term on top -- Predict() itself has no UV_CFL_PRED case to dispatch to.
-                    Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, isCfl ? Av1IntraMode.DcPred : uvMode, availL, availU, useFilterIntra: false, filterIntraMode: 0, uvAngleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: 8);
+                    Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, isCfl ? Av1IntraMode.DcPred : uvMode, availL, availU, useFilterIntra: false, filterIntraMode: 0, uvAngleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: s.BitDepth);
                     if (isCfl)
                     {
                         int dcConstant = pred[0];
                         int alpha = planeIndex == 1 ? alphaU : alphaV;
                         long lumaAvg = ComputeCflLumaAc(s.ReconY, s.YWidth, x, y, 4, log2Size: 2, subX, s.CflLumaAc);
-                        ApplyCflAlpha(pred, s.CflLumaAc, lumaAvg, total: 16, dcConstant, alpha, bitDepth: 8);
+                        ApplyCflAlpha(pred, s.CflLumaAc, lumaAvg, total: 16, dcConstant, alpha, bitDepth: s.BitDepth);
                     }
 
                     var residual = s.Residual;
@@ -7136,7 +7141,7 @@ internal static class Av1TileEncoder
                     }
 
                     var levels = s.Levels;
-                    Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+                    Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx, s.BitDepth);
                     if (!s.Lossless)
                     {
                         OptimizeCoeffTrellis(s, coeff, levels, 4, ptype: 1, chromaC4, chromaR4, ctx);
@@ -7151,7 +7156,7 @@ internal static class Av1TileEncoder
                     // site for why the argument order matters here (x4 = column, y4 = row) even though it's
                     // unobservable on any square/single-superblock chroma grid.
                     Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null, blockSize: blockSizeArg);
-                    Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, s.Lossless, uvTxType);
+                    Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, s.Lossless, uvTxType, bitDepth: s.BitDepth);
                     SetBlockDecoded(s, planeIndex, subBlockChromaRow, subBlockChromaCol, true);
                 }
             }
@@ -7223,18 +7228,18 @@ internal static class Av1TileEncoder
             bool haveAboveRight = GetBlockDecoded(s, planeIndex, subBlockChromaRow - 1, subBlockChromaCol + chromaN);
             bool haveBelowLeft = GetBlockDecoded(s, planeIndex, subBlockChromaRow + chromaN, subBlockChromaCol - 1);
 
-            Av1IntraPrediction.BuildEdges(above, left, recon, s.ChromaWidth, cx, cy, chromaBlockSizePixels, chromaBlockSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: 8);
+            Av1IntraPrediction.BuildEdges(above, left, recon, s.ChromaWidth, cx, cy, chromaBlockSizePixels, chromaBlockSizePixels, availL, availU, haveAboveRight, haveBelowLeft, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, bitDepth: s.BitDepth);
 
             // CFL predicts through an ordinary DC_PRED baseline (spec §7.11.2's DC-with-UV_CFL_PRED-mapped-
             // to-DC_PRED call), then adds the luma-derived AC term on top -- Predict() itself has no
             // UV_CFL_PRED case to dispatch to (see EncodeChromaRegion's identical substitution).
-            Av1IntraPrediction.Predict(pred, chromaBlockSizePixels, chromaBlockSizePixels, log2Size, log2Size, above, left, isCfl ? Av1IntraMode.DcPred : uvMode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta: uvAngleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: 8);
+            Av1IntraPrediction.Predict(pred, chromaBlockSizePixels, chromaBlockSizePixels, log2Size, log2Size, above, left, isCfl ? Av1IntraMode.DcPred : uvMode, availL, availU, useFilterIntra: false, filterIntraMode: 0, angleDelta: uvAngleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.ChromaEdgeMaxX, s.ChromaEdgeMaxY, cx, cy, bitDepth: s.BitDepth);
             if (isCfl)
             {
                 int dcConstant = pred[0];
                 int alpha = planeIndex == 1 ? alphaU : alphaV;
                 long lumaAvg = ComputeCflLumaAc(s.ReconY, s.YWidth, lumaX, lumaY, chromaBlockSizePixels, log2Size, subX, s.CflLumaAc);
-                ApplyCflAlpha(pred, s.CflLumaAc, lumaAvg, total: chromaBlockSizePixels * chromaBlockSizePixels, dcConstant, alpha, bitDepth: 8);
+                ApplyCflAlpha(pred, s.CflLumaAc, lumaAvg, total: chromaBlockSizePixels * chromaBlockSizePixels, dcConstant, alpha, bitDepth: s.BitDepth);
             }
 
             var residual = s.Residual;
@@ -7251,7 +7256,7 @@ internal static class Av1TileEncoder
             var coeff = s.Coeff;
             Av1ForwardTransform.Forward2D(residual, coeff, chromaBlockSizePixels, uvTxType);
             var levels = s.Levels;
-            Av1ForwardQuantizer.Quantize(coeff, levels, chromaBlockSizePixels, s.BaseQIdx);
+            Av1ForwardQuantizer.Quantize(coeff, levels, chromaBlockSizePixels, s.BaseQIdx, s.BitDepth);
             OptimizeCoeffTrellis(s, coeff, levels, chromaBlockSizePixels, ptype: 1, chromaC4, chromaR4, ctx);
 
             for (int i = 0; i < chromaBlockSizePixels; i++)
@@ -7260,7 +7265,7 @@ internal static class Av1TileEncoder
             }
 
             Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, chromaBlockSizePixels, ptype: 1, chromaC4, chromaR4, ctx, writeLumaTxType: null);
-            Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, chromaBlockSizePixels, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: false, uvTxType);
+            Av1LocalReconstructor.Reconstruct(recon, s.ChromaWidth, cx, cy, chromaBlockSizePixels, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: false, uvTxType, bitDepth: s.BitDepth);
 
             // Marks this whole chromaN x chromaN sub-block footprint decoded -- not just its own (top-left)
             // position -- mirroring Av1TileDecoder.TransformBlock's own `for (i < stepY) for (j < stepX))
@@ -7344,10 +7349,10 @@ internal static class Av1TileEncoder
 
                 var above = new Av1EdgeArray(16);
                 var left = new Av1EdgeArray(16);
-                Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, subX, subY, 4, 4, availL, availU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: 8);
+                Av1IntraPrediction.BuildEdges(above, left, s.ReconY, s.YWidth, subX, subY, 4, 4, availL, availU, haveAboveRight, haveBelowLeft, s.EdgeMaxX, s.EdgeMaxY, bitDepth: s.BitDepth);
 
                 var pred = s.Pred;
-                Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, bestMode, availL, availU, useFilterIntra, filterIntraMode, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, subX, subY, bitDepth: 8);
+                Av1IntraPrediction.Predict(pred, 4, 4, 2, 2, above, left, bestMode, availL, availU, useFilterIntra, filterIntraMode, angleDelta, enableIntraEdgeFilter: true, filterTypeSmooth, s.EdgeMaxX, s.EdgeMaxY, subX, subY, bitDepth: s.BitDepth);
 
                 var residual = s.Residual;
                 for (int i = 0; i < 16; i++)
@@ -7358,7 +7363,7 @@ internal static class Av1TileEncoder
                 var coeff = s.Coeff;
                 Av1ForwardWht.Forward4x4(residual.AsSpan(0, 16), coeff.AsSpan(0, 16));
                 var levels = s.Levels;
-                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx);
+                Av1ForwardQuantizer.Quantize(coeff, levels, 4, s.BaseQIdx, s.BitDepth);
 
                 for (int i = 0; i < 4; i++)
                 {
@@ -7371,7 +7376,7 @@ internal static class Av1TileEncoder
                 // it deliberately *does* take that shortcut -- WriteCoeffs's own blockSize == size check
                 // handles both correctly without this call site needing to special-case n == 1 itself.
                 Av1CoefficientWriter.WriteCoeffs(ref s.Symbols, s.Cdf, levels, 4, ptype: 0, subC, subR, s.YCoeffCtx, writeLumaTxType: null, blockSize: blockSize);
-                Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true);
+                Av1LocalReconstructor.Reconstruct(s.ReconY, s.YWidth, subX, subY, 4, levels, s.BaseQIdx, s.ReconDequant, s.ReconResidual, lossless: true, bitDepth: s.BitDepth);
                 SetBlockDecoded(s, 0, subBlockMiRow, subBlockMiCol, true);
             }
         }

@@ -53,14 +53,14 @@ internal static class Av1CdefSearch
         int[] reconY, int[]? reconU, int[]? reconV,
         int[] sourceY, int[]? sourceU, int[]? sourceV,
         int width, int height, int chromaWidth, int chromaHeight,
-        bool monoChrome, int baseQIdx, int loopFilterLevel, ParallelSettings parallel = default)
+        bool monoChrome, int baseQIdx, int loopFilterLevel, ParallelSettings parallel = default, int bitDepth = 8)
     {
         int miCols = 2 * ((width + 7) >> 3);
         int miRows = 2 * ((height + 7) >> 3);
         int lumaLen = width * height;
         int chromaLen = chromaWidth * chromaHeight;
 
-        var seq = BuildSequenceHeader(monoChrome);
+        var seq = BuildSequenceHeader(monoChrome, bitDepth);
 
         var bestChoice = Av1CdefChoice.Off;
         long bestSse = Av1SquaredError.Compute(reconY, sourceY, lumaLen) + Av1SquaredError.Compute(reconU, sourceU, chromaLen) + Av1SquaredError.Compute(reconV, sourceV, chromaLen);
@@ -153,7 +153,7 @@ internal static class Av1CdefSearch
     }
 
     /// <summary>Same fixed-configuration <see cref="Av1SequenceHeader"/> shape as <see cref="Av1InLoopFilterSearch"/>'s own builder, except <c>EnableCdef</c> is always <see langword="true"/> here regardless of what the real sequence header ends up signaling -- this search only ever runs for the CDEF filter, which needs it on to do anything at all (see <see cref="Av1Cdef.Apply"/>'s own early-return gate).</summary>
-    private static Av1SequenceHeader BuildSequenceHeader(bool monoChrome) => new()
+    private static Av1SequenceHeader BuildSequenceHeader(bool monoChrome, int bitDepth) => new()
     {
         SeqProfile = Av1SequenceHeaderWriter.SeqProfile,
         SeqLevelIdx0 = Av1SequenceHeaderWriter.SeqLevelIdx0,
@@ -167,7 +167,7 @@ internal static class Av1CdefSearch
         EnableSuperres = false,
         EnableCdef = true,
         EnableRestoration = false,
-        BitDepth = 8,
+        BitDepth = bitDepth,
         MonoChrome = monoChrome,
         ColorPrimaries = Av1SequenceHeaderWriter.ColorPrimaries,
         TransferCharacteristics = Av1SequenceHeaderWriter.TransferCharacteristics,

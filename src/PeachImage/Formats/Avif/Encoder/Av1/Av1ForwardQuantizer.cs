@@ -18,11 +18,11 @@ internal static class Av1ForwardQuantizer
     /// row-major buffer, the output of <see cref="Av1ForwardTransform.Forward2D"/>) into
     /// <paramref name="levelsOut"/> (same shape), the integer levels that get entropy-coded.
     /// </summary>
-    public static void Quantize(int[] coeff, int[] levelsOut, int size, int baseQIdx)
+    public static void Quantize(int[] coeff, int[] levelsOut, int size, int baseQIdx, int bitDepth = 8)
     {
         int txSz = Av1ForwardTransform.SizeToTxSz(size);
-        int dcQ = Av1Dequantizer.DcQ(baseQIdx, 8);
-        int acQ = Av1Dequantizer.AcQ(baseQIdx, 8);
+        int dcQ = Av1Dequantizer.DcQ(baseQIdx, bitDepth);
+        int acQ = Av1Dequantizer.AcQ(baseQIdx, bitDepth);
         int dqDenom = txSz == Av1TxSize.Tx32x32 ? 2 : 1;
 
         // Precomputed once per block (like effectiveQuant in JPEG's FrameEncoder.QuantizeComponent) rather

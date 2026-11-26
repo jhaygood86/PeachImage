@@ -68,14 +68,14 @@ internal static class Av1RdCost
     /// meaningless zero-distortion term would just add noise -- lossless candidates are, correctly, ranked by
     /// real bit count alone.</para>
     /// </summary>
-    public static double QIndexToLambda(int baseQIdx)
+    public static double QIndexToLambda(int baseQIdx, int bitDepth = 8)
     {
         if (baseQIdx <= 0)
         {
             return 0.0;
         }
 
-        int dcQ = Av1Dequantizer.DcQ(baseQIdx, 8);
+        int dcQ = Av1Dequantizer.DcQ(baseQIdx, bitDepth);
         double rdMult = dcQ * dcQ * (KfRdMultiplierBase + (KfRdMultiplierSlope * baseQIdx));
         return rdMult / RdDivShift;
     }

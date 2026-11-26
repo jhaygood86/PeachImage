@@ -15,6 +15,43 @@ public sealed class AvifEncoderOptions : EncoderOptions
     public int Quality { get; init; } = 75;
 
     /// <summary>
+    /// The bit depth of the AV1 stream: 8, 10 or 12. The default, 0, picks 8 for 8-bit sources and 10 for 16-bit and floating-point ones. A
+    /// higher-precision source is scaled to this depth (rounded to nearest); a decoded 10-bit or 12-bit AVIF is 16-bit data whose values are exactly
+    /// the original samples scaled up, so encoding it at its own depth reproduces them exactly. Lossy and lossless both support all three depths, with palette
+    /// mode and intra block copy (the screen-content tools of lossless encoding) at every depth.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not 0, 8, 10 or 12.</exception>
+    public int BitDepth
+    {
+        get;
+        init
+        {
+            if (value is not (0 or 8 or 10 or 12))
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value, "BitDepth must be 0 (automatic), 8, 10 or 12.");
+            }
+
+            field = value;
+        }
+    }
+
+    internal override int RequestedBitDepth => BitDepth;
+
+    /// <summary>
+    /// <see cref="Quality"/> as a fraction from 0 to 1, mapped the way a browser maps the <c>quality</c> argument of <c>canvas.toBlob(type, quality)</c>:
+    /// <c>Quality = round(value x 100)</c>.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is NaN or outside 0..1 (a browser would use its default; pass that instead).</exception>
+    public float QualityFraction
+    {
+        get => Quality / 100f;
+        init
+        {
+            Quality = PeachImage.Internal.BrowserQuality.ToPercent(value);
+        }
+    }
+
+    /// <summary>
     /// When <see langword="true"/>, encodes via AV1's lossless coding path (Walsh-Hadamard transform, no
     /// quantization) instead of DCT_DCT, preserving every pixel exactly -- alpha, when present, is encoded
     /// losslessly too. Defaults to <see langword="false"/>.

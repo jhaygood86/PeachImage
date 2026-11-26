@@ -81,7 +81,8 @@ internal sealed class Av1IntrabcHashTable
     /// the 4x4/8x8 levels are always needed as inputs to any larger level's own pyramid, but nothing above
     /// <paramref name="maxBlockSize"/> ever gets built or bucketed at all).
     /// </param>
-    public Av1IntrabcHashTable(int[] lumaY, int width, int height, int maxBlockSize = 128)
+    /// <param name="bitDepth">The sample bit depth of <paramref name="lumaY"/>; above 8 the base 2x2 hash is a CRC32C of the 16-bit samples instead of a byte packing.</param>
+    public Av1IntrabcHashTable(int[] lumaY, int width, int height, int maxBlockSize = 128, int bitDepth = 8)
     {
         _width = width;
         _height = height;
@@ -91,7 +92,7 @@ internal sealed class Av1IntrabcHashTable
         _offsetsBySize = new Dictionary<uint, (int Offset, int Count)>[levelCount];
         _positionsBySize = new (int X, int Y)[levelCount][];
 
-        uint[] level2x2 = ComputeLevel2x2(lumaY, width, height);
+        uint[] level2x2 = ComputeLevel2x2(lumaY, width, height, bitDepth);
         uint[] previousLevel = level2x2;
         int previousBlockSize = 2;
 
@@ -131,8 +132,9 @@ internal sealed class Av1IntrabcHashTable
     }
 
     /// <summary><c>av1_generate_block_2x2_hash_value</c>'s 8-bit path (<c>hash_motion.c</c>) -- packs each 2x2 block's 4 luma samples (top-left, top-right, bottom-left, bottom-right) into one 32-bit value via <c>get_identity_hash_value</c>'s exact <c>(a&lt;&lt;24)+(b&lt;&lt;16)+(c&lt;&lt;8)+d</c> packing (deliberately not a real hash at this level -- libaom's own comment notes 4 8-bit values already fit losslessly in 32 bits, so there's nothing to gain from hashing yet).</summary>
-    private static uint[] ComputeLevel2x2(int[] lumaY, int width, int height)
+    private static uint[] ComputeLevel2x2(int[] lumaY, int width, int height, int bitDepth)
     {
+        Span<byte> packed8 = stackalloc byte[8];
         var result = new uint[width * height];
         int xEnd = width - 1;
         int yEnd = height - 1;
@@ -146,6 +148,17 @@ internal sealed class Av1IntrabcHashTable
                 uint b = (uint)lumaY[rowBase + x + 1];
                 uint c = (uint)lumaY[nextRowBase + x];
                 uint d = (uint)lumaY[nextRowBase + x + 1];
+                if (bitDepth > 8)
+                {
+                    // Four samples no longer fit one byte each: hash their 16-bit values (a CRC32C, the way libaom hashes high-bit-depth blocks).
+                    System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(packed8, (ushort)a);
+                    System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(packed8[2..], (ushort)b);
+                    System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(packed8[4..], (ushort)c);
+                    System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(packed8[6..], (ushort)d);
+                    result[rowBase + x] = Av1IntrabcCrc32C.Compute(packed8);
+                    continue;
+                }
+
                 result[rowBase + x] = (a << 24) + (b << 16) + (c << 8) + d;
             }
         }

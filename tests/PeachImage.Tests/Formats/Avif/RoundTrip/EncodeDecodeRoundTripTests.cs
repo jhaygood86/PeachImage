@@ -802,9 +802,6 @@ public class EncodeDecodeRoundTripTests
     }
 
     [Theory]
-    [InlineData(PixelFormat.Gray16)]
-    [InlineData(PixelFormat.Rgb48)]
-    [InlineData(PixelFormat.Rgba64)]
     [InlineData(PixelFormat.Cmyk32)]
     public void UnsupportedPixelFormat_Throws(PixelFormat format)
     {

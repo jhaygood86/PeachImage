@@ -269,9 +269,9 @@ internal static class Av1YuvToRgbConverter
         // The per-sample normalisations (sample - lo) / range depend only on the sample value, so they are
         // tabulated once per call: the table entries are the very same double divisions the per-pixel code
         // would perform, so results are bit-identical, minus three vector divisions per four pixels.
-        // Sized for the largest sample any supported tile bit depth (<= 10) can hold rather than srcMax,
+        // Sized for the largest sample any supported tile bit depth (<= 12) can hold rather than srcMax,
         // since the planes of a grid's tiles are not required to share the primary item's bit depth.
-        const int TableSize = 1024;
+        const int TableSize = 4096;
         Span<double> ynTab = stackalloc double[TableSize];
         Span<double> cbnTab = stackalloc double[TableSize];
         if (!identity)

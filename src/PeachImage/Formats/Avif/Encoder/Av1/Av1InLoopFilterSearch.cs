@@ -42,12 +42,12 @@ internal static class Av1InLoopFilterSearch
         int[] reconY, int[]? reconU, int[]? reconV,
         int[] sourceY, int[]? sourceU, int[]? sourceV,
         int width, int height, int chromaWidth, int chromaHeight,
-        bool monoChrome, int baseQIdx, ParallelSettings parallel = default)
+        bool monoChrome, int baseQIdx, ParallelSettings parallel = default, int bitDepth = 8)
     {
         int miCols = 2 * ((width + 7) >> 3);
         int miRows = 2 * ((height + 7) >> 3);
 
-        var seq = BuildSequenceHeader(monoChrome);
+        var seq = BuildSequenceHeader(monoChrome, bitDepth);
 
         int bestLevel = 0;
         long bestSse = Av1SquaredError.Compute(reconY, sourceY) + Av1SquaredError.Compute(reconU, sourceU) + Av1SquaredError.Compute(reconV, sourceV);
@@ -128,7 +128,7 @@ internal static class Av1InLoopFilterSearch
     /// are always off here regardless of what the real sequence header ends up signaling elsewhere, since
     /// this search only ever runs for the deblocking filter.
     /// </summary>
-    private static Av1SequenceHeader BuildSequenceHeader(bool monoChrome) => new()
+    private static Av1SequenceHeader BuildSequenceHeader(bool monoChrome, int bitDepth) => new()
     {
         SeqProfile = Av1SequenceHeaderWriter.SeqProfile,
         SeqLevelIdx0 = Av1SequenceHeaderWriter.SeqLevelIdx0,
@@ -142,7 +142,7 @@ internal static class Av1InLoopFilterSearch
         EnableSuperres = false,
         EnableCdef = false,
         EnableRestoration = false,
-        BitDepth = 8,
+        BitDepth = bitDepth,
         MonoChrome = monoChrome,
         ColorPrimaries = Av1SequenceHeaderWriter.ColorPrimaries,
         TransferCharacteristics = Av1SequenceHeaderWriter.TransferCharacteristics,

@@ -69,12 +69,15 @@ public class AvifDecoderTests
     }
 
     [Fact]
-    public void Identify_TwelveBit_ThrowsUnsupportedFeature()
+    public void Identify_TwelveBit_ReportsSixteenBitStorage()
     {
         byte[] file = AvifFixtureBuilder.BuildSingleItem(8, 8, twelveBit: true);
         using var stream = new MemoryStream(file);
 
-        Assert.Throws<AvifUnsupportedFeatureException>(() => AvifDecoder.Identify(stream));
+        var info = AvifDecoder.Identify(stream);
+
+        Assert.Equal(PixelFormat.Rgb48, info.PixelFormat);
+        Assert.True(info.IsHighBitDepth);
     }
 
     [Fact]

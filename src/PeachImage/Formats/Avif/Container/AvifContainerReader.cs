@@ -116,6 +116,11 @@ internal static class AvifContainerReader
             metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Xmp, Data = xmp });
         }
 
+        if (assembled.ColorInfo is { ColourType: "nclx" } nclx && nclx.ColourPrimaries is >= 0 and <= 255 && nclx.TransferCharacteristics is >= 0 and <= 255 && nclx.MatrixCoefficients is >= 0 and <= 255)
+        {
+            metadata.Cicp = new CicpCode((byte)nclx.ColourPrimaries, (byte)nclx.TransferCharacteristics, 0, nclx.FullRange) /* decoded pixels are RGB, whatever matrix coded them */;
+        }
+
         if (assembled.ColorInfo?.IccProfile is { } icc)
         {
             metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Icc, Data = icc });

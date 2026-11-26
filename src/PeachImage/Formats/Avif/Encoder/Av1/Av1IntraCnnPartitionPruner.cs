@@ -1502,7 +1502,8 @@ internal static class Av1IntraCnnPartitionPruner
         Conv2DValidRelu(l3, 4, 2, 2, Layer4Kernel, Layer4Bias, 20, 2, 2, l4, 1, 1);
         l4.CopyTo(cache.CnnBuffer.AsSpan(Branch0Offset));
 
-        int dcQ = Av1QuantLookup.DcQLookup[0][baseQIdx];
+        // libaom feeds the network the DC quantizer in 8-bit-equivalent units: the high-bit-depth table value shifted down by (bitDepth - 8).
+        int dcQ = Av1QuantLookup.DcQLookup[(bitDepth - 8) >> 1][baseQIdx] >> (bitDepth - 8);
         float logQRaw = MathF.Log(1f + ((dcQ * dcQ) / 256f));
         cache.LogQ = (logQRaw - LogQMean[0]) / LogQStd[0];
         cache.Populated = true;
