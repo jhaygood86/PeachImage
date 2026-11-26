@@ -17,6 +17,25 @@ internal static class ImagePixelConverter
 
     public static bool IsConvertible(PixelFormat format) => format is not (PixelFormat.Cmyk32 or PixelFormat.Ycck32);
 
+    /// <summary>A per-row hook that runs on a row of straight, interleaved float RGBA between reading the source and writing the target.</summary>
+    public delegate void RowTransform(float[] rgba, int width);
+
+    /// <summary>Converts <paramref name="source"/> to <paramref name="target"/>, applying <paramref name="transform"/> to every row in between (never uses the 8-bit fast paths).</summary>
+    public static Image ConvertWithTransform(Image source, PixelFormat target, ParallelSettings parallel, RowTransform? transform, bool unpremultiply = true)
+    {
+        var result = Image.Create(source.Width, source.Height, target);
+        try
+        {
+            ConvertGeneric(source, result, source.PixelFormat, target, parallel, transform, unpremultiply);
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
+    }
+
     /// <summary>
     /// Whether <paramref name="from"/> can be converted to <paramref name="to"/>. Ink-based sources (CMYK, YCCK) convert only to
     /// RGB, RGBA and gray, using the profile-less formula of <see cref="InkToRgba32"/>; nothing converts into them.
@@ -145,7 +164,78 @@ internal static class ImagePixelConverter
         }
     }
 
-    private static void ConvertGeneric(Image source, Image result, PixelFormat from, PixelFormat target, ParallelSettings parallel)
+    /// <summary>
+    /// Converts <paramref name="height"/> rows of <paramref name="width"/> pixels of <paramref name="from"/>, <paramref name="sourceStride"/> bytes apart, into a new
+    /// image of <paramref name="target"/>, running <paramref name="transform"/> on each row of straight float RGBA in between. The source rows are read in
+    /// place (no copy of the source is made), and rows are converted in parallel.
+    /// </summary>
+    public static Image ConvertRows(ReadOnlyMemory<byte> source, int sourceStride, int width, int height, PixelFormat from, PixelFormat target, ParallelSettings parallel, RowTransform? transform, bool unpremultiply = true)
+    {
+        var result = Image.Create(width, height, target);
+        try
+        {
+            var resultMemory = result.PixelMemory;
+            int resultStride = width * target.GetBytesPerPixel();
+            int rowBytes = width * from.GetBytesPerPixel();
+            bool sourceGray = from is PixelFormat.Gray8 or PixelFormat.Gray16 or PixelFormat.GrayF32;
+            RowParallel.For(height, y =>
+            {
+                var scratch = ArrayPool<float>.Shared.Rent(width * 4);
+                try
+                {
+                    ConvertOneRow(source.Span.Slice(y * sourceStride, rowBytes), resultMemory.Span.Slice(y * resultStride, resultStride), from, target, width, sourceGray, transform, unpremultiply, scratch);
+                }
+                finally
+                {
+                    ArrayPool<float>.Shared.Return(scratch);
+                }
+            }, parallel);
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>The same conversion over a span, on the calling thread (a span cannot be captured by parallel work).</summary>
+    public static Image ConvertRows(ReadOnlySpan<byte> source, int sourceStride, int width, int height, PixelFormat from, PixelFormat target, RowTransform? transform, bool unpremultiply = true)
+    {
+        var result = Image.Create(width, height, target);
+        var scratch = ArrayPool<float>.Shared.Rent(width * 4);
+        try
+        {
+            var destination = result.GetPixelSpan();
+            int resultStride = width * target.GetBytesPerPixel();
+            int rowBytes = width * from.GetBytesPerPixel();
+            bool sourceGray = from is PixelFormat.Gray8 or PixelFormat.Gray16 or PixelFormat.GrayF32;
+            for (int y = 0; y < height; y++)
+            {
+                ConvertOneRow(source.Slice(y * sourceStride, rowBytes), destination.Slice(y * resultStride, resultStride), from, target, width, sourceGray, transform, unpremultiply, scratch);
+            }
+
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(scratch);
+        }
+    }
+
+    private static void ConvertOneRow(ReadOnlySpan<byte> sourceRow, Span<byte> targetRow, PixelFormat from, PixelFormat target, int width, bool sourceGray, RowTransform? transform, bool unpremultiply, float[] scratch)
+    {
+        ReadRow(sourceRow, from, scratch, width, unpremultiply);
+        transform?.Invoke(scratch, width);
+        WriteRow(scratch, width, sourceGray, target, targetRow);
+    }
+
+    private static void ConvertGeneric(Image source, Image result, PixelFormat from, PixelFormat target, ParallelSettings parallel, RowTransform? transform = null, bool unpremultiply = true)
     {
         int width = source.Width;
         var sourceMemory = source.PixelMemory;
@@ -158,7 +248,8 @@ internal static class ImagePixelConverter
             var scratch = ArrayPool<float>.Shared.Rent(width * 4);
             try
             {
-                ReadRow(sourceMemory.Span.Slice(y * sourceStride, sourceStride), from, scratch, width);
+                ReadRow(sourceMemory.Span.Slice(y * sourceStride, sourceStride), from, scratch, width, unpremultiply);
+                transform?.Invoke(scratch, width);
                 WriteRow(scratch, width, sourceGray, target, resultMemory.Span.Slice(y * resultStride, resultStride));
             }
             finally
@@ -169,7 +260,7 @@ internal static class ImagePixelConverter
     }
 
     // Decodes a row to straight float RGBA (gray is replicated, a missing alpha is 1).
-    private static void ReadRow(ReadOnlySpan<byte> row, PixelFormat format, float[] rgba, int width)
+    private static void ReadRow(ReadOnlySpan<byte> row, PixelFormat format, float[] rgba, int width, bool unpremultiply = true)
     {
         const float Inv255 = 1f / 255f;
         const float Inv65535 = 1f / 65535f;
@@ -190,12 +281,7 @@ internal static class ImagePixelConverter
 
                 break;
             case PixelFormat.Rgba32:
-                for (int x = 0; x < width; x++)
-                {
-                    int o = x * 4;
-                    Set(rgba, x, row[o] * Inv255, row[o + 1] * Inv255, row[o + 2] * Inv255, row[o + 3] * Inv255);
-                }
-
+                RgbaRowKernels.BytesToSingle(row[..(width * 4)], rgba.AsSpan(0, width * 4));
                 break;
             case PixelFormat.Gray16:
             {
@@ -220,16 +306,9 @@ internal static class ImagePixelConverter
             }
 
             case PixelFormat.Rgba64:
-            {
-                var samples = MemoryMarshal.Cast<byte, ushort>(row);
-                for (int x = 0; x < width; x++)
-                {
-                    int o = x * 4;
-                    Set(rgba, x, samples[o] * Inv65535, samples[o + 1] * Inv65535, samples[o + 2] * Inv65535, samples[o + 3] * Inv65535);
-                }
-
+                RgbaRowKernels.UShortsToSingle(MemoryMarshal.Cast<byte, ushort>(row)[..(width * 4)], rgba.AsSpan(0, width * 4));
                 break;
-            }
+
 
             case PixelFormat.GrayF32:
             {
@@ -254,12 +333,49 @@ internal static class ImagePixelConverter
             }
 
             case PixelFormat.RgbaF32:
+                MemoryMarshal.Cast<byte, float>(row)[..(width * 4)].CopyTo(rgba);
+                break;
+
+
+            case PixelFormat.RgbaF16:
+            case PixelFormat.PremultipliedRgbaF16:
             {
-                var samples = MemoryMarshal.Cast<byte, float>(row);
-                for (int x = 0; x < width; x++)
+                var samples = MemoryMarshal.Cast<byte, Half>(row);
+                RgbaRowKernels.HalfToSingle(samples[..(width * 4)], rgba.AsSpan(0, width * 4));
+                if (format == PixelFormat.PremultipliedRgbaF16 && unpremultiply)
                 {
-                    int o = x * 4;
-                    Set(rgba, x, samples[o], samples[o + 1], samples[o + 2], samples[o + 3]);
+                    RgbaRowKernels.Unpremultiply(rgba, width);
+                }
+
+                break;
+            }
+
+            case PixelFormat.PremultipliedRgba32:
+                RgbaRowKernels.BytesToSingle(row[..(width * 4)], rgba.AsSpan(0, width * 4));
+
+                if (unpremultiply)
+                {
+                    RgbaRowKernels.Unpremultiply(rgba, width);
+                }
+
+                break;
+            case PixelFormat.PremultipliedRgba64:
+            {
+                RgbaRowKernels.UShortsToSingle(MemoryMarshal.Cast<byte, ushort>(row)[..(width * 4)], rgba.AsSpan(0, width * 4));
+                if (unpremultiply)
+                {
+                    RgbaRowKernels.Unpremultiply(rgba, width);
+                }
+
+                break;
+            }
+
+            case PixelFormat.PremultipliedRgbaF32:
+            {
+                MemoryMarshal.Cast<byte, float>(row)[..(width * 4)].CopyTo(rgba);
+                if (unpremultiply)
+                {
+                    RgbaRowKernels.Unpremultiply(rgba, width);
                 }
 
                 break;
@@ -292,11 +408,7 @@ internal static class ImagePixelConverter
 
                 break;
             case PixelFormat.Rgba32:
-                for (int x = 0; x < width * 4; x++)
-                {
-                    row[x] = To8(rgba[x]);
-                }
-
+                RgbaRowKernels.SingleToBytes(rgba.AsSpan(0, width * 4), row);
                 break;
             case PixelFormat.Gray16:
             {
@@ -324,15 +436,8 @@ internal static class ImagePixelConverter
             }
 
             case PixelFormat.Rgba64:
-            {
-                var samples = MemoryMarshal.Cast<byte, ushort>(row);
-                for (int x = 0; x < width * 4; x++)
-                {
-                    samples[x] = To16(rgba[x]);
-                }
-
+                RgbaRowKernels.SingleToUShorts(rgba.AsSpan(0, width * 4), MemoryMarshal.Cast<byte, ushort>(row));
                 break;
-            }
 
             case PixelFormat.GrayF32:
             {
@@ -361,6 +466,17 @@ internal static class ImagePixelConverter
 
             case PixelFormat.RgbaF32:
                 rgba.AsSpan(0, width * 4).CopyTo(MemoryMarshal.Cast<byte, float>(row));
+                break;
+            case PixelFormat.RgbaF16:
+                RgbaRowKernels.SingleToHalf(rgba.AsSpan(0, width * 4), MemoryMarshal.Cast<byte, Half>(row));
+                break;
+            case PixelFormat.PremultipliedRgba32:
+            case PixelFormat.PremultipliedRgba64:
+            case PixelFormat.PremultipliedRgbaF16:
+            case PixelFormat.PremultipliedRgbaF32:
+                // Color is multiplied by alpha in float first, then stored exactly as the straight format of the same sample type would be.
+                RgbaRowKernels.Premultiply(rgba, width);
+                WriteRow(rgba, width, sourceGray, format.ToStraightAlpha(), row);
                 break;
             default:
                 throw new NotSupportedException($"Converting to {format} is not supported.");

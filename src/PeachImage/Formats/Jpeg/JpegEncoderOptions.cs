@@ -6,6 +6,20 @@ public sealed class JpegEncoderOptions : EncoderOptions
     /// <summary>IJG-style quality, 1 (worst) to 100 (best). Defaults to 75.</summary>
     public int Quality { get; init; } = 75;
 
+    /// <summary>
+    /// <see cref="Quality"/> as a fraction from 0 to 1, mapped the way a browser maps the <c>quality</c> argument of <c>canvas.toBlob(type, quality)</c>:
+    /// <c>Quality = round(value x 100)</c>.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is NaN or outside 0..1 (a browser would use its default; pass that instead).</exception>
+    public float QualityFraction
+    {
+        get => Quality / 100f;
+        init
+        {
+            Quality = PeachImage.Internal.BrowserQuality.ToPercent(value);
+        }
+    }
+
     /// <summary>Chroma subsampling ratio. Defaults to 4:2:0, the common web default. Ignored for grayscale sources.</summary>
     public JpegChromaSubsampling Subsampling { get; init; } = JpegChromaSubsampling.Yuv420;
 

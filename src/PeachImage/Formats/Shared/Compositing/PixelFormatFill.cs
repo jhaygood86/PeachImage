@@ -14,7 +14,7 @@ internal static class PixelFormatFill
     public static void Fill(Image image, byte r, byte g, byte b, byte a)
     {
         int bytesPerPixel = image.PixelFormat.GetBytesPerPixel();
-        Span<byte> pixel = stackalloc byte[16]; // RgbaF32 (16 bytes) is the widest pixel format.
+        Span<byte> pixel = stackalloc byte[16]; // RgbaF32 and PremultipliedRgbaF32 (16 bytes) are the widest pixel formats.
         var encoded = pixel[..bytesPerPixel];
         EncodeColor(image.PixelFormat, r, g, b, a, encoded);
 
@@ -102,6 +102,46 @@ internal static class PixelFormatFill
                 samples[1] = g / 255f;
                 samples[2] = b / 255f;
                 samples[3] = a / 255f;
+                break;
+            }
+
+            case PixelFormat.RgbaF16:
+            case PixelFormat.PremultipliedRgbaF16:
+            {
+                var samples = MemoryMarshal.Cast<byte, Half>(destination);
+                float scale = format == PixelFormat.PremultipliedRgbaF16 ? a / 255f : 1f;
+                samples[0] = (Half)(r / 255f * scale);
+                samples[1] = (Half)(g / 255f * scale);
+                samples[2] = (Half)(b / 255f * scale);
+                samples[3] = (Half)(a / 255f);
+                break;
+            }
+
+            case PixelFormat.PremultipliedRgbaF32:
+            {
+                var samples = MemoryMarshal.Cast<byte, float>(destination);
+                float scale = a / 255f;
+                samples[0] = r / 255f * scale;
+                samples[1] = g / 255f * scale;
+                samples[2] = b / 255f * scale;
+                samples[3] = a / 255f;
+                break;
+            }
+
+            case PixelFormat.PremultipliedRgba32:
+                destination[0] = (byte)(((r * a) + 127) / 255);
+                destination[1] = (byte)(((g * a) + 127) / 255);
+                destination[2] = (byte)(((b * a) + 127) / 255);
+                destination[3] = a;
+                break;
+
+            case PixelFormat.PremultipliedRgba64:
+            {
+                var samples = MemoryMarshal.Cast<byte, ushort>(destination);
+                samples[0] = Widen((byte)(((r * a) + 127) / 255));
+                samples[1] = Widen((byte)(((g * a) + 127) / 255));
+                samples[2] = Widen((byte)(((b * a) + 127) / 255));
+                samples[3] = Widen(a);
                 break;
             }
 

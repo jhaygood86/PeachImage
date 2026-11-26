@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using PeachImage.Formats.Shared.Parallelism;
+using PeachImage.Internal.PixelFormatConversion;
 
 namespace PeachImage.Formats.Shared.Resampling;
 
@@ -75,7 +76,15 @@ internal static class ImageResizer
             // raw rented array (rather than an exact-length slice) is safe — see IResamplingConvolver's
             // remarks for why these are plain arrays (not Span<float>) in the first place: it's what lets
             // each convolver parallelize its per-row loop, since a Span can't be captured by that closure.
-            ToFloatBuffer(source, is16Bit, isFloat, hasAlpha, sourceBuffer, parallel);
+            bool direct = IsDirectFormat(source.PixelFormat);
+            if (direct)
+            {
+                ToFloatBufferDirect(source, sourceBuffer, parallel);
+            }
+            else
+            {
+                ToFloatBuffer(source, is16Bit, isFloat, hasAlpha, sourceBuffer, parallel);
+            }
 
             var convolver = ResamplingConvolverSelector.Instance;
             if (horizontalFirst)
@@ -89,7 +98,9 @@ internal static class ImageResizer
                 convolver.ConvolveHorizontal(intermediate, source.Width, height, resized, horizontalWeights, parallel);
             }
 
-            return FromFloatBuffer(resized, width, height, source.PixelFormat, channelCount, is16Bit, isFloat, hasAlpha, parallel);
+            return direct
+                ? FromFloatBufferDirect(resized, width, height, source.PixelFormat, parallel)
+                : FromFloatBuffer(resized, width, height, source.PixelFormat, channelCount, is16Bit, isFloat, hasAlpha, parallel);
         }
         finally
         {
@@ -97,6 +108,113 @@ internal static class ImageResizer
             pool.Return(intermediate);
             pool.Return(resized);
         }
+    }
+
+    // ---- The half-float and premultiplied formats ----------------------------------------------------------------------------
+    // Their rows are widened to the same four-floats-per-pixel buffer the convolvers work on, but in a normalized domain (1.0 is
+    // full scale, the same for every sample type), and a premultiplied source is convolved as it is: premultiplied color is exactly
+    // what the convolution wants, so there is no premultiply or unpremultiply round trip, and a fully transparent pixel keeps the
+    // (zero) color it had. A straight half-float source is premultiplied for the convolution and divided back afterwards, like every
+    // straight-alpha format.
+
+    internal static bool IsDirectFormat(PixelFormat format) =>
+        format is PixelFormat.RgbaF16 or PixelFormat.PremultipliedRgba32 or PixelFormat.PremultipliedRgba64 or PixelFormat.PremultipliedRgbaF16 or PixelFormat.PremultipliedRgbaF32;
+
+    private static void ToFloatBufferDirect(Image source, float[] buffer, ParallelSettings parallel)
+    {
+        var pixelMemory = source.PixelMemory;
+        var format = source.PixelFormat;
+        int width = source.Width;
+        int rowBytes = width * format.GetBytesPerPixel();
+        int rowFloats = width * FloatsPerPixel;
+
+        RowParallel.For(source.Height, y =>
+        {
+            var row = pixelMemory.Span.Slice(y * rowBytes, rowBytes);
+            var floats = buffer.AsSpan(y * rowFloats, rowFloats);
+            switch (format)
+            {
+                case PixelFormat.PremultipliedRgba32:
+                    RgbaRowKernels.BytesToSingle(row, floats);
+                    break;
+                case PixelFormat.PremultipliedRgba64:
+                    RgbaRowKernels.UShortsToSingle(MemoryMarshal.Cast<byte, ushort>(row), floats);
+                    break;
+                case PixelFormat.PremultipliedRgbaF32:
+                    MemoryMarshal.Cast<byte, float>(row).CopyTo(floats);
+                    break;
+                case PixelFormat.PremultipliedRgbaF16:
+                    RgbaRowKernels.HalfToSingle(MemoryMarshal.Cast<byte, Half>(row), floats);
+                    break;
+                default: // RgbaF16, straight
+                    RgbaRowKernels.HalfToSingle(MemoryMarshal.Cast<byte, Half>(row), floats);
+                    RgbaRowKernels.Premultiply(floats, width);
+                    break;
+            }
+        }, parallel);
+    }
+
+    private static Image FromFloatBufferDirect(float[] buffer, int width, int height, PixelFormat format, ParallelSettings parallel)
+    {
+        var destination = Image.Create(width, height, format);
+        var pixelMemory = destination.PixelMemory;
+        int rowBytes = width * format.GetBytesPerPixel();
+        int rowFloats = width * FloatsPerPixel;
+
+        RowParallel.For(height, y =>
+        {
+            var floats = buffer.AsSpan(y * rowFloats, rowFloats);
+            var row = pixelMemory.Span.Slice(y * rowBytes, rowBytes);
+            // The filter's negative lobes can overshoot: NaN and negatives become 0, and alpha is held to full scale (a straight result is divided by that
+            // alpha, exactly as for the other straight-alpha formats, so both ways of storing the same picture resize to the same picture).
+            for (int i = 0; i < rowFloats; i++)
+            {
+                float v = floats[i];
+                floats[i] = v > 0f ? v : 0f;
+            }
+
+            for (int i = FloatsPerPixel - 1; i < rowFloats; i += FloatsPerPixel)
+            {
+                floats[i] = MathF.Min(floats[i], 1f);
+            }
+
+            if (format == PixelFormat.RgbaF16)
+            {
+                RgbaRowKernels.Unpremultiply(floats, width);
+            }
+
+
+            if (format is PixelFormat.PremultipliedRgba32 or PixelFormat.PremultipliedRgba64)
+            {
+                // Premultiplied color cannot exceed alpha, and neither exceeds full scale.
+                for (int i = 0; i < rowFloats; i += FloatsPerPixel)
+                {
+                    float a = MathF.Min(floats[i + 3], 1f);
+                    floats[i] = MathF.Min(floats[i], a);
+                    floats[i + 1] = MathF.Min(floats[i + 1], a);
+                    floats[i + 2] = MathF.Min(floats[i + 2], a);
+                    floats[i + 3] = a;
+                }
+            }
+
+            switch (format)
+            {
+                case PixelFormat.PremultipliedRgba32:
+                    RgbaRowKernels.SingleToBytes(floats, row);
+                    break;
+                case PixelFormat.PremultipliedRgba64:
+                    RgbaRowKernels.SingleToUShorts(floats, MemoryMarshal.Cast<byte, ushort>(row));
+                    break;
+                case PixelFormat.PremultipliedRgbaF32:
+                    floats.CopyTo(MemoryMarshal.Cast<byte, float>(row));
+                    break;
+                default: // RgbaF16 and PremultipliedRgbaF16
+                    RgbaRowKernels.SingleToHalf(floats, MemoryMarshal.Cast<byte, Half>(row));
+                    break;
+            }
+        }, parallel);
+
+        return destination;
     }
 
     private static Image ResizeNearestNeighbor(Image source, int width, int height)

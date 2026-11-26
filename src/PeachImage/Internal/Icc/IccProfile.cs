@@ -78,6 +78,20 @@ internal sealed class IccProfile
         }
     }
 
+    /// <summary>The device-RGB-to-D50-XYZ colorant matrix and tone curves of an RGB matrix/TRC profile (false for LUT, gray and CMYK profiles).</summary>
+    internal bool TryGetRgbMatrixTrc(out IccMatrix3x3 toXyzD50, out IccCurve[] curves)
+    {
+        if (transform is IccTransformTrcMatrix matrixTrc)
+        {
+            matrixTrc.GetColorantsAndCurves(out toXyzD50, out curves);
+            return true;
+        }
+
+        toXyzD50 = default;
+        curves = [];
+        return false;
+    }
+
     /// <summary>The D50 XYZ to linear-RGB matrix and per-channel inverse tone tables of an RGB matrix/TRC profile (see <see cref="IccTransformTrcMatrix.TryGetFromXyz"/>).</summary>
     internal bool TryGetFromXyzMatrixTrc(IccIntent intent, out IccMatrix3x3 matrix, out double[][] inverseTables)
     {

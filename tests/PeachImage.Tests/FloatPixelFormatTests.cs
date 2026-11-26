@@ -60,11 +60,16 @@ public class FloatPixelFormatTests
     }
 
     [Fact]
-    public void Save_FloatImage_ThrowsNotSupported()
+    public void Save_FloatImage_ThrowsNotSupported_ForFormatsWithoutAFloatCarrier()
     {
         using var image = Image.Create(2, 2, PixelFormat.RgbF32);
         using var stream = new MemoryStream();
 
-        Assert.Throws<NotSupportedException>(() => image.Save(stream, "png"));
+        Assert.Throws<NotSupportedException>(() => image.Save(stream, "bmp"));
+        Assert.Throws<NotSupportedException>(() => image.Save(stream, "gif"));
+
+        // PNG, JPEG, WebP, AVIF and JPEG XL take any pixel format and write the precision they can carry.
+        image.Save(stream, "png");
+        Assert.True(stream.Length > 0);
     }
 }

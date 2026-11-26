@@ -104,3 +104,41 @@ public class ImageConvertToSrgbTests
         Assert.True(expected.AsSpan().SequenceEqual(result.GetPixelSpan()));
     }
 }
+
+public class ConvertToSrgbMetadataTests
+{
+    [Fact]
+    public void Result_DoesNotCarryTheProfileOfTheOldPixels()
+    {
+        using var source = Image.Create(2, 2, PixelFormat.Rgb24);
+        source.GetPixelSpan().Fill(100);
+        source.Metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Icc, Data = ColorProfiles.GetBytes(NamedColorSpace.DisplayP3).ToArray() });
+        source.Metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Exif, Data = [1, 2, 3] });
+        source.Metadata.Cicp = CicpCode.Of(NamedColorSpace.DisplayP3);
+        source.Metadata.HorizontalResolution = 3000;
+
+        using var converted = source.ConvertToSrgb();
+
+        Assert.NotSame(source, converted);
+        Assert.Null(converted.Metadata.IccProfileBytes);
+        Assert.Null(converted.Metadata.Cicp);
+        Assert.Null(converted.Metadata.GetColorSpace());
+        Assert.Contains(converted.Metadata.Profiles, p => p.Kind == MetadataProfileKind.Exif); // everything else carries over
+        Assert.Equal(3000, converted.Metadata.HorizontalResolution);
+        Assert.NotNull(source.Metadata.IccProfileBytes); // and the source is untouched
+
+        using var ms = new MemoryStream();
+        converted.Save(ms, "png");
+        using var back = Image.Load(ms.ToArray());
+        Assert.Null(back.Metadata.IccProfileBytes);
+    }
+
+    [Fact]
+    public void NoOpConversions_StillReturnTheSameImageWithItsProfile()
+    {
+        using var source = Image.Create(2, 2, PixelFormat.Rgba32);
+        source.Metadata.Profiles.Add(new RawMetadataProfile { Kind = MetadataProfileKind.Icc, Data = ColorProfiles.GetBytes(NamedColorSpace.DisplayP3).ToArray() });
+        Assert.Same(source, source.ConvertToSrgb());
+        Assert.NotNull(source.Metadata.IccProfileBytes);
+    }
+}

@@ -19,7 +19,27 @@ public sealed class IccColorProfile
 {
     private readonly IccProfile profile;
     private readonly IccIntent defaultIntent;
+    private readonly byte[] bytes;
+    private readonly Lazy<ColorSpaceDescription?> description;
 
+    /// <summary>The profile's bytes as they were supplied (a copy is made on construction).</summary>
+    public ReadOnlyMemory<byte> ProfileBytes => bytes;
+
+    /// <summary>
+    /// What this profile says about its RGB space: primaries, white point and transfer function, and the <see cref="NamedColorSpace"/> they match
+    /// (see <see cref="ColorSpaceDescription.Named"/>). <see langword="null"/> for gray, CMYK and LUT-based RGB profiles, whose behavior no
+    /// primaries-and-curve summary can capture. The chromaticities are the D65-referenced equivalents of the profile's D50-adapted colorants,
+    /// which is what the common display spaces were defined in; a profile defined against another white point reads as a D65 space with shifted
+    /// primaries and matches no named space.
+    /// </summary>
+    public ColorSpaceDescription? Describe() => description.Value;
+
+    /// <summary>The <see cref="NamedColorSpace"/> this profile matches within tolerance (primaries within 0.003 xy and a tone curve within 0.004), or <see langword="null"/>.</summary>
+    public NamedColorSpace? Identify() => Describe()?.Named;
+
+    internal IccProfile Engine => profile;
+
+    private ColorSpaceDescription? DescribeEngine() => Internal.Color.ProfileDescriber.Describe(profile);
     /// <summary>
     /// Parses <paramref name="profileBytes"/> as an ICC profile.
     /// </summary>
@@ -31,7 +51,9 @@ public sealed class IccColorProfile
     /// </exception>
     public IccColorProfile(ReadOnlySpan<byte> profileBytes)
     {
-        if (!IccDeviceToSrgbConverter.TryParse(profileBytes.ToArray(), out var parsedProfile, out var intent))
+        bytes = profileBytes.ToArray();
+        description = new Lazy<ColorSpaceDescription?>(DescribeEngine);
+        if (!IccDeviceToSrgbConverter.TryParse(bytes, out var parsedProfile, out var intent))
         {
             throw new IccProfileException("The ICC profile data is too short, malformed, or resolves to a device color space or transform that isn't supported.");
         }
@@ -41,19 +63,22 @@ public sealed class IccColorProfile
         DataColorSpace = ToPublicColorSpace(profile.DataColorSpace);
     }
 
-    private IccColorProfile(IccProfile profile, IccIntent defaultIntent)
+    private IccColorProfile(IccProfile profile, IccIntent defaultIntent, byte[] bytes)
     {
         this.profile = profile;
         this.defaultIntent = defaultIntent;
+        this.bytes = bytes;
+        description = new Lazy<ColorSpaceDescription?>(DescribeEngine);
         DataColorSpace = ToPublicColorSpace(profile.DataColorSpace);
     }
 
     /// <summary>Attempts to parse <paramref name="profileBytes"/> as an ICC profile, returning <see langword="false"/> instead of throwing on any failure.</summary>
     public static bool TryCreate(ReadOnlySpan<byte> profileBytes, out IccColorProfile? profile)
     {
-        if (IccDeviceToSrgbConverter.TryParse(profileBytes.ToArray(), out var parsedProfile, out var intent))
+        var copy = profileBytes.ToArray();
+        if (IccDeviceToSrgbConverter.TryParse(copy, out var parsedProfile, out var intent))
         {
-            profile = new IccColorProfile(parsedProfile, intent);
+            profile = new IccColorProfile(parsedProfile, intent, copy);
             return true;
         }
 

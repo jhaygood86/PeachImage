@@ -113,4 +113,81 @@ public sealed class ImageMetadata
 
         return null;
     }
+
+    /// <summary>The embedded ICC profile's raw bytes, or <see langword="null"/> when there is none.</summary>
+    public byte[]? IccProfileBytes
+    {
+        get
+        {
+            foreach (var profile in Profiles)
+            {
+                if (profile.Kind == MetadataProfileKind.Icc)
+                {
+                    return profile.Data;
+                }
+            }
+
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The ITU-T H.273 code points the file declares for its color space (PNG <c>cICP</c>, AVIF <c>nclx</c>), or <see langword="null"/>.
+    /// Setting it replaces any earlier value; setting <see langword="null"/> removes it.
+    /// </summary>
+    public CicpCode? Cicp
+    {
+        get
+        {
+            foreach (var profile in Profiles)
+            {
+                if (profile.Kind == MetadataProfileKind.Cicp && profile.Data.Length >= 4)
+                {
+                    return new CicpCode(profile.Data[0], profile.Data[1], profile.Data[2], profile.Data[3] != 0);
+                }
+            }
+
+            return null;
+        }
+
+        set
+        {
+            for (int i = Profiles.Count - 1; i >= 0; i--)
+            {
+                if (Profiles[i].Kind == MetadataProfileKind.Cicp)
+                {
+                    Profiles.RemoveAt(i);
+                }
+            }
+
+            if (value is { } code)
+            {
+                Profiles.Add(new RawMetadataProfile
+                {
+                    Kind = MetadataProfileKind.Cicp,
+                    Data = [code.ColorPrimaries, code.TransferCharacteristics, code.MatrixCoefficients, (byte)(code.FullRange ? 1 : 0)],
+                });
+            }
+        }
+    }
+
+    /// <summary>
+    /// What the image says about its color space: the embedded ICC profile's description when it has an RGB matrix/TRC profile, otherwise
+    /// what <see cref="Cicp"/> denotes, otherwise <see langword="null"/> (no declaration, which readers take to be sRGB).
+    /// </summary>
+    public ColorSpaceDescription? GetColorSpace()
+    {
+        if (GetIccColorProfile()?.Describe() is { } fromProfile)
+        {
+            return fromProfile;
+        }
+
+        return Cicp is { } code ? Internal.Color.NamedSpaces.Describe(code) : null;
+    }
+
+    /// <summary>The <see cref="NamedColorSpace"/> the image's color space matches (see <see cref="GetColorSpace"/>), or <see langword="null"/>.</summary>
+    public NamedColorSpace? GetNamedColorSpace() => GetColorSpace()?.Named;
+
+    /// <summary>Whether the image's declared color space is an HDR one (PQ or HLG).</summary>
+    public bool IsHdr => GetColorSpace()?.IsHdr ?? false;
 }

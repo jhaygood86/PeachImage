@@ -40,5 +40,28 @@ public abstract class EncoderOptions
     /// </summary>
     public TaskScheduler? TaskScheduler { get; init; }
 
+    /// <summary>
+    /// The bit depth the encoder writes. <see cref="EncodePrecision.Auto"/> (the default) keeps whatever precision the format can carry: a source with
+    /// 16-bit or floating-point samples, or one converted to a wide-gamut <see cref="TargetColorSpace"/>, is written at 16 bits where the format
+    /// has them (PNG, JPEG XL) and at the format's own depth otherwise; 8-bit sources stay 8-bit.
+    /// </summary>
+    public EncodePrecision Precision { get; init; }
+
+    /// <summary>
+    /// Convert the pixels to this color space before encoding and describe it in the file (an ICC profile where the format has one, plus
+    /// <c>cICP</c> in PNG). <see langword="null"/> encodes the pixels as they are with whatever profile the image already carries. The conversion is
+    /// fused with the pixel-format change the encoder needs anyway, so it adds no extra pass over the image.
+    /// </summary>
+    public NamedColorSpace? TargetColorSpace { get; init; }
+
+    /// <summary>Like <see cref="TargetColorSpace"/>, for an RGB matrix/TRC ICC profile of the caller's. Takes precedence when both are set.</summary>
+    public IccColorProfile? TargetColorProfile { get; init; }
+
     internal bool WritesIccProfile => IncludeIccProfile ?? IncludeMetadata;
+
+    /// <summary>The sample bit depth the format was asked to write (0 for the encoder to choose), for codecs with a depth option.</summary>
+    internal virtual int RequestedBitDepth => 0;
+
+    /// <summary>Whether the codec stores half-precision float pixels as such rather than widened (JPEG XL, lossless only).</summary>
+    internal virtual bool KeepsHalfFloat => false;
 }
