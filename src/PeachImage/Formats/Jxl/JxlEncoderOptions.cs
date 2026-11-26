@@ -25,6 +25,22 @@ public sealed class JxlEncoderOptions : EncoderOptions
     /// </summary>
     public int Quality { get; init; } = 75;
 
+    internal override bool KeepsHalfFloat => Lossless;
+
+    /// <summary>
+    /// <see cref="Quality"/> as a fraction from 0 to 1, mapped the way a browser maps the <c>quality</c> argument of <c>canvas.toBlob(type, quality)</c>:
+    /// <c>Quality = round(value x 100)</c>.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is NaN or outside 0..1 (a browser would use its default; pass that instead).</exception>
+    public float QualityFraction
+    {
+        get => Quality / 100f;
+        init
+        {
+            Quality = PeachImage.Internal.BrowserQuality.ToPercent(value);
+        }
+    }
+
     /// <summary>
     /// How hard lossy encoding looks for a smaller file, 1 (fastest) to 9 (slowest). Efforts 1 to 3 use 8x8 blocks only, 4 to 6
     /// also try 16x16 and 16x8/8x16 blocks, and 7 to 9 add 32x32 and the 32-wide rectangles. Defaults to 5. Has no effect on
