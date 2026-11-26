@@ -40,11 +40,11 @@ internal static class Av1PaletteSearch
     /// <summary>
     /// <c>av1_count_colors</c> (<c>av1/encoder/intra_mode_search.c:320-336</c>): a full 256-bin histogram
     /// over one plane's pixels in <c>[x, x+w) x [y, y+h)</c>, returning the number of distinct 8-bit values
-    /// actually present. <paramref name="countBuf"/> must be at least 256 long; cleared internally.
+    /// actually present. <paramref name="countBuf"/> must be at least <paramref name="histogramSize"/> (the number of sample values, 1 &lt;&lt; bit depth) long; cleared internally.
     /// </summary>
-    internal static int CountColors(int[] source, int stride, int x, int y, int w, int h, int[] countBuf)
+    internal static int CountColors(int[] source, int stride, int x, int y, int w, int h, int[] countBuf, int histogramSize = 256)
     {
-        Array.Clear(countBuf, 0, 256);
+        Array.Clear(countBuf, 0, histogramSize);
         for (int i = 0; i < h; i++)
         {
             int rowBase = ((y + i) * stride) + x;
@@ -55,7 +55,7 @@ internal static class Av1PaletteSearch
         }
 
         int n = 0;
-        for (int i = 0; i < 256; i++)
+        for (int i = 0; i < histogramSize; i++)
         {
             if (countBuf[i] != 0)
             {
@@ -73,13 +73,13 @@ internal static class Av1PaletteSearch
     /// (<c>color_count_comp</c>'s own tie-break). <paramref name="topColors"/> must be at least
     /// <paramref name="nColors"/> long.
     /// </summary>
-    internal static void FindTopColors(int[] countBuf, int nColors, Span<int> topColors)
+    internal static void FindTopColors(int[] countBuf, int nColors, Span<int> topColors, int histogramSize = 256)
     {
         Span<int> idx = stackalloc int[PaletteMaxSize];
         Span<int> cnt = stackalloc int[PaletteMaxSize];
         int n = 0;
 
-        for (int i = 0; i < 256; i++)
+        for (int i = 0; i < histogramSize; i++)
         {
             int count = countBuf[i];
             if (count <= 0)
@@ -173,14 +173,14 @@ internal static class Av1PaletteSearch
     /// per-centroid snap -- no RD comparison here, matching libaom's own real code exactly: every candidate
     /// gets this treatment before it's ever costed, not just candidates that turn out to win.
     /// </summary>
-    internal static void OptimizePaletteColors(ReadOnlySpan<int> cache, int nCache, Span<int> centroids, int n)
+    internal static void OptimizePaletteColors(ReadOnlySpan<int> cache, int nCache, Span<int> centroids, int n, int bitDepth = 8)
     {
         if (nCache <= 0)
         {
             return;
         }
 
-        const int minThreshold = 4;
+        int minThreshold = 4 << (bitDepth - 8);
         for (int i = 0; i < n; i++)
         {
             int minDiff = Math.Abs(centroids[i] - cache[0]);

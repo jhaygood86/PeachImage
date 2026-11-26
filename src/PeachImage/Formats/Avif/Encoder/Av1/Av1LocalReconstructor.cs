@@ -54,21 +54,22 @@ internal static class Av1LocalReconstructor
     /// signalled), but does desync this encoder's own local reconstruction buffer from what a real decoder
     /// reconstructs, corrupting every later block's prediction that reads this one as neighbor context.
     /// </param>
+    /// <param name="bitDepth">Sample bit depth of <paramref name="plane"/>: 8, 10 or 12.</param>
     /// <remarks>
     /// Both scratch buffers exist so callers (<see cref="Av1TileEncoder"/>) can rent them once per tile and
     /// reuse them across every block, rather than this method allocating fresh per call -- previously a
     /// 16 KB heap allocation on <em>every single block</em> in the image (see git history for the allocation
     /// profile that motivated this).
     /// </remarks>
-    public static void Reconstruct(int[] plane, int planeStride, int x, int y, int size, int[] quantLevels, int baseQIdx, int[] dequantScratch, int[] residualScratch, bool lossless = false, int txType = Av1TxType.DctDct)
+    public static void Reconstruct(int[] plane, int planeStride, int x, int y, int size, int[] quantLevels, int baseQIdx, int[] dequantScratch, int[] residualScratch, bool lossless = false, int txType = Av1TxType.DctDct, int bitDepth = 8)
     {
         int txSz = Av1ForwardTransform.SizeToTxSz(size);
-        int dcQ = Av1Dequantizer.DcQ(baseQIdx, 8);
-        int acQ = Av1Dequantizer.AcQ(baseQIdx, 8);
+        int dcQ = Av1Dequantizer.DcQ(baseQIdx, bitDepth);
+        int acQ = Av1Dequantizer.AcQ(baseQIdx, bitDepth);
 
-        Av1Dequantizer.Dequantize(quantLevels, dequantScratch, txSz, dcQ, acQ, 8);
+        Av1Dequantizer.Dequantize(quantLevels, dequantScratch, txSz, dcQ, acQ, bitDepth);
 
-        Av1InverseTransform.Inverse2D(dequantScratch, residualScratch, txSz, txType, lossless, bitDepth: 8);
+        Av1InverseTransform.Inverse2D(dequantScratch, residualScratch, txSz, txType, lossless, bitDepth);
 
         for (int i = 0; i < size; i++)
         {
@@ -77,7 +78,7 @@ internal static class Av1LocalReconstructor
             for (int j = 0; j < size; j++)
             {
                 int idx = rowBase + j;
-                plane[idx] = Math.Clamp(plane[idx] + residualScratch[resBase + j], 0, 255);
+                plane[idx] = Math.Clamp(plane[idx] + residualScratch[resBase + j], 0, (1 << bitDepth) - 1);
             }
         }
     }

@@ -43,12 +43,6 @@ internal static class AvifAv1ConfigBox
         bool subsamplingY = (b2 & 0x04) != 0;
         int chromaSamplePosition = b2 & 0x03;
 
-        // Cheapest, earliest point to reject 12-bit AVIF -- well before any AV1 bitstream decode work.
-        if (twelveBit)
-        {
-            throw new AvifUnsupportedFeatureException("12-bit AVIF is not supported.");
-        }
-
         return new AvifAv1Config(
             seqProfile,
             seqLevelIdx0,

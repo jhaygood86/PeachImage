@@ -173,11 +173,6 @@ internal sealed class Av1SequenceHeader
             bitDepth = highBitdepth ? 10 : 8;
         }
 
-        if (bitDepth == 12)
-        {
-            throw new AvifUnsupportedFeatureException("12-bit AVIF is not supported.");
-        }
-
         monoChrome = seqProfile != 1 && reader.ReadFlag();
 
         bool colorDescriptionPresent = reader.ReadFlag();

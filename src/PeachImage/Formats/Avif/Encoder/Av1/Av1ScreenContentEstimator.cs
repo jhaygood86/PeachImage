@@ -29,7 +29,7 @@ internal static class Av1ScreenContentEstimator
     /// additionally for IntraBC, both scaled by 10/100 and 12/100 respectively -- these are libaom's own
     /// experimentally-chosen constants, not independently re-derived).
     /// </summary>
-    public static (bool AllowScreenContentTools, bool AllowIntrabc) Estimate(int[] lumaY, int planeWidth, int trueWidth, int trueHeight)
+    public static (bool AllowScreenContentTools, bool AllowIntrabc) Estimate(int[] lumaY, int planeWidth, int trueWidth, int trueHeight, int bitDepth = 8)
     {
         long area = (long)trueWidth * trueHeight;
         if (area == 0)
@@ -39,7 +39,7 @@ internal static class Av1ScreenContentEstimator
 
         long counts1 = 0;
         long counts2 = 0;
-        Span<int> valueCounts = stackalloc int[256];
+        Span<int> valueCounts = bitDepth > 8 ? new int[1 << bitDepth] : stackalloc int[256];
 
         for (int r = 0; r + BlockSize <= trueHeight; r += BlockSize)
         {

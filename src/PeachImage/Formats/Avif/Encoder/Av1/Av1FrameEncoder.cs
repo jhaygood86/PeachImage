@@ -22,7 +22,76 @@ internal static class Av1FrameEncoder
     /// quantization (<c>base_q_idx</c> forced to 0, AV1's coded-lossless trigger, rather than derived from
     /// <paramref name="quality"/>).
     /// </summary>
-    public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality, bool lossless = false, int effort = 2, Action<Av1BlockDecisionRecord>? onLeafCommitted = null, int? tileRowsLog2 = null, int maxDegreeOfParallelism = -1, TaskScheduler? scheduler = null)
+    public static Av1EncodedFrame Encode(ReadOnlySpan<byte> pixels, int width, int height, bool monoChrome, int quality, bool lossless = false, int effort = 2, Action<Av1BlockDecisionRecord>? onLeafCommitted = null, int? tileRowsLog2 = null, int maxDegreeOfParallelism = -1, TaskScheduler? scheduler = null, int colorPrimaries = Av1SequenceHeaderWriter.ColorPrimaries, int transferCharacteristics = Av1SequenceHeaderWriter.TransferCharacteristics)
+    {
+        // The one gate for genuinely lossless RGB: lossless + real chroma planes means 4:4:4 with an
+        // identity color matrix (Av1RgbToYuvIdentityConverter) instead of 4:2:0 BT.601 -- see that class's
+        // remarks for why only the identity matrix is exactly invertible. Always false for monoChrome (no
+        // chroma planes to subsample either way), so this can never change monoChrome/alpha item output.
+        bool chroma444 = lossless && !monoChrome;
+
+        int[] y;
+        int[]? u = null;
+        int[]? v = null;
+        int chromaWidth = 0;
+        int chromaHeight = 0;
+        if (monoChrome)
+        {
+            y = Av1RgbToYuvConverter.ConvertMonoChrome(pixels, width, height);
+        }
+        else if (chroma444)
+        {
+            (y, u, v) = Av1RgbToYuvIdentityConverter.Convert(pixels, width, height);
+            chromaWidth = width;
+            chromaHeight = height;
+        }
+        else
+        {
+            (y, u, v, chromaWidth, chromaHeight) = Av1RgbToYuvConverter.Convert(pixels, width, height);
+        }
+
+        return EncodePlanes(y, u, v, chromaWidth, chromaHeight, width, height, monoChrome, quality, lossless, effort, onLeafCommitted, tileRowsLog2, maxDegreeOfParallelism, scheduler, bitDepth: 8, colorPrimaries, transferCharacteristics);
+    }
+
+    /// <summary>
+    /// Encodes a high-bit-depth source: <paramref name="samples"/> are interleaved RGB (or, if <paramref name="monoChrome"/>, gray) 16-bit
+    /// values already scaled to the range of <paramref name="bitDepth"/> (10 or 12), and the AV1 stream is a 10- or 12-bit one.
+    /// </summary>
+    public static Av1EncodedFrame EncodeHighDepth(ReadOnlySpan<ushort> samples, int width, int height, bool monoChrome, int quality, int bitDepth, bool lossless = false, int effort = 2, int? tileRowsLog2 = null, int maxDegreeOfParallelism = -1, TaskScheduler? scheduler = null, int colorPrimaries = Av1SequenceHeaderWriter.ColorPrimaries, int transferCharacteristics = Av1SequenceHeaderWriter.TransferCharacteristics)
+    {
+        if (bitDepth is not (10 or 12))
+        {
+            throw new ArgumentOutOfRangeException(nameof(bitDepth), bitDepth, "High-bit-depth AV1 encoding supports 10 and 12 bits.");
+        }
+
+        bool chroma444 = lossless && !monoChrome;
+        int[] y;
+        int[]? u = null;
+        int[]? v = null;
+        int chromaWidth = 0;
+        int chromaHeight = 0;
+        if (monoChrome)
+        {
+            y = Av1RgbToYuvHighDepth.ConvertMonoChrome(samples, width * height);
+        }
+        else if (chroma444)
+        {
+            (y, u, v) = Av1RgbToYuvHighDepth.ConvertIdentity(samples, width * height);
+            chromaWidth = width;
+            chromaHeight = height;
+        }
+        else
+        {
+            (y, u, v, chromaWidth, chromaHeight) = Av1RgbToYuvHighDepth.Convert(samples, width, height, bitDepth);
+        }
+
+        return EncodePlanes(y, u, v, chromaWidth, chromaHeight, width, height, monoChrome, quality, lossless, effort, null, tileRowsLog2, maxDegreeOfParallelism, scheduler, bitDepth, colorPrimaries, transferCharacteristics);
+    }
+
+    private static Av1EncodedFrame EncodePlanes(
+        int[] y, int[]? u, int[]? v, int chromaWidth, int chromaHeight,
+        int width, int height, bool monoChrome, int quality, bool lossless, int effort,
+        Action<Av1BlockDecisionRecord>? onLeafCommitted, int? tileRowsLog2, int maxDegreeOfParallelism, TaskScheduler? scheduler, int bitDepth, int colorPrimaries, int transferCharacteristics)
     {
         var parallel = new ParallelSettings(maxDegreeOfParallelism, scheduler);
         // Lossless uses 128x128 superblocks (Av1SequenceHeaderWriter/Av1TileEncoder), so the coded canvas
@@ -32,49 +101,19 @@ internal static class Av1FrameEncoder
         int sbPixels = lossless ? 128 : 64;
         int paddedWidth = ((width + sbPixels - 1) / sbPixels) * sbPixels;
         int paddedHeight = ((height + sbPixels - 1) / sbPixels) * sbPixels;
-
-        // The one gate for genuinely lossless RGB: lossless + real chroma planes means 4:4:4 with an
-        // identity color matrix (Av1RgbToYuvIdentityConverter) instead of 4:2:0 BT.601 -- see that class's
-        // remarks for why only the identity matrix is exactly invertible. Always false for monoChrome (no
-        // chroma planes to subsample either way), so this can never change monoChrome/alpha item output.
         bool chroma444 = lossless && !monoChrome;
 
-        int[] yPlane;
+        int[] yPlane = PadPlane(y, width, height, paddedWidth, paddedHeight);
         int[]? uPlane = null;
         int[]? vPlane = null;
-        int chromaWidth = 0;
-        int chromaHeight = 0;
         int paddedChromaWidth = 0;
         int paddedChromaHeight = 0;
-
-        if (monoChrome)
+        if (!monoChrome)
         {
-            int[] y = Av1RgbToYuvConverter.ConvertMonoChrome(pixels, width, height);
-            yPlane = PadPlane(y, width, height, paddedWidth, paddedHeight);
-        }
-        else if (chroma444)
-        {
-            var (y, u, v) = Av1RgbToYuvIdentityConverter.Convert(pixels, width, height);
-            chromaWidth = width;
-            chromaHeight = height;
-            paddedChromaWidth = paddedWidth;
-            paddedChromaHeight = paddedHeight;
-
-            yPlane = PadPlane(y, width, height, paddedWidth, paddedHeight);
-            uPlane = PadPlane(u, chromaWidth, chromaHeight, paddedChromaWidth, paddedChromaHeight);
-            vPlane = PadPlane(v, chromaWidth, chromaHeight, paddedChromaWidth, paddedChromaHeight);
-        }
-        else
-        {
-            var (y, u, v, cw, ch) = Av1RgbToYuvConverter.Convert(pixels, width, height);
-            chromaWidth = cw;
-            chromaHeight = ch;
-            paddedChromaWidth = paddedWidth / 2;
-            paddedChromaHeight = paddedHeight / 2;
-
-            yPlane = PadPlane(y, width, height, paddedWidth, paddedHeight);
-            uPlane = PadPlane(u, chromaWidth, chromaHeight, paddedChromaWidth, paddedChromaHeight);
-            vPlane = PadPlane(v, chromaWidth, chromaHeight, paddedChromaWidth, paddedChromaHeight);
+            paddedChromaWidth = chroma444 ? paddedWidth : paddedWidth / 2;
+            paddedChromaHeight = chroma444 ? paddedHeight : paddedHeight / 2;
+            uPlane = PadPlane(u!, chromaWidth, chromaHeight, paddedChromaWidth, paddedChromaHeight);
+            vPlane = PadPlane(v!, chromaWidth, chromaHeight, paddedChromaWidth, paddedChromaHeight);
         }
 
         int baseQIdx = lossless ? 0 : Av1ForwardQuantizer.QualityToBaseQIdx(quality);
@@ -100,7 +139,7 @@ internal static class Av1FrameEncoder
         bool heuristicIntrabc = false;
         if (lossless)
         {
-            (heuristicScreenContentTools, heuristicIntrabc) = Av1ScreenContentEstimator.Estimate(yPlane, paddedWidth, width, height);
+            (heuristicScreenContentTools, heuristicIntrabc) = Av1ScreenContentEstimator.Estimate(yPlane, paddedWidth, width, height, bitDepth);
         }
 
         var reconY = new int[paddedWidth * paddedHeight];
@@ -128,14 +167,14 @@ internal static class Av1FrameEncoder
             uPlane, vPlane, paddedChromaWidth, paddedChromaHeight,
             reconY, reconU, reconV,
             monoChrome, baseQIdx, lossless, chroma444, effort, trialScreenContentTools, trialIntrabc,
-            trueWidth: headerWidth, trueHeight: headerHeight);
+            trueWidth: headerWidth, trueHeight: headerHeight, bitDepth: bitDepth);
 
         void EncodeTileTrialWithHook(bool trialScreenContentTools, bool trialIntrabc, Action<Av1BlockDecisionRecord> hook) => Av1TileEncoder.EncodeTile(
             yPlane, paddedWidth, paddedHeight,
             uPlane, vPlane, paddedChromaWidth, paddedChromaHeight,
             reconY, reconU, reconV,
             monoChrome, baseQIdx, lossless, chroma444, effort, trialScreenContentTools, trialIntrabc,
-            trueWidth: headerWidth, trueHeight: headerHeight, onLeafCommitted: hook);
+            trueWidth: headerWidth, trueHeight: headerHeight, onLeafCommitted: hook, bitDepth: bitDepth);
 
         bool allowScreenContentTools = heuristicScreenContentTools;
         bool allowIntrabc = heuristicIntrabc;
@@ -154,7 +193,7 @@ internal static class Av1FrameEncoder
             tileBytes = EncodeTileRows(
                 yPlane, uPlane, vPlane, reconY, reconU, reconV,
                 paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
-                monoChrome, baseQIdx, effort, chosenTileRowsLog2, parallel, out tileSizeBytes);
+                monoChrome, baseQIdx, effort, chosenTileRowsLog2, parallel, bitDepth, out tileSizeBytes);
         }
         else
         {
@@ -217,7 +256,7 @@ internal static class Av1FrameEncoder
                 reconY, reconU, reconV,
                 yPlane, uPlane, vPlane,
                 paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
-                monoChrome, baseQIdx, parallel);
+                monoChrome, baseQIdx, parallel, bitDepth);
 
             // CDEF (spec §7.15) runs after deblocking, per spec's own filter ordering (Av1FrameDecoder.
             // DecodeTileGroup applies them in exactly this order) -- reconY/U/V already reflect the chosen
@@ -229,10 +268,10 @@ internal static class Av1FrameEncoder
                 reconY, reconU, reconV,
                 yPlane, uPlane, vPlane,
                 paddedWidth, paddedHeight, paddedChromaWidth, paddedChromaHeight,
-                monoChrome, baseQIdx, loopFilterLevel, parallel);
+                monoChrome, baseQIdx, loopFilterLevel, parallel, bitDepth);
         }
 
-        byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(headerWidth, headerHeight, monoChrome, chroma444, enableCdef: !lossless, use128x128Superblock: lossless, enableRestoration: lossless);
+        byte[] seqHeaderPayload = Av1SequenceHeaderWriter.Write(headerWidth, headerHeight, monoChrome, chroma444, enableCdef: !lossless, use128x128Superblock: lossless, enableRestoration: lossless, bitDepth: bitDepth, colorPrimaries, transferCharacteristics);
 
         var frameHeaderWriter = new Av1BitWriter();
         Av1FrameHeaderWriter.Write(frameHeaderWriter, headerWidth, headerHeight, monoChrome, baseQIdx, lossless, loopFilterLevel, enableCdef: !lossless, cdefChoice, allowScreenContentTools, allowIntrabc, reducedTxSet: !lossless, chosenTileRowsLog2, tileSizeBytes);
@@ -256,7 +295,7 @@ internal static class Av1FrameEncoder
         Av1ObuWriter.WriteObu(output, Decoding.Av1.Av1ObuType.Frame, frameObuPayload);
 
         int seqLevelIdx = Av1SequenceHeaderWriter.ComputeSeqLevelIdx(headerWidth, headerHeight);
-        return new Av1EncodedFrame(output.ToArray(), width, height, monoChrome, chroma444, seqLevelIdx);
+        return new Av1EncodedFrame(output.ToArray(), width, height, monoChrome, chroma444, seqLevelIdx, bitDepth);
     }
 
     private const int MinTileRowSuperblocks = 4;
@@ -295,7 +334,7 @@ internal static class Av1FrameEncoder
         int[] yPlane, int[]? uPlane, int[]? vPlane,
         int[] reconY, int[]? reconU, int[]? reconV,
         int paddedWidth, int paddedHeight, int paddedChromaWidth, int paddedChromaHeight,
-        bool monoChrome, int baseQIdx, int effort, int tileRowsLog2, ParallelSettings parallel, out int tileSizeBytes)
+        bool monoChrome, int baseQIdx, int effort, int tileRowsLog2, ParallelSettings parallel, int bitDepth, out int tileSizeBytes)
     {
         int[] rowStarts = Av1TileInfoWriter.ComputeRowStarts(paddedHeight / 4, use128x128Superblock: false, tileRowsLog2);
         int tileCount = rowStarts.Length - 1;
@@ -327,7 +366,7 @@ internal static class Av1FrameEncoder
                 uSlice, vSlice, paddedChromaWidth, chromaHeight,
                 reconYSlice, reconUSlice, reconVSlice,
                 monoChrome, baseQIdx, lossless: false, chroma444: false, effort: effort, allowScreenContentTools: false, allowIntrabc: false,
-                trueWidth: paddedWidth, trueHeight: height);
+                trueWidth: paddedWidth, trueHeight: height, bitDepth: bitDepth);
 
             reconYSlice.CopyTo(reconY.AsSpan(y0 * paddedWidth));
             if (!monoChrome)

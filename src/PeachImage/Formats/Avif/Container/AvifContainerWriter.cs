@@ -207,8 +207,8 @@ internal static class AvifContainerWriter
         var properties = new List<byte[]>
         {
             BuildIspe(frame.Width, frame.Height),
-            BuildAv1Config(frame.MonoChrome, frame.Chroma444, frame.SeqLevelIdx),
-            BuildPixi(frame.MonoChrome),
+            BuildAv1Config(frame.MonoChrome, frame.Chroma444, frame.SeqLevelIdx, frame.BitDepth),
+            BuildPixi(frame.MonoChrome, frame.BitDepth),
         };
         var colorAssociations = new List<byte> { 0x80 | 1, 0x80 | 2, 3 };
         var entries = new List<(uint ItemId, byte[] Associations)>();
@@ -220,10 +220,18 @@ internal static class AvifContainerWriter
             // alpha item and always takes the assembled image's width/height from the color item, so an alpha
             // ispe would be redundant (this mirrors this repo's own decoder tolerance, not a spec requirement
             // this encoder needs to lean on for interop -- real decoders are expected to do the same fallback).
-            properties.Add(BuildAv1Config(monoChrome: true, chroma444: false, alphaFrame.SeqLevelIdx));
-            properties.Add(BuildPixi(monoChrome: true));
+            properties.Add(BuildAv1Config(monoChrome: true, chroma444: false, alphaFrame.SeqLevelIdx, alphaFrame.BitDepth));
+            properties.Add(BuildPixi(monoChrome: true, alphaFrame.BitDepth));
             properties.Add(AvifAuxCBox.Build());
             alphaAssociations = [0x80 | 4, 5, 6];
+        }
+
+        if (frame.ColorSignal is { } signal)
+        {
+            // colour_type 'nclx': primaries, transfer, matrix (identity for the lossless RGB path, BT.601 otherwise: what the stream was made with), full range.
+            int matrix = frame.Chroma444 && !frame.MonoChrome ? Av1SequenceHeaderWriter.MatrixCoefficientsIdentity : Av1SequenceHeaderWriter.MatrixCoefficients;
+            properties.Add(AvifBoxWriter.Box("colr", [.. "nclx"u8.ToArray(), (byte)(signal.Primaries >> 8), (byte)signal.Primaries, (byte)(signal.Transfer >> 8), (byte)signal.Transfer, (byte)(matrix >> 8), (byte)matrix, 0x80]));
+            colorAssociations.Add((byte)properties.Count);
         }
 
         if (iccProfile is not null)
@@ -312,13 +320,22 @@ internal static class AvifContainerWriter
     /// wouldn't be caught by this repo's round-trip tests -- it still matters for spec conformance and for
     /// any other tool that trusts <c>av1C</c> for fast subsampling probing without a full bitstream parse.
     /// </summary>
-    private static byte[] BuildAv1Config(bool monoChrome, bool chroma444, int seqLevelIdx)
+    private static byte[] BuildAv1Config(bool monoChrome, bool chroma444, int seqLevelIdx, int bitDepth = 8)
     {
-        int seqProfile = chroma444 ? Av1SequenceHeaderWriter.SeqProfileChroma444 : Av1SequenceHeaderWriter.SeqProfile;
+        int seqProfile = Av1SequenceHeaderWriter.ProfileFor(chroma444, bitDepth);
         var payload = new byte[4];
         payload[0] = (byte)(0x80 | 1); // marker=1, version=1
         payload[1] = (byte)(((seqProfile & 0x7) << 5) | (seqLevelIdx & 0x1F));
-        int b2 = 0; // seq_tier0=0, high_bitdepth=0 (8-bit), twelve_bit=0
+        int b2 = 0; // seq_tier0=0
+        if (bitDepth > 8)
+        {
+            b2 |= 0x40; // high_bitdepth
+            if (bitDepth == 12)
+            {
+                b2 |= 0x20; // twelve_bit
+            }
+        }
+
         if (monoChrome)
         {
             b2 |= 0x10;
@@ -335,14 +352,14 @@ internal static class AvifContainerWriter
         return AvifBoxWriter.Box("av1C", payload);
     }
 
-    private static byte[] BuildPixi(bool monoChrome)
+    private static byte[] BuildPixi(bool monoChrome, int bitDepth = 8)
     {
         int channels = monoChrome ? 1 : 3;
         var payload = new byte[1 + channels];
         payload[0] = (byte)channels;
         for (int i = 0; i < channels; i++)
         {
-            payload[1 + i] = 8;
+            payload[1 + i] = (byte)bitDepth;
         }
 
         return AvifBoxWriter.FullBox("pixi", version: 0, flags: 0, payload);

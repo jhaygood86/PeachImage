@@ -80,7 +80,11 @@ internal static class AvifDecoder
             isLosslessEncoding = false;
         }
 
-        return new ImageInfo(container.Width, container.Height, pixelFormat, FormatName, HasAlpha: pixelFormat.HasAlpha(), IsLosslessEncoding: isLosslessEncoding, Orientation: container.Orientation);
+        return new ImageInfo(container.Width, container.Height, pixelFormat, FormatName, HasAlpha: pixelFormat.HasAlpha(), IsLosslessEncoding: isLosslessEncoding, Orientation: container.Orientation)
+        {
+            ColorSpace = metadata.GetColorSpace(),
+            Cicp = metadata.Cicp,
+        };
     }
 
     /// <summary>Fully decodes <paramref name="stream"/> into an in-memory <see cref="Image"/>.</summary>
@@ -92,9 +96,9 @@ internal static class AvifDecoder
         var container = AvifContainerReader.Read(stream, metadata);
 
         // In-loop filters (deblock/CDEF/loop restoration) are applied; animated AVIF, film grain
-        // synthesis, gain maps, 12-bit depth, and palette/IntraBC mode remain out of scope and are
+        // synthesis and gain maps remain out of scope and are
         // rejected earlier, during container/bitstream parsing, via AvifUnsupportedFeatureException.
-        if (container.BitDepth is not (8 or 10))
+        if (container.BitDepth is not (8 or 10 or 12))
         {
             throw new AvifUnsupportedFeatureException($"AVIF bit depth {container.BitDepth} is not supported.");
         }

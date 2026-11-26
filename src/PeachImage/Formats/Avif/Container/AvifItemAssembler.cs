@@ -166,7 +166,7 @@ internal static class AvifItemAssembler
         {
             Width = width,
             Height = height,
-            BitDepth = av1Config.HighBitdepth ? 10 : 8,
+            BitDepth = av1Config.TwelveBit ? 12 : av1Config.HighBitdepth ? 10 : 8,
             Monochrome = av1Config.Monochrome,
             ChromaSubsamplingX = av1Config.ChromaSubsamplingX,
             ChromaSubsamplingY = av1Config.ChromaSubsamplingY,
@@ -233,7 +233,7 @@ internal static class AvifItemAssembler
         {
             Width = width,
             Height = height,
-            BitDepth = resolvedConfig.HighBitdepth ? 10 : 8,
+            BitDepth = resolvedConfig.TwelveBit ? 12 : resolvedConfig.HighBitdepth ? 10 : 8,
             Monochrome = resolvedConfig.Monochrome,
             ChromaSubsamplingX = resolvedConfig.ChromaSubsamplingX,
             ChromaSubsamplingY = resolvedConfig.ChromaSubsamplingY,
@@ -267,10 +267,53 @@ internal static class AvifItemAssembler
         return box is { } b ? AvifAv1ConfigBox.Parse(data, b) : null;
     }
 
+    // An item may carry both an nclx colr (code points) and a prof/rICC colr (an ICC profile); this merges them so neither is lost.
     private static AvifColr? GetColorInfo(byte[] data, AvifMetaBoxInfo meta, uint itemId)
     {
-        var box = FindProperty(meta, itemId, "colr");
-        return box is { } b ? AvifColrBox.Parse(data, b) : null;
+        if (!meta.Properties.ItemPropertyIndices.TryGetValue(itemId, out var indices))
+        {
+            return null;
+        }
+
+        AvifColr? nclx = null;
+        AvifColr? icc = null;
+        AvifColr? other = null;
+        foreach (int index in indices)
+        {
+            if (index < 1 || index > meta.Properties.Properties.Count || meta.Properties.Properties[index - 1] is not { FourCc: "colr" } box)
+            {
+                continue;
+            }
+
+            var parsed = AvifColrBox.Parse(data, box);
+            if (parsed.ColourType == "nclx")
+            {
+                nclx ??= parsed;
+            }
+            else if (parsed.IccProfile is not null)
+            {
+                icc ??= parsed;
+            }
+            else
+            {
+                other ??= parsed;
+            }
+        }
+
+        if (nclx is null)
+        {
+            return icc ?? other;
+        }
+
+        return icc is null ? nclx : new AvifColr
+        {
+            ColourType = nclx.ColourType,
+            ColourPrimaries = nclx.ColourPrimaries,
+            TransferCharacteristics = nclx.TransferCharacteristics,
+            MatrixCoefficients = nclx.MatrixCoefficients,
+            FullRange = nclx.FullRange,
+            IccProfile = icc.IccProfile,
+        };
     }
 
     private static ImageOrientation GetOrientation(byte[] data, AvifMetaBoxInfo meta, uint itemId)

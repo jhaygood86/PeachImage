@@ -126,6 +126,9 @@ internal static class Av1SequenceHeaderWriter
     /// </summary>
     public const int MatrixCoefficientsIdentity = 0; // MC_IDENTITY
 
+    /// <summary>The <c>seq_profile</c> AV1 requires for a frame: 2 for 12-bit (any subsampling), 1 for 4:4:4 at 8 or 10 bits, otherwise 0.</summary>
+    public static int ProfileFor(bool chroma444, int bitDepth) => bitDepth == 12 ? 2 : chroma444 ? SeqProfileChroma444 : SeqProfile;
+
     /// <summary>Writes the sequence header OBU payload for a <paramref name="width"/> x <paramref name="height"/> still image.</summary>
     /// <param name="width">Padded frame width in pixels.</param>
     /// <param name="height">Padded frame height in pixels.</param>
@@ -157,11 +160,14 @@ internal static class Av1SequenceHeaderWriter
     /// site). Must stay <see langword="false"/> for non-lossless, where it would make <c>lr_params()</c> a
     /// real, decoder-read syntax element this encoder doesn't implement writing.
     /// </param>
-    public static byte[] Write(int width, int height, bool monoChrome, bool chroma444 = false, bool enableCdef = false, bool use128x128Superblock = false, bool enableRestoration = false)
+    /// <param name="bitDepth">The sample bit depth (8, 10 or 12): sets <c>high_bitdepth</c>/<c>twelve_bit</c> and, at 12 bits, the profile-2 subsampling bits.</param>
+    /// <param name="colorPrimaries">H.273 colour primaries to signal (default 1, BT.709); informational for the decoder here, but must match the container's nclx.</param>
+    /// <param name="transferCharacteristics">H.273 transfer characteristics to signal (default 13, sRGB).</param>
+    public static byte[] Write(int width, int height, bool monoChrome, bool chroma444 = false, bool enableCdef = false, bool use128x128Superblock = false, bool enableRestoration = false, int bitDepth = 8, int colorPrimaries = ColorPrimaries, int transferCharacteristics = TransferCharacteristics)
     {
         var writer = new Av1BitWriter();
 
-        int seqProfile = chroma444 ? SeqProfileChroma444 : SeqProfile;
+        int seqProfile = ProfileFor(chroma444, bitDepth);
         writer.WriteBits((uint)seqProfile, 3);
         writer.WriteFlag(true); // still_picture
         writer.WriteFlag(true); // reduced_still_picture_header
@@ -202,7 +208,7 @@ internal static class Av1SequenceHeaderWriter
         // decoder-read syntax element this encoder doesn't implement writing.
         writer.WriteFlag(enableRestoration); // enable_restoration
 
-        WriteColorConfig(writer, monoChrome, chroma444);
+        WriteColorConfig(writer, monoChrome, chroma444, seqProfile, bitDepth, colorPrimaries, transferCharacteristics);
 
         writer.WriteFlag(false); // film_grain_params_present
 
@@ -220,27 +226,30 @@ internal static class Av1SequenceHeaderWriter
     /// 4:4:4" -- the identity-matrix branch skips <c>color_range</c> too, and skips it *before* any
     /// profile/subsampling branching would otherwise happen, per spec.
     /// </summary>
-    private static void WriteColorConfig(Av1BitWriter writer, bool monoChrome, bool chroma444)
+    private static void WriteColorConfig(Av1BitWriter writer, bool monoChrome, bool chroma444, int seqProfile, int bitDepth, int colorPrimaries, int transferCharacteristics)
     {
-        writer.WriteFlag(false); // high_bitdepth (8-bit only in v1)
+        writer.WriteFlag(bitDepth > 8); // high_bitdepth
+        if (seqProfile == 2 && bitDepth > 8)
+        {
+            writer.WriteFlag(bitDepth == 12); // twelve_bit
+        }
 
         // mono_chrome is read as `seq_profile != 1 && reader.ReadFlag()` -- at seq_profile == 1 (only ever
-        // used when chroma444, which is only ever true for a non-monochrome frame) the bit is short-circuited
-        // away entirely and mono_chrome is implicitly false, so it must not be written; every other profile
-        // this encoder writes (always 0) always reads/writes the bit.
-        if (!chroma444)
+        // used for 4:4:4 at 8/10 bits, which is only ever true for a non-monochrome frame) the bit is
+        // short-circuited away entirely and mono_chrome is implicitly false, so it must not be written.
+        if (seqProfile != 1)
         {
             writer.WriteFlag(monoChrome);
         }
 
         writer.WriteFlag(true); // color_description_present_flag
 
-        // chroma444 is never true when monoChrome (see Av1FrameEncoder.Encode's chroma444 gate), so the
-        // monochrome path below always keeps writing MatrixCoefficients (BT.601) -- the identity path is
-        // reachable only for a real, non-monochrome 4:4:4-lossless encode.
+        // chroma444 is never true when monoChrome (see Av1FrameEncoder's chroma444 gate), so the monochrome
+        // path below always keeps writing MatrixCoefficients (BT.601) -- the identity matrix is reachable only
+        // for a real, non-monochrome 4:4:4-lossless encode.
         int matrixCoefficients = (!monoChrome && chroma444) ? MatrixCoefficientsIdentity : MatrixCoefficients;
-        writer.WriteBits(ColorPrimaries, 8);
-        writer.WriteBits(TransferCharacteristics, 8);
+        writer.WriteBits((uint)colorPrimaries, 8);
+        writer.WriteBits((uint)transferCharacteristics, 8);
         writer.WriteBits((uint)matrixCoefficients, 8);
 
         if (monoChrome)
@@ -251,28 +260,41 @@ internal static class Av1SequenceHeaderWriter
             return;
         }
 
-        // ColorPrimaries/TransferCharacteristics are the fixed CP_BT_709/TC_SRGB constants above, so the
-        // decoder's three-way check (colorPrimaries==CpBt709 && transferCharacteristics==TcSrgb &&
-        // matrixCoefficients==McIdentity) collapses to just the matrix-coefficients comparison here.
-        if (matrixCoefficients == MatrixCoefficientsIdentity)
-        {
-            // Decoder's identity-matrix special case (spec §5.5.2): color_range is implicitly full-range and
-            // NOT read; subsampling_x/y are implicitly false (4:4:4); chroma_sample_position is not read
-            // either. This is only correct because ColorRangeFull is (and must stay) true -- the bitstream
-            // has no way to signal anything else once this branch is taken.
-        }
-        else
+        // The decoder's special case (spec section 5.5.2) needs all three of BT.709 primaries, sRGB transfer and the identity
+        // matrix: then color_range is implicitly full, 4:4:4 is implied and neither is read. With any other primaries or transfer
+        // the general form below applies, even for the identity matrix.
+        bool srgbIdentity = matrixCoefficients == MatrixCoefficientsIdentity && colorPrimaries == 1 && transferCharacteristics == 13;
+        if (!srgbIdentity)
         {
             writer.WriteFlag(ColorRangeFull); // color_range
-            // seq_profile == 0 forces subsampling_x = subsampling_y = true; no bits read for them here, unlike
-            // the general form Av1SequenceHeader.ParseColorConfig handles for other profiles.
-            writer.WriteBits(ChromaSamplePosition, 2);
+            bool subsamplingX;
+            bool subsamplingY;
+            if (seqProfile == 2 && bitDepth == 12)
+            {
+                // Profile 2 at 12 bits signals subsampling explicitly (4:4:4 is x = 0, which implies y = 0).
+                subsamplingX = !chroma444;
+                subsamplingY = !chroma444;
+                writer.WriteFlag(subsamplingX); // subsampling_x
+                if (subsamplingX)
+                {
+                    writer.WriteFlag(subsamplingY); // subsampling_y
+                }
+            }
+            else
+            {
+                subsamplingX = seqProfile == 0;
+                subsamplingY = seqProfile == 0;
+            }
+
+            if (subsamplingX && subsamplingY)
+            {
+                writer.WriteBits(ChromaSamplePosition, 2);
+            }
         }
 
         writer.WriteFlag(false); // separate_uv_delta_q -- read unconditionally for non-monochrome either way
     }
 
-    /// <summary>Bits needed to represent <paramref name="value"/> - 1 as an unsigned integer, minimum 1 (matches the decoder's <c>frame_width_bits_minus_1</c>/<c>frame_height_bits_minus_1</c> semantics).</summary>
     private static int BitsToRepresentMinusOne(int value)
     {
         uint x = (uint)(value - 1);
