@@ -38,9 +38,9 @@ Targets .NET 10.0 and .NET 11.0. No native interop — every codec is managed co
   carries a fully composited frame.
 - **AVIF**: decode is implemented for baseline still images — intra-frame AV1, the full in-loop filter
   chain (deblocking, CDEF, loop restoration), HEIF `grid` composite images, alpha via the auxiliary-item
-  mechanism, both 8-bit and 10-bit depth, and screen-content tools (palette mode, IntraBC). Animated AVIF,
-  film grain synthesis, gain maps, and 12-bit depth remain unimplemented and throw a clear
-  `AvifUnsupportedFeatureException` rather than a silently wrong result. Encode is implemented for 8-bit
+  mechanism, 8-, 10- and 12-bit depth, and screen-content tools (palette mode, IntraBC). Animated AVIF,
+  film grain synthesis and gain maps remain unimplemented and throw a clear
+  `AvifUnsupportedFeatureException` rather than a silently wrong result. Encode is implemented for 8-, 10- and 12-bit (`AvifEncoderOptions.BitDepth`; see "High-precision pixels and HDR" below)
   still images (a single `av01` item, or two — color plus an `iref auxl`-referenced monochrome alpha item
   — for a source with real transparency; no HEIF `grid`/`avis` animation on the output side even though
   decode supports reading them). Both a lossy path (`Quality`, DCT/ADST/identity transforms, fixed 4:2:0
@@ -86,15 +86,15 @@ Targets .NET 10.0 and .NET 11.0. No native interop — every codec is managed co
   images with a non-D65 white point are rendered as plain luminance. Group decoding, the
   restoration filters, colour conversion and the splines/noise/upsampling stages run on all cores and use `Vector<T>`
   kernels (AVX2 on x64, NEON on ARM64).
-  The encoder (`JxlEncoderOptions`) writes still images from `Gray8`, `Rgb24`, `Rgba32`, their 16-bit counterparts and the float formats `GrayF32`/`RgbF32`/`RgbaF32` (floats are sRGB-encoded, may exceed 1, and are kept bit for bit when lossless) (a fully
+  The encoder (`JxlEncoderOptions`) writes still images from `Gray8`, `Rgb24`, `Rgba32`, their 16-bit counterparts and the float formats `GrayF32`/`RgbF32`/`RgbaF32` (floats are sRGB-encoded unless the image declares otherwise, may exceed 1, and are kept bit for bit when lossless) and, lossless, `RgbaF16` as true 16-bit floats (a fully
   opaque RGBA image is stored without alpha; alpha is straight). **Lossless** (`Lossless = true`) uses the Modular coder with a
   reversible YCoCg colour transform, per-channel gradient prediction and rANS entropy coding, in 256x256 groups coded in
   parallel; an ICC profile on the image is embedded and restored. **Lossy** (the default, `Quality` 0-100) uses VarDCT:
   XYB colour, a separately quantized DC image, and context-modelled rANS coefficients, with a per-block choice (`Effort`, 1-9) among
   8x8, 16x16, 32x32 and the 16x8/8x16/32x16/16x32 transforms, per-tile chroma-from-luma, the decoder's edge-preserving filter,
   Gaborish smoothing compensated by an encoder-side inverse filter at high qualities, and an optional adaptive quantization
-  field (`AdaptiveQuantization`, off by default because it made files larger at the same SSIMULACRA2 score); images carrying an ICC profile are colour-managed to sRGB first, since XYB
-  assumes sRGB primaries. EXIF and XMP
+  field (`AdaptiveQuantization`, off by default because it made files larger at the same SSIMULACRA2 score); images in a named wide-gamut or HDR space (Display P3, Rec. 2020, PQ, HLG) are fed to XYB as sRGB-primaries light and declared in the header so a decoder gets the original space back, other profiles are converted to sRGB (never silently dropped), since XYB
+  assumes sRGB primaries; lossless files declare sRGB, Display P3, Rec. 2020, PQ, HLG and the linear variants with color-encoding enums (no profile bytes). EXIF and XMP
   are written to container boxes and the EXIF orientation is recorded in the codestream header. Output is checked against
   libjxl (see below). At equal SSIMULACRA2 score the lossy files are within a few percent of libjxl's effort 7 (see
   `LIBRARY_COMPARISON.md`).
@@ -339,6 +339,104 @@ using var hdr = Image.Load("photo.jxl");           // may be RgbaF32 for HDR fil
 using var jpegReady = hdr.ConvertTo(PixelFormat.Rgb24);
 jpegReady.Save("photo.jpg");
 ```
+
+### Color spaces, ICC profiles and conversion
+
+PeachImage names the RGB spaces a canvas needs and ships a built-in profile for each, so you never pass profile bytes for them.
+
+```csharp
+// The built-in profiles: sRGB, Display P3, Rec. 2020 and their linear variants (about 450 bytes each).
+IccColorProfile p3 = ColorProfiles.Get(NamedColorSpace.DisplayP3);
+ReadOnlyMemory<byte> bytes = ColorProfiles.GetBytes(NamedColorSpace.LinearSrgb);
+
+// Read what an image says about itself.
+using var image = Image.Load("photo.png");
+ColorSpaceDescription? space = image.Metadata.GetColorSpace(); // primaries, white point, transfer function
+NamedColorSpace? named = image.Metadata.GetNamedColorSpace();  // "this is Display P3", or null
+CicpCode? code = image.Metadata.Cicp;                          // PNG cICP / AVIF nclx / JPEG XL color encoding
+
+// Convert the pixels (from the embedded profile, else the cICP code points, else sRGB).
+using var wide = image.ConvertColorSpace(NamedColorSpace.DisplayP3);
+// sRGB (5, 250, 128) becomes Display P3 (0.4504, 0.9660, 0.5524).
+
+// Keep out-of-gamut colors by converting into a float format.
+using var kept = image.ConvertColorSpace(NamedColorSpace.LinearRec2020, new ColorConversionOptions
+{
+    GamutHandling = GamutHandling.Preserve,    // values below 0 or above 1 survive
+    TargetPixelFormat = PixelFormat.RgbaF32,
+});
+```
+
+RGB matrix/TRC profiles (every display profile in common use) convert exactly with the primaries adapted through D50 (Bradford),
+vectorized. A LUT-based RGB profile is accepted as the *source* of a conversion (it is taken to sRGB through the ICC engine, pixel by pixel,
+and clipped); as a *destination* it throws an `IccProfileException` that says so. CMYK and gray profiles are not color spaces to convert between.
+The result carries the target's profile and `Cicp`; sRGB carries only the cICP code points.
+
+`ImageInfo` (from `Image.Identify`) reports `ColorSpace`, `Cicp`, `BitsPerSample`, `IsHighBitDepth` and `IsHdr` from the container alone, without decoding pixels.
+
+### High-precision pixels and HDR
+
+Besides `Rgb48`/`Rgba64` and the float formats, there are `RgbaF16` (half float) and the premultiplied formats `PremultipliedRgba32`,
+`PremultipliedRgba64`, `PremultipliedRgbaF16` and `PremultipliedRgbaF32`, all first-class: they load, convert, resize and save. Float to integer conversion always rounds to
+nearest (ties up), clips to the format's range and turns NaN into 0; ask for the sRGB curve explicitly:
+
+```csharp
+using var linear = Image.Load("render.jxl");   // linear float
+using var eightBit = linear.ConvertTo(PixelFormat.Rgba32, new PixelConversionOptions { EncodeSrgb = true });
+```
+
+`DecoderOptions.TargetPixelFormat = PixelFormat.RgbaF16` (or a premultiplied format) decodes any image straight to that format, and resizing them works on their own samples.
+
+Encoders pick the precision the data needs. A 16-bit or float source writes a 16-bit PNG and a 10-bit AVIF; linear float keeps its linear profile
+in PNG, JPEG XL and 10-bit AVIF and is sRGB-encoded for 8-bit formats; a premultiplied source is unpremultiplied in the same pass that converts it, and
+JPEG (which has no alpha) keeps it composited over black. `quality` takes the 0-1 fraction a browser passes to `toBlob`:
+
+```csharp
+image.Save("out.png", new PngEncoderOptions { TargetColorSpace = NamedColorSpace.DisplayP3 });   // converts, embeds iCCP + cICP, 16-bit
+image.Save("out.jpg", new JpegEncoderOptions { QualityFraction = 0.92f });                        // Quality = 92
+image.Save("out.webp", new WebpEncoderOptions { QualityFraction = 0.8f });                        // 1.0 would select lossless, as Chromium does
+image.Save("out.avif", new AvifEncoderOptions { BitDepth = 12, Lossless = true });                // 10 and 12 bit, lossy and lossless
+```
+
+Encode straight from a canvas buffer, strided or premultiplied, with `ImageEncoder`:
+
+```csharp
+ImageEncoder.Encode(backingStore.AsMemory(), width, height, PixelFormat.PremultipliedRgba32, stream, "png",   // read in place when tightly packed
+    strideBytes: rowBytes, colorSpace: NamedColorSpace.DisplayP3);
+using var copy = Image.FromPixels(span, width, height, PixelFormat.Rgba32, strideBytes: rowBytes);
+using var view = Image.Wrap(array, width, height, PixelFormat.Rgba32);   // no copy
+```
+
+HDR: a PQ or HLG image (PNG `cICP`, AVIF `nclx`, JPEG XL color encoding) converts into float with its headroom, where 1.0 is SDR reference white (203 cd/m2)
+and HLG has the BT.2100 system gamma applied; or tone-map to SDR with extended Reinhard on luminance. Encoding with a PQ/HLG `TargetColorSpace`
+(or an image tagged so) writes `cICP` in PNG, `nclx` plus the sequence-header description in AVIF, and the color encoding in JPEG XL.
+
+```csharp
+using var hdr = Image.Load("hdr.avif");   // Rgb48, PQ
+using var linear = hdr.ConvertColorSpace(NamedColorSpace.LinearRec2020, new ColorConversionOptions
+    { GamutHandling = GamutHandling.Preserve, TargetPixelFormat = PixelFormat.RgbF32 });   // values up to ~49
+using var sdr = hdr.ConvertColorSpace(NamedColorSpace.Srgb, new ColorConversionOptions { HdrToneMapping = HdrToneMapping.ToSdr });
+```
+
+### `createImageBitmap`-style loading
+
+`Image.LoadBitmap` decodes and applies the options of an HTML `createImageBitmap` call in one call, in a fixed order: orientation, crop, color space conversion,
+resize, premultiplication. Color conversion and resizing run in the image's own sample type, so 16-bit and float data never pass through 8 bits.
+
+```csharp
+using var bitmap = Image.LoadBitmap(stream, new BitmapRequest
+{
+    Orientation = BitmapOrientation.FromImage,          // or FlipY / None
+    Crop = new ImageRegion(10, 10, 400, 300),
+    ColorSpaceConversion = BitmapColorSpaceConversion.Default,
+    TargetColorSpace = NamedColorSpace.DisplayP3,
+    ResizeWidth = 200,                                  // height keeps the aspect ratio
+    ResizeQuality = ResizeQuality.High,                 // Pixelated, Low, Medium, High
+    PremultiplyAlpha = BitmapPremultiply.Premultiply,   // PremultipliedRgba32 (or the image's own sample type)
+});
+```
+
+An HDR image is tone-mapped to SDR unless the result is float (`OutputFormat`) or `HdrToneMapping = Preserve`.
 
 ### Safe ingestion of untrusted uploads
 
