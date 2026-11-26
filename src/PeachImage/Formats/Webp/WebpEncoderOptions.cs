@@ -30,4 +30,19 @@ public sealed class WebpEncoderOptions : EncoderOptions
     /// encoder implements.
     /// </summary>
     public int Quality { get; init; } = 75;
+
+    /// <summary>
+    /// <see cref="Quality"/> as a fraction from 0 to 1, mapped the way a browser maps the <c>quality</c> argument of <c>canvas.toBlob(type, quality)</c>:
+    /// <c>Quality = round(value x 100)</c>. A value of 1 also selects lossless encoding (<see cref="Lossless"/>), as Chromium does; anything lower selects lossy.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is NaN or outside 0..1 (a browser would use its default; pass that instead).</exception>
+    public float QualityFraction
+    {
+        get => Quality / 100f;
+        init
+        {
+            Quality = PeachImage.Internal.BrowserQuality.ToPercent(value);
+            Lossless = value >= 1f;
+        }
+    }
 }

@@ -79,6 +79,25 @@ public readonly record struct ImageInfo(
     bool HasLocation = false,
     ExifLocation? ExifLocation = null)
 {
+
+    /// <summary>
+    /// What the file declares about its color space: the embedded ICC profile's description when it has an RGB matrix/TRC profile, otherwise the
+    /// space <see cref="Cicp"/> denotes, otherwise <see langword="null"/> (nothing declared, which readers take to be sRGB). Read from the container
+    /// structure without decoding pixels, for PNG, JPEG, WebP, AVIF and JPEG XL; <see langword="null"/> when <see cref="DecoderOptions.SkipMetadata"/> is set.
+    /// </summary>
+    public ColorSpaceDescription? ColorSpace { get; init; }
+
+    /// <summary>The ITU-T H.273 code points the file declares (PNG <c>cICP</c>, AVIF <c>nclx</c>, JPEG XL's color encoding), or <see langword="null"/>.</summary>
+    public CicpCode? Cicp { get; init; }
+
+    /// <summary>The bits per sample of <see cref="PixelFormat"/>, the format the image decodes to: 8, 16 or 32. A 10-bit AVIF decodes to 16.</summary>
+    public int BitsPerSample => PixelFormat.GetBytesPerSample() * 8;
+
+    /// <summary>Whether the image decodes to more than 8 bits per sample.</summary>
+    public bool IsHighBitDepth => BitsPerSample > 8;
+
+    /// <summary>Whether the file declares an HDR transfer function (PQ or HLG).</summary>
+    public bool IsHdr => Cicp?.IsHdr == true || ColorSpace?.IsHdr == true;
     /// <summary>
     /// The bytes <see cref="ImageDecoder.DecodeInto(ReadOnlySpan{byte}, Span{byte}, out ImageMetadata, int)"/> needs for this image
     /// (as <see cref="Image.Identify(Stream, DecoderOptions?)"/> reported it) under <paramref name="options"/>, which set the scale,

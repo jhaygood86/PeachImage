@@ -39,4 +39,19 @@ public enum PixelFormat : byte
 
     /// <summary>Four-channel 32-bit float red/green/blue/alpha, tightly interleaved. Alpha is straight (not premultiplied).</summary>
     RgbaF32,
+
+    /// <summary>Four-channel 16-bit half-precision float (IEEE 754 binary16) red/green/blue/alpha, tightly interleaved. Nominal range is 0..1; HDR values up to 65504 are representable. Alpha is straight.</summary>
+    RgbaF16,
+
+    /// <summary>Four-channel 8-bit red/green/blue/alpha with color premultiplied by alpha, the layout a canvas backing store uses.</summary>
+    PremultipliedRgba32,
+
+    /// <summary>Four-channel 16-bit unsigned integer red/green/blue/alpha, color premultiplied by alpha, native byte order.</summary>
+    PremultipliedRgba64,
+
+    /// <summary>Four-channel half-float red/green/blue/alpha, color premultiplied by alpha.</summary>
+    PremultipliedRgbaF16,
+
+    /// <summary>Four-channel 32-bit float red/green/blue/alpha, color premultiplied by alpha.</summary>
+    PremultipliedRgbaF32,
 }

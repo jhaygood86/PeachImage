@@ -30,7 +30,22 @@ public class DecoderOptions
     /// <see cref="TargetPixelFormat"/> once for a format-agnostic decode without picking a per-format subtype
     /// up front.
     /// </remarks>
-    public PixelFormat? TargetPixelFormat { get; init; }
+    public PixelFormat? TargetPixelFormat
+    {
+        get => targetPixelFormatCleared ? null : targetPixelFormat;
+        init => targetPixelFormat = value;
+    }
+
+    private PixelFormat? targetPixelFormat;
+    private bool targetPixelFormatCleared;
+
+    // A copy for a decode whose target format is reached by converting the decoded image afterwards (the half-float and premultiplied formats no codec produces itself).
+    internal DecoderOptions WithoutTargetPixelFormat()
+    {
+        var clone = (DecoderOptions)MemberwiseClone();
+        clone.targetPixelFormatCleared = true;
+        return clone;
+    }
 
     /// <summary>
     /// Called, while the full image is still being decoded, with a lower-fidelity version of it: a JPEG XL preview

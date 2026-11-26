@@ -16,6 +16,7 @@ using PeachImage.Formats.Shared.Resampling;
 using PeachImage.Formats.Tiff;
 using PeachImage.Formats.Webp;
 using PeachImage.Internal;
+using PeachImage.Internal.Color;
 using PeachImage.Internal.PixelFormatConversion;
 
 namespace PeachImage;
@@ -200,7 +201,7 @@ public sealed class Image : IDisposable
     }
 
     // Resolution, profiles and the location found when the file was loaded: everything ImageMetadata holds.
-    private void CopyMetadataTo(Image target)
+    internal void CopyMetadataTo(Image target)
     {
         target.Metadata.HorizontalResolution = Metadata.HorizontalResolution;
         target.Metadata.VerticalResolution = Metadata.VerticalResolution;
@@ -415,6 +416,85 @@ public sealed class Image : IDisposable
     }
 
     /// <summary>
+    /// Converts this image to <paramref name="targetFormat"/> with options that control the transfer function applied on the way, such as
+    /// sRGB-encoding linear float data into an 8-bit image (see <see cref="PixelConversionOptions"/>). Float to integer conversion always rounds
+    /// to the nearest value (ties up), clips to the format's range and turns NaN into 0; converting to or from a premultiplied format
+    /// multiplies or divides color by alpha in float, with alpha 0 giving color 0.
+    /// </summary>
+    /// <remarks>Unlike <see cref="ConvertTo(PixelFormat)"/> this always returns a new image, even when the format is unchanged and no option is set.</remarks>
+    /// <exception cref="NotSupportedException">The conversion is not supported (see <see cref="ConvertTo(PixelFormat)"/> for CMYK and YCCK).</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="targetFormat"/> is not a defined pixel format.</exception>
+    /// <exception cref="ArgumentException"><paramref name="options"/> sets both <see cref="PixelConversionOptions.EncodeSrgb"/> and <see cref="PixelConversionOptions.DecodeSrgb"/>.</exception>
+    public Image ConvertTo(PixelFormat targetFormat, PixelConversionOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (!Enum.IsDefined(targetFormat))
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetFormat));
+        }
+
+        ThrowIfUnusable();
+        if (!ImagePixelConverter.CanConvert(PixelFormat, targetFormat))
+        {
+            throw new NotSupportedException($"Converting {PixelFormat} to {targetFormat} is not supported.");
+        }
+
+        var result = ColorConverter.ConvertWithTransferOptions(this, targetFormat, options);
+        CopyMetadataTo(result);
+        result.HasAlpha = HasAlpha;
+        result.IsAnimated = IsAnimated;
+        return result;
+    }
+
+    /// <summary>
+    /// Converts this image's pixels from the color space it declares into <paramref name="target"/>, returning a new image whose profile and
+    /// <see cref="ImageMetadata.Cicp"/> describe the target (sRGB carries no ICC profile, only the cICP code points; every other space gets its
+    /// built-in profile). The source is the embedded ICC profile, else the image's cICP code points, else sRGB; see <see cref="ColorConversionOptions"/>
+    /// to override that and to choose the pixel format and the out-of-gamut handling.
+    /// </summary>
+    /// <remarks>
+    /// <para>RGB matrix/TRC profiles (every display profile in common use, including the built-in ones) convert exactly, vectorized, with the
+    /// primaries adapted through D50 by the Bradford transform. A LUT-based RGB profile is accepted as a source (it is taken to sRGB by the ICC
+    /// engine pixel by pixel, which is slow, and clips); it is not accepted as a destination, which throws <see cref="IccProfileException"/>.
+    /// CMYK and gray profiles are not color spaces this method converts between.</para>
+    /// <para>Color is converted in float on straight (non-premultiplied) alpha; alpha is never changed. A premultiplied source is unpremultiplied
+    /// first and premultiplied again when the result is a premultiplied format.</para>
+    /// </remarks>
+    /// <exception cref="NotSupportedException">This is a CMYK or YCCK image.</exception>
+    /// <exception cref="ArgumentException"><see cref="ColorConversionOptions.GamutHandling"/> is <see cref="GamutHandling.Preserve"/> but the result format is not floating point, or the result format is not RGB/RGBA.</exception>
+    public Image ConvertColorSpace(NamedColorSpace target, ColorConversionOptions? options = null)
+    {
+        ThrowIfUnusable();
+        if (!Enum.IsDefined(target))
+        {
+            throw new ArgumentOutOfRangeException(nameof(target));
+        }
+
+        var result = ColorConverter.ConvertColorSpace(this, target, targetProfile: null, options);
+        FinishColorConversion(result, target, null);
+        return result;
+    }
+
+    /// <summary>Converts this image's pixels into the color space of <paramref name="target"/>, an RGB matrix/TRC ICC profile; see <see cref="ConvertColorSpace(NamedColorSpace, ColorConversionOptions?)"/>.</summary>
+    /// <exception cref="IccProfileException"><paramref name="target"/> is LUT-based, gray or CMYK, which cannot be a destination.</exception>
+    public Image ConvertColorSpace(IccColorProfile target, ColorConversionOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ThrowIfUnusable();
+        var result = ColorConverter.ConvertColorSpace(this, targetNamed: null, target, options);
+        FinishColorConversion(result, null, target);
+        return result;
+    }
+
+    private void FinishColorConversion(Image result, NamedColorSpace? named, IccColorProfile? profile)
+    {
+        CopyMetadataTo(result);
+        ColorConverter.Retag(result.Metadata, named, profile);
+        result.HasAlpha = HasAlpha;
+        result.IsAnimated = IsAnimated;
+    }
+
+    /// <summary>
     /// Color-manages this image using its own embedded ICC profile (<see cref="ImageMetadata.GetIccColorProfile"/>),
     /// producing a new <see cref="PixelFormat.Rgba32"/> <see cref="Image"/> — the high-level convenience over
     /// <see cref="IccColorProfile.ConvertToSrgb"/> for the common case of "just color-manage this image for me."
@@ -423,7 +503,8 @@ public sealed class Image : IDisposable
     /// image's own pixel format, or <see cref="PixelFormat"/> isn't one ICC conversion applies to (it's already
     /// <see cref="PixelFormat.Rgba32"/>, for instance) — this same instance is returned unchanged rather than
     /// throwing or allocating a needless copy, the same "may return <c>this</c>" contract <see cref="Resize"/>
-    /// documents (see its own remarks for the disposal implications of that).
+    /// documents (see its own remarks for the disposal implications of that). A converted result carries none of the source's color declarations
+    /// (ICC profile, cICP, gAMA, cHRM, sRGB), since they described the pixels it replaced; with none declared an image is sRGB.
     /// </summary>
     public Image ConvertToSrgb() => ConvertToSrgb(null);
 
@@ -469,6 +550,7 @@ public sealed class Image : IDisposable
         iccProfile.ConvertToSrgb(GetPixelSpan(), result.GetPixelSpan(), Width * Height);
 
         CopyMetadataTo(result);
+        ColorConverter.DropColorDeclarations(result.Metadata); // the profile described the old pixels; sRGB is what a file with none means
         result.HasAlpha = false;
         return result;
     }
@@ -477,6 +559,7 @@ public sealed class Image : IDisposable
     {
         var result = ImagePixelConverter.InkToRgba32(this);
         CopyMetadataTo(result);
+        ColorConverter.DropColorDeclarations(result.Metadata);
         result.HasAlpha = false;
         return result;
     }
@@ -538,6 +621,13 @@ public sealed class Image : IDisposable
             }
         }
 
+        // The half-float and premultiplied formats are produced by converting what the codec decodes natively; ask the codec for its own format.
+        PixelFormat? afterDecodeFormat = decodeOptions?.TargetPixelFormat is { } requested && IsConvertedAfterDecode(requested) ? requested : null;
+        if (afterDecodeFormat is not null)
+        {
+            decodeOptions = decodeOptions!.WithoutTargetPixelFormat();
+        }
+
         var image = codec.Decode(preparedStream, decodeOptions);
         image.Metadata.ApplyExifResolution();
         if (scale > 1)
@@ -553,6 +643,11 @@ public sealed class Image : IDisposable
         if (upright && header!.Value.Orientation != ImageOrientation.Normal)
         {
             image = ReplaceWith(image, image.ApplyOrientation(header.Value.Orientation));
+        }
+
+        if (afterDecodeFormat is { } converted)
+        {
+            image = ReplaceWith(image, image.ConvertTo(converted));
         }
 
         if (skipMetadata)
@@ -642,7 +737,26 @@ public sealed class Image : IDisposable
 
         preparedStream = EnsureSeekable(preparedStream);
         var location = ContainerLocationScanner.Scan(preparedStream, codec.FormatName);
-        return codec.Identify(preparedStream, options) with { HasLocation = location.HasLocation, ExifLocation = location.Exif };
+        var colorInfo = ColorInfoScanner.Supports(codec.FormatName) ? ColorInfoScanner.Scan(preparedStream, codec.FormatName) : default;
+        var info = codec.Identify(preparedStream, options) with { HasLocation = location.HasLocation, ExifLocation = location.Exif };
+        return ColorInfoScanner.Supports(codec.FormatName) ? WithColorInfo(info, colorInfo.Icc, colorInfo.Cicp) : info;
+    }
+
+    // Adds what the container says about color: the embedded ICC profile's description, or the cICP code points.
+    private static ImageInfo WithColorInfo(ImageInfo info, byte[]? icc, CicpCode? cicp)
+    {
+        ColorSpaceDescription? description = null;
+        if (icc is not null && IccColorProfile.TryCreate(icc, out var profile))
+        {
+            description = profile!.Describe();
+        }
+
+        if (description is null && cicp is { } code)
+        {
+            description = Internal.Color.NamedSpaces.Describe(code);
+        }
+
+        return info with { ColorSpace = description, Cicp = cicp };
     }
 
     // The header-level half of Identify: the codec and its ImageInfo, without the metadata location scan (the caller-buffer decode scans once itself).
@@ -654,6 +768,9 @@ public sealed class Image : IDisposable
         codec = found;
         return found.Identify(preparedStream, options);
     }
+
+    private static bool IsConvertedAfterDecode(PixelFormat format) =>
+        format is PixelFormat.RgbaF16 or PixelFormat.PremultipliedRgba32 or PixelFormat.PremultipliedRgba64 or PixelFormat.PremultipliedRgbaF16 or PixelFormat.PremultipliedRgbaF32;
 
     private static void ThrowIfFormatNotAllowed(IImageCodec codec, DecoderOptions? options)
     {
@@ -872,8 +989,8 @@ public sealed class Image : IDisposable
             ?? throw new UnknownImageFormatException($"No built-in codec can encode files with extension '.{extension}'.");
 
         using var fileStream = File.Create(path);
-        ThrowIfFloatPixels(codec);
-        codec.Encode(this, fileStream, options);
+        using var prepared = EncodePreparation.Prepare(this, codec, options);
+        codec.Encode(prepared.Image, fileStream, options);
     }
 
     /// <summary>Encodes this image as <paramref name="formatName"/> and writes it to <paramref name="stream"/>.</summary>
@@ -885,8 +1002,8 @@ public sealed class Image : IDisposable
         var codec = FindCodecByFormatName(formatName)
             ?? throw new UnknownImageFormatException($"No built-in codec can encode format '{formatName}'.", formatName);
 
-        ThrowIfFloatPixels(codec);
-        codec.Encode(this, stream, options);
+        using var prepared = EncodePreparation.Prepare(this, codec, options);
+        codec.Encode(prepared.Image, stream, options);
     }
 
     /// <summary>
@@ -903,9 +1020,9 @@ public sealed class Image : IDisposable
             ?? throw new UnknownImageFormatException($"No built-in codec can encode files with extension '.{extension}'.");
 
         using var fileStream = File.Create(path);
-        ThrowIfFloatPixels(codec);
+        using var prepared = EncodePreparation.Prepare(this, codec, options);
         using var buffered = new MemoryStream();
-        codec.Encode(this, buffered, options);
+        codec.Encode(prepared.Image, buffered, options);
         buffered.Position = 0;
         await buffered.CopyToAsync(fileStream, cancellationToken).ConfigureAwait(false);
     }
@@ -923,11 +1040,126 @@ public sealed class Image : IDisposable
         var codec = FindCodecByFormatName(formatName)
             ?? throw new UnknownImageFormatException($"No built-in codec can encode format '{formatName}'.", formatName);
 
-        ThrowIfFloatPixels(codec);
+        using var prepared = EncodePreparation.Prepare(this, codec, options);
         using var buffered = new MemoryStream();
-        codec.Encode(this, buffered, options);
+        codec.Encode(prepared.Image, buffered, options);
         buffered.Position = 0;
         await buffered.CopyToAsync(stream, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Returns a new image holding the <paramref name="region"/> of this one, in the same pixel format. Metadata carries over.</summary>
+    /// <exception cref="ArgumentException">The region is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The region is not inside the image.</exception>
+    public Image Crop(ImageRegion region)
+    {
+        ThrowIfUnusable();
+        if (region.Width <= 0 || region.Height <= 0)
+        {
+            throw new ArgumentException("The crop region must have a positive width and height.", nameof(region));
+        }
+
+        if (region.X < 0 || region.Y < 0 || (long)region.X + region.Width > Width || (long)region.Y + region.Height > Height)
+        {
+            throw new ArgumentOutOfRangeException(nameof(region), region, $"The crop region lies outside the {Width}x{Height} image.");
+        }
+
+        var result = ImageFramer.Crop(this, region.Width, region.Height, region.X, region.Y);
+        CopyMetadataTo(result);
+        result.HasAlpha = HasAlpha;
+        return result;
+    }
+
+    /// <summary>
+    /// Creates an image from pixel rows in memory the caller owns, copying them (a row at a time, so a padded <paramref name="strideBytes"/> is removed).
+    /// </summary>
+    /// <param name="pixels">The pixels: <paramref name="height"/> rows of <paramref name="width"/> pixels of <paramref name="format"/>, rows <paramref name="strideBytes"/> apart; the last row needs no padding.</param>
+    /// <param name="width">The width in pixels.</param>
+    /// <param name="height">The height in pixels.</param>
+    /// <param name="format">The pixel format of <paramref name="pixels"/> (any, including the premultiplied ones).</param>
+    /// <param name="strideBytes">The distance between row starts in bytes; 0 means tightly packed.</param>
+    /// <exception cref="ArgumentException"><paramref name="pixels"/> is too short for the size and stride, or the stride is less than one row.</exception>
+    public static Image FromPixels(ReadOnlySpan<byte> pixels, int width, int height, PixelFormat format, int strideBytes = 0)
+    {
+        int rowBytes = ValidateLayout(pixels.Length, width, height, format, strideBytes, out int stride);
+        var image = Create(width, height, format);
+        var destination = image.GetPixelSpan();
+        for (int y = 0; y < height; y++)
+        {
+            pixels.Slice(y * stride, rowBytes).CopyTo(destination.Slice(y * rowBytes, rowBytes));
+        }
+
+        return image;
+    }
+
+    /// <summary>
+    /// Wraps <paramref name="pixels"/> as an image without copying: a tightly packed array of <paramref name="width"/> x <paramref name="height"/> pixels of
+    /// <paramref name="format"/> starting at index 0. The image does not own the array: disposing it returns nothing to the buffer pool, and the array must
+    /// outlive the image and not change while the image is in use.
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="pixels"/> is shorter than the image needs.</exception>
+    public static Image Wrap(byte[] pixels, int width, int height, PixelFormat format)
+    {
+        ArgumentNullException.ThrowIfNull(pixels);
+        ValidateLayout(pixels.Length, width, height, format, 0, out _);
+        return FromBuffer(width, height, format, pixels, owned: false);
+    }
+
+    /// <summary>Copies the pixels into <paramref name="destination"/>, rows <paramref name="strideBytes"/> apart (0 packs them tightly).</summary>
+    /// <exception cref="ArgumentException"><paramref name="destination"/> is too short, or the stride is less than one row.</exception>
+    public void CopyPixelsTo(Span<byte> destination, int strideBytes = 0)
+    {
+        ThrowIfUnusable();
+        int rowBytes = ValidateLayout(destination.Length, Width, Height, PixelFormat, strideBytes, out int stride);
+        var source = GetPixelSpan();
+        for (int y = 0; y < Height; y++)
+        {
+            source.Slice(y * rowBytes, rowBytes).CopyTo(destination.Slice(y * stride, rowBytes));
+        }
+    }
+
+    internal static void ValidateBufferLayout(int available, int width, int height, PixelFormat format, int strideBytes) => ValidateLayout(available, width, height, format, strideBytes, out _);
+
+    private static int ValidateLayout(int available, int width, int height, PixelFormat format, int strideBytes, out int stride)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(width, 0);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(height, 0);
+        ArgumentOutOfRangeException.ThrowIfNegative(strideBytes);
+        if (!Enum.IsDefined(format))
+        {
+            throw new ArgumentOutOfRangeException(nameof(format));
+        }
+
+        int rowBytes = checked(width * format.GetBytesPerPixel());
+        stride = strideBytes == 0 ? rowBytes : strideBytes;
+        if (stride < rowBytes)
+        {
+            throw new ArgumentException($"The stride of {stride} bytes is less than one row of {rowBytes} bytes.", nameof(strideBytes));
+        }
+
+        long required = ((long)(height - 1) * stride) + rowBytes;
+        if (available < required)
+        {
+            throw new ArgumentException($"{available} bytes is too few for {height} rows of {rowBytes} bytes at a stride of {stride}; {required} are needed.");
+        }
+
+        return rowBytes;
+    }
+
+    /// <summary>
+    /// Decodes <paramref name="stream"/> and applies <paramref name="request"/>, the options of an HTML <c>createImageBitmap</c> call, in one call:
+    /// orientation, crop, color space conversion, resize, premultiplication (see <see cref="BitmapRequest"/>).
+    /// </summary>
+    public static Image LoadBitmap(Stream stream, BitmapRequest? request = null)
+    {
+        request ??= new BitmapRequest();
+        return BitmapPipeline.Process(Load(stream, BitmapPipeline.DecoderOptionsFor(request)), request);
+    }
+
+    /// <summary>Decodes <paramref name="data"/> and applies <paramref name="request"/>; see <see cref="LoadBitmap(Stream, BitmapRequest?)"/>.</summary>
+    public static Image LoadBitmap(ReadOnlySpan<byte> data, BitmapRequest? request = null)
+    {
+        request ??= new BitmapRequest();
+        return BitmapPipeline.Process(Load(data, BitmapPipeline.DecoderOptionsFor(request)), request);
     }
 
     /// <summary>
@@ -1015,7 +1247,7 @@ public sealed class Image : IDisposable
         return found;
     }
 
-    private static IImageCodec? FindCodecByFormatName(string formatName)
+    internal static IImageCodec? FindCodecByFormatName(string formatName)
     {
         foreach (var codec in Codecs)
         {

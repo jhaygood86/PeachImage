@@ -45,6 +45,13 @@ internal sealed class IccTransformTrcMatrix : IccTransform
     /// inverse-curve table per channel -- for callers that convert many pixels. Only valid for intents that leave the PCS
     /// untouched (<see cref="IccIntent.RelativeColorimetric"/>).
     /// </summary>
+    /// <summary>The colorant matrix (linear device RGB to D50 XYZ) and the per-channel tone curves.</summary>
+    internal void GetColorantsAndCurves(out IccMatrix3x3 toXyzD50, out IccCurve[] curves)
+    {
+        toXyzD50 = GetMatrix();
+        curves = bCurves.Value;
+    }
+
     internal bool TryGetFromXyz(IccIntent intent, out IccMatrix3x3 matrix, out double[][] inverseTables)
     {
         matrix = default;

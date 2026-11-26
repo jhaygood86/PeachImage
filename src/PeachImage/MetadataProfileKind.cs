@@ -44,4 +44,7 @@ public enum MetadataProfileKind
     /// <c>Photoshop 3.0</c> signature. Captured on decode only; no encoder writes it.
     /// </summary>
     Iptc,
+
+    /// <summary>Four bytes of ITU-T H.273 code points (primaries, transfer, matrix, full-range flag) from a PNG <c>cICP</c> chunk or an AVIF <c>nclx</c> box; see <see cref="ImageMetadata.Cicp"/>.</summary>
+    Cicp,
 }
