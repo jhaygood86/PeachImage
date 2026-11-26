@@ -15,6 +15,7 @@ internal readonly record struct PngChunkType(uint Value)
     public static readonly PngChunkType Chrm = FromAscii("cHRM");
     public static readonly PngChunkType Srgb = FromAscii("sRGB");
     public static readonly PngChunkType Iccp = FromAscii("iCCP");
+    public static readonly PngChunkType Cicp = FromAscii("cICP");
     public static readonly PngChunkType Phys = FromAscii("pHYs");
     public static readonly PngChunkType Text = FromAscii("tEXt");
     public static readonly PngChunkType Ztxt = FromAscii("zTXt");

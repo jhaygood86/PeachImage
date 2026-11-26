@@ -14,12 +14,18 @@ internal static class PngAncillaryChunkWriter
     /// <summary>Chunks that must precede PLTE (and IDAT): color-management data the palette itself depends on.</summary>
     public static void WriteColorProfileChunks(Stream stream, ImageMetadata metadata, bool includeIcc, bool includeOthers)
     {
+        // The PNG specification asks for at most one of sRGB and iCCP; a profile being written stands in for the sRGB claim.
+        bool writesProfile = includeIcc && metadata.Profiles.Any(p => p.Kind == MetadataProfileKind.Icc);
         foreach (var profile in metadata.Profiles)
         {
             switch (profile.Kind)
             {
                 case MetadataProfileKind.Icc when includeIcc:
                     WriteIccp(stream, profile.Data);
+                    break;
+
+                case MetadataProfileKind.Cicp when includeIcc && profile.Data.Length == 4:
+                    PngChunkWriter.WriteChunk(stream, PngChunkType.Cicp, profile.Data);
                     break;
 
                 case MetadataProfileKind.Gamma when includeOthers && profile.Data.Length == 4:
@@ -30,7 +36,7 @@ internal static class PngAncillaryChunkWriter
                     PngChunkWriter.WriteChunk(stream, PngChunkType.Chrm, profile.Data);
                     break;
 
-                case MetadataProfileKind.Srgb when includeOthers && profile.Data.Length == 1:
+                case MetadataProfileKind.Srgb when includeOthers && !writesProfile && profile.Data.Length == 1:
                     PngChunkWriter.WriteChunk(stream, PngChunkType.Srgb, profile.Data);
                     break;
             }
