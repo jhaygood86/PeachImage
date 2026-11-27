@@ -12,8 +12,8 @@ namespace PeachImage;
 /// </param>
 /// <param name="HasAlpha">Whether the source actually carries an alpha channel — see <see cref="Image.HasAlpha"/>.</param>
 /// <param name="IsAdobeInvertedCmyk">
-/// JPEG/Adobe-specific: whether a direct-CMYK source stores its samples in Adobe's inverted convention
-/// (<c>255-x</c>). Always <see langword="false"/> for non-JPEG formats and non-CMYK JPEGs. Relevant to
+/// JPEG/Adobe-specific: whether a CMYK source (Adobe APP14 transform 0 or YCCK transform 2) stores its ink in Adobe's
+/// inverted convention (<c>255-x</c>). Always <see langword="false"/> for non-JPEG formats and non-CMYK JPEGs. Relevant to
 /// <see cref="Formats.Jpeg.JpegDecoderOptions.KeepAdobeCmykInverted"/> — by default, a full decode de-inverts
 /// these bytes back to the standard CMYK convention regardless of this flag.
 /// </param>

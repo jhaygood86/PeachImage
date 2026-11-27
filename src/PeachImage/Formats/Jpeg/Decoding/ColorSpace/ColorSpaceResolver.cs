@@ -6,10 +6,10 @@ namespace PeachImage.Formats.Jpeg.Decoding.ColorSpace;
 internal static class ColorSpaceResolver
 {
     /// <summary>
-    /// Determines the color space samples are encoded in, and whether direct (non-YCCK) 4-component samples
-    /// follow Adobe's inverted-CMYK convention (values stored as <c>255-x</c>). For YCCK, the necessary
-    /// inversion is inherent in the YCbCr-&gt;CMY transform itself (see <see cref="ColorConversion.IColorConverter.YcckToCmyk"/>),
-    /// so <c>IsAdobeInverted</c> is only meaningful for the direct-CMYK (transform=0) case.
+    /// Determines the color space samples are encoded in, and whether 4-component samples follow Adobe's
+    /// inverted-CMYK convention (ink stored as <c>255-x</c>, so 255 means no ink). Adobe writes both direct CMYK
+    /// (transform=0) and YCCK (transform=2) that way. <see cref="ColorConversion.IColorConverter.YcckToCmyk"/> only
+    /// undoes the YCbCr transform; it still returns the inverted ink, so YCCK needs the same de-inversion as transform=0.
     /// </summary>
     public static (JpegColorSpace ColorSpace, bool IsAdobeInverted) Resolve(int componentCount, JpegAdobeSegment? adobe) =>
         componentCount switch
@@ -26,7 +26,7 @@ internal static class ColorSpaceResolver
             {
                 null => (JpegColorSpace.Cmyk, false),
                 { Transform: 0 } => (JpegColorSpace.Cmyk, true),
-                { Transform: 2 } => (JpegColorSpace.Ycck, false),
+                { Transform: 2 } => (JpegColorSpace.Ycck, true),
                 { Transform: var transform } => throw new JpegDecodingException($"Unsupported Adobe APP14 transform {transform} for a 4-component JPEG (expected 0 or 2)."),
             },
             _ => throw new JpegDecodingException($"Unsupported JPEG component count: {componentCount}."),

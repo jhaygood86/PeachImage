@@ -21,8 +21,8 @@ public class AdobeColorSpaceCorpusTests
     {
         // fileName, expectedPixelFormat, expectedIsAdobeInvertedCmyk, expectedIsYcck
         { "cymk.jpg", PixelFormat.Cmyk32, true, false },
-        { "ycck.jpg", PixelFormat.Cmyk32, false, true },
-        { "cmyk_logo.jpg", PixelFormat.Cmyk32, false, true },
+        { "ycck.jpg", PixelFormat.Cmyk32, true, true },
+        { "cmyk_logo.jpg", PixelFormat.Cmyk32, true, true },
         { "rgb.jpg", PixelFormat.Rgb24, false, false },
     };
 
@@ -114,8 +114,8 @@ public class AdobeColorSpaceCorpusTests
         bool anyCmyDiffers = false;
         for (int i = 0; i < convertedSpan.Length; i += 4)
         {
-            // K (4th channel) is untouched by the YCbCr->CMY transform either way -- must match exactly.
-            Assert.Equal(convertedSpan[i + 3], rawSpan[i + 3]);
+            // K is not part of the YCbCr transform: the raw plane is the stored (inverted) K, the converted one its complement.
+            Assert.Equal((byte)(255 - rawSpan[i + 3]), convertedSpan[i + 3]);
 
             if (convertedSpan[i] != rawSpan[i] || convertedSpan[i + 1] != rawSpan[i + 1] || convertedSpan[i + 2] != rawSpan[i + 2])
             {

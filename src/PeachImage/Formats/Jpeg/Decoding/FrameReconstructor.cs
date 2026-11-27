@@ -73,7 +73,7 @@ internal static class FrameReconstructor
                 JpegColorSpace.Rgb => BuildDirectRgbImage(planes, width, height, parallel),
                 JpegColorSpace.Cmyk => BuildDirectCmykImage(planes, width, height, invertCmyk, parallel),
                 JpegColorSpace.Ycck when decodeRawYcck => BuildRawYcckImage(planes, width, height, parallel),
-                JpegColorSpace.Ycck => BuildYcckImage(planes, width, height, parallel),
+                JpegColorSpace.Ycck => BuildYcckImage(planes, width, height, invertCmyk, parallel),
                 _ => throw new JpegDecodingException($"Unsupported JPEG color space: {frame.ColorSpace}."),
             };
         }
@@ -373,7 +373,7 @@ internal static class FrameReconstructor
         return Image.FromBuffer(width, height, PixelFormat.Cmyk32, cmyk, owned: true);
     }
 
-    private static Image BuildYcckImage(byte[][] planes, int width, int height, ParallelSettings parallel)
+    private static Image BuildYcckImage(byte[][] planes, int width, int height, bool deinvert, ParallelSettings parallel)
     {
         int pixelCount = width * height;
         byte[] cmyk = ImageBufferPool.Shared.Rent(pixelCount * 4);
@@ -388,6 +388,16 @@ internal static class FrameReconstructor
                 planes[3].AsSpan(rowOffset, width),
                 cmyk.AsSpan(rowOffset * 4, width * 4),
                 width);
+
+            if (deinvert)
+            {
+                // YcckToCmyk leaves Adobe's inverted ink (255 = no ink) as is; flip all four channels to standard CMYK.
+                var row = cmyk.AsSpan(rowOffset * 4, width * 4);
+                for (int i = 0; i < row.Length; i++)
+                {
+                    row[i] = (byte)(255 - row[i]);
+                }
+            }
         }, parallel);
 
         return Image.FromBuffer(width, height, PixelFormat.Cmyk32, cmyk, owned: true);

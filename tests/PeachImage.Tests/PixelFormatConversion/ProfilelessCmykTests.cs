@@ -52,9 +52,10 @@ public class ProfilelessCmykTests
     [MemberData(nameof(Inks))]
     public void YcckJpeg_ConvertsToExpectedRgb_WithAndWithoutRawYcck(string name, byte c, byte m, byte y, byte k, byte r, byte g, byte b)
     {
-        // YCCK stores YCbCr of (255 - C, 255 - M, 255 - Y) plus K. Adobe transform 2 is what marks it as YCCK.
-        (byte yy, byte cb, byte cr) = ScalarColorConverter.ConvertRgbPixel((byte)(255 - c), (byte)(255 - m), (byte)(255 - y));
-        byte[] jpeg = BuildFourComponentJpeg([yy, cb, cr, k], adobeTransform: 2);
+        // Adobe YCCK stores inverted ink like transform 0, with the first three channels run through YCbCr: YCbCr of (C, M, Y) plus 255 - K.
+        // Adobe transform 2 is what marks it as YCCK.
+        (byte yy, byte cb, byte cr) = ScalarColorConverter.ConvertRgbPixel(c, m, y);
+        byte[] jpeg = BuildFourComponentJpeg([yy, cb, cr, (byte)(255 - k)], adobeTransform: 2);
 
         // Default: the decoder converts YCCK to standard CMYK, so it takes the same path as any CMYK image.
         using var cmyk = Image.Load(jpeg);
@@ -121,7 +122,7 @@ public class ProfilelessCmykTests
     /// An 8x8 baseline JPEG of four 1x1-sampled components, each one flat block holding the given 0..255 sample. Quantization is all ones, so the
     /// DC coefficient is exactly <c>(sample - 128) * 8</c>. The Huffman tables are a flat four-bit DC table and a one-bit end of block.
     /// </summary>
-    private static byte[] BuildFourComponentJpeg(byte[] samples, byte? adobeTransform)
+    internal static byte[] BuildFourComponentJpeg(byte[] samples, byte? adobeTransform, byte[]? iccProfile = null)
     {
         using var ms = new MemoryStream();
 
@@ -141,6 +142,11 @@ public class ProfilelessCmykTests
         if (adobeTransform is { } transform)
         {
             Marker(0xEE, [.. "Adobe"u8.ToArray(), 0, 100, 0, 0, 0, 0, transform]);
+        }
+
+        if (iccProfile is not null)
+        {
+            Marker(0xE2, [.. "ICC_PROFILE"u8.ToArray(), 0, 1, 1, .. iccProfile]);
         }
 
         var dqt = new byte[65];

@@ -123,10 +123,10 @@ internal static class BitmapPipeline
             TaskScheduler = request.TaskScheduler,
         };
 
-        // Kept headroom needs a float working format; the final conversion takes it to the requested one.
-        if (hdrSource && tone == HdrToneMapping.Preserve && !image.PixelFormat.IsFloat())
+        // Kept headroom (HDR, or a float result asked for) needs a float working format; the final conversion takes it to the requested one.
+        if (options.GamutHandling == GamutHandling.Preserve && !image.PixelFormat.IsFloat())
         {
-            options.TargetPixelFormat = request.OutputFormat is { } o && o.IsFloat() ? o : (image.PixelFormat.HasAlpha() ? PixelFormat.RgbaF32 : PixelFormat.RgbF32);
+            options.TargetPixelFormat = request.OutputFormat is { } o && o.IsFloat() && o is not PixelFormat.GrayF32 ? o : (image.PixelFormat.HasAlpha() ? PixelFormat.RgbaF32 : PixelFormat.RgbF32);
         }
 
         return options;

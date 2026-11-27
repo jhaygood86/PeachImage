@@ -66,9 +66,11 @@ internal static class ImagePixelConverter
                 if (ycck)
                 {
                     (byte r, byte g, byte b) = PeachImage.Formats.Jpeg.ColorConversion.ScalarColorConverter.ConvertYCbCrPixel(src[s], src[s + 1], src[s + 2]);
-                    c = 255 - r;
-                    m = 255 - g;
-                    y = 255 - b;
+                    // Adobe YCCK: the transform yields ink amounts (R = C) and K is stored inverted.
+                    c = r;
+                    m = g;
+                    y = b;
+                    k = 255 - k;
                 }
                 else
                 {
@@ -82,6 +84,34 @@ internal static class ImagePixelConverter
                 dst[s + 1] = Scale(255 - m, invK);
                 dst[s + 2] = Scale(255 - y, invK);
                 dst[s + 3] = 255;
+            }
+
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Converts raw <see cref="PixelFormat.Ycck32"/> to standard (0 = no ink) <see cref="PixelFormat.Cmyk32"/>, the same values the JPEG decoder yields without <c>DecodeRawYcck</c>.</summary>
+    public static Image YcckToCmyk32(Image source)
+    {
+        var result = Image.Create(source.Width, source.Height, PixelFormat.Cmyk32);
+        try
+        {
+            var src = source.GetPixelSpan();
+            var dst = result.GetPixelSpan();
+            int count = source.Width * source.Height;
+            for (int i = 0; i < count; i++)
+            {
+                int s = i * 4;
+                (byte r, byte g, byte b) = PeachImage.Formats.Jpeg.ColorConversion.ScalarColorConverter.ConvertYCbCrPixel(src[s], src[s + 1], src[s + 2]);
+                dst[s] = r;
+                dst[s + 1] = g;
+                dst[s + 2] = b;
+                dst[s + 3] = (byte)(255 - src[s + 3]);
             }
 
             return result;
