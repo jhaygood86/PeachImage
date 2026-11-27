@@ -70,6 +70,10 @@ jobs:
     # so a runner that dies mid-run leaves the last [STARTING] line without a [FINISHED] in this log.
     - name: Test (fast, verbose start/finish log)
       if: matrix.lane == 'fast' && matrix.os == 'ubuntu-latest'
+      env:
+        # The tests allocate heavily and the GC lets the heap grow with the machine (47 GB peak on a 64 GB box, 140 s); a 16 GB runner
+        # then starves its own agent and is lost. An 8 GB heap limit keeps the peak near 8 GB and runs the suite in about a third of the time.
+        DOTNET_GCHeapHardLimit: "0x200000000"
       shell: bash
       run: |
         mkdir -p coverage
@@ -77,6 +81,10 @@ jobs:
 
     - name: Test (fast, with coverage)
       if: matrix.lane == 'fast' && matrix.os == 'ubuntu-latest'
+      env:
+        # The tests allocate heavily and the GC lets the heap grow with the machine (47 GB peak on a 64 GB box, 140 s); a 16 GB runner
+        # then starves its own agent and is lost. An 8 GB heap limit keeps the peak near 8 GB and runs the suite in about a third of the time.
+        DOTNET_GCHeapHardLimit: "0x200000000"
       run: nice -n 10 dotnet test tests/PeachImage.Tests/PeachImage.Tests.csproj --no-build --configuration Release --filter "Category!=Corpus" --blame-hang --blame-hang-timeout 8m --blame-hang-dump-type none --logger "trx;LogFileName=test-results.trx" --collect:"XPlat Code Coverage" --results-directory coverage -- xUnit.MaxParallelThreads=2 xUnit.LongRunningTestSeconds=30 xUnit.DiagnosticMessages=true
 
     - name: Test (corpus)
