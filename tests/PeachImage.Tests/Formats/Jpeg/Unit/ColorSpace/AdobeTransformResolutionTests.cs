@@ -57,8 +57,8 @@ public class AdobeTransformResolutionTests
         var (colorSpace, inverted) = ColorSpaceResolver.Resolve(4, new JpegAdobeSegment(transform: 2));
         Assert.Equal(JpegColorSpace.Ycck, colorSpace);
 
-        // Inversion for YCCK is inherent in the YCbCr->CMY transform itself, not a separate post-process step.
-        Assert.False(inverted);
+        // Adobe stores YCCK ink inverted too; the YCbCr transform alone does not undo that.
+        Assert.True(inverted);
     }
 
     [Theory]

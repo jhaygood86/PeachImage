@@ -234,6 +234,72 @@ public class BitmapPipelineTests
         using var fromStream = Image.LoadBitmap(new MemoryStream(bytes));
         Assert.Equal(fromSpan.GetPixelSpan().ToArray(), fromStream.GetPixelSpan().ToArray());
     }
+
+    private static byte[] Ramp16Png(int length)
+    {
+        using var image = Image.Create(length, 1, PixelFormat.Rgba64);
+        var samples = MemoryMarshal.Cast<byte, ushort>(image.GetPixelSpan());
+        for (int i = 0; i < length; i++)
+        {
+            ushort v = (ushort)(i * 64);
+            samples[i * 4] = v;
+            samples[(i * 4) + 1] = v;
+            samples[(i * 4) + 2] = v;
+            samples[(i * 4) + 3] = ushort.MaxValue;
+        }
+
+        return Png(image);
+    }
+
+    [Fact]
+    public void LoadBitmap_FloatOutputFromSixteenBitSource_KeepsFullPrecision()
+    {
+        byte[] png = Ramp16Png(1024);
+        using (var probe = Image.Load(png))
+        {
+            Assert.Equal(PixelFormat.Rgba64, probe.PixelFormat);
+        }
+
+        using var bitmap = Image.LoadBitmap(png, new BitmapRequest
+        {
+            Orientation = BitmapOrientation.None,
+            PremultiplyAlpha = BitmapPremultiply.None,
+            TargetColorSpace = NamedColorSpace.Srgb,
+            OutputFormat = PixelFormat.RgbaF32,
+        });
+
+        Assert.Equal(PixelFormat.RgbaF32, bitmap.PixelFormat);
+        var floats = MemoryMarshal.Cast<byte, float>(bitmap.GetPixelSpan());
+        var distinct = new HashSet<float>();
+        for (int i = 0; i < 1024; i++)
+        {
+            distinct.Add(floats[i * 4]);
+        }
+
+        Assert.Equal(1024, distinct.Count);
+    }
+
+    [Fact]
+    public void LoadBitmap_FloatOutputFromSixteenBitSourceInAnotherSpace_Converts()
+    {
+        using var source = Image.Create(4, 1, PixelFormat.Rgb48);
+        var samples = MemoryMarshal.Cast<byte, ushort>(source.GetPixelSpan());
+        for (int i = 0; i < samples.Length; i++)
+        {
+            samples[i] = (ushort)(i * 5000);
+        }
+
+        byte[] png = Png(source, new PngEncoderOptions { TargetColorSpace = NamedColorSpace.DisplayP3 });
+        using var bitmap = Image.LoadBitmap(png, new BitmapRequest
+        {
+            Orientation = BitmapOrientation.None,
+            PremultiplyAlpha = BitmapPremultiply.None,
+            TargetColorSpace = NamedColorSpace.Srgb,
+            OutputFormat = PixelFormat.RgbF32,
+        });
+
+        Assert.Equal(PixelFormat.RgbF32, bitmap.PixelFormat);
+    }
 }
 
 public class ZeroCopyEncodeTests

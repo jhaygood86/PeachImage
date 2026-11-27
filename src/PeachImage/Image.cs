@@ -527,8 +527,10 @@ public sealed class Image : IDisposable
         ThrowIfUnusable();
         if (PixelFormat == PixelFormat.Ycck32)
         {
-            // Raw YCCK carries no ICC-meaningful device values until the YCbCr part is undone.
-            return ConvertInkToSrgbWithoutProfile();
+            // Raw YCCK carries no ICC-meaningful device values until the YCbCr part is undone and the ink de-inverted.
+            using var cmyk = ImagePixelConverter.YcckToCmyk32(this);
+            CopyMetadataTo(cmyk);
+            return cmyk.ConvertToSrgb(fallbackCmykProfile);
         }
 
         var iccProfile = Metadata.GetIccColorProfile();
