@@ -70,11 +70,14 @@ jobs:
     # so a runner that dies mid-run leaves the last [STARTING] line without a [FINISHED] in this log.
     - name: Test (fast, verbose start/finish log)
       if: matrix.lane == 'fast' && matrix.os == 'ubuntu-latest'
-      run: tests/PeachImage.Tests/bin/Release/net11.0/PeachImage.Tests -reporter verbose -noAutoReporters -trait- "Category=Corpus"
+      shell: bash
+      run: |
+        mkdir -p coverage
+        nice -n 10 tests/PeachImage.Tests/bin/Release/net11.0/PeachImage.Tests -reporter verbose -noAutoReporters -maxThreads 2 -trait- "Category=Corpus" 2>&1 | tee coverage/verbose-test-log.txt
 
     - name: Test (fast, with coverage)
       if: matrix.lane == 'fast' && matrix.os == 'ubuntu-latest'
-      run: dotnet test tests/PeachImage.Tests/PeachImage.Tests.csproj --no-build --configuration Release --filter "Category!=Corpus" --blame-hang --blame-hang-timeout 8m --blame-hang-dump-type none --logger "trx;LogFileName=test-results.trx" --collect:"XPlat Code Coverage" --results-directory coverage -- xUnit.LongRunningTestSeconds=30 xUnit.DiagnosticMessages=true
+      run: nice -n 10 dotnet test tests/PeachImage.Tests/PeachImage.Tests.csproj --no-build --configuration Release --filter "Category!=Corpus" --blame-hang --blame-hang-timeout 8m --blame-hang-dump-type none --logger "trx;LogFileName=test-results.trx" --collect:"XPlat Code Coverage" --results-directory coverage -- xUnit.MaxParallelThreads=2 xUnit.LongRunningTestSeconds=30 xUnit.DiagnosticMessages=true
 
     - name: Test (corpus)
       if: matrix.lane == 'corpus'
@@ -114,7 +117,9 @@ jobs:
       if: always()
       with:
         name: test-results-${{ matrix.os }}-${{ matrix.lane }}
-        path: coverage/**/*.trx
+        path: |
+          coverage/**/*.trx
+          coverage/verbose-test-log.txt
 
     - name: Upload coverage reports
       uses: actions/upload-artifact@v4
