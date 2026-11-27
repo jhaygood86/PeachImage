@@ -68,7 +68,7 @@ jobs:
 
     - name: Test (fast, with coverage)
       if: matrix.lane == 'fast' && matrix.os == 'ubuntu-latest'
-      run: dotnet test tests/PeachImage.Tests/PeachImage.Tests.csproj --no-build --configuration Release --filter "Category!=Corpus" -p:TestTfmsInParallel=true --logger "trx;LogFileName=test-results.trx" --collect:"XPlat Code Coverage" --results-directory coverage
+      run: dotnet test tests/PeachImage.Tests/PeachImage.Tests.csproj --no-build --configuration Release --filter "Category!=Corpus" --blame-hang --blame-hang-timeout 8m --blame-hang-dump-type none --logger "trx;LogFileName=test-results.trx" --collect:"XPlat Code Coverage" --results-directory coverage
 
     - name: Test (corpus)
       if: matrix.lane == 'corpus'
