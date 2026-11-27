@@ -6,6 +6,11 @@
 
 Color-managed, high-precision imaging for canvas-style hosts, on top of the move to .NET 10 and 11: named color spaces with built-in ICC profiles, float color space conversion, half-float and premultiplied pixel formats, HDR (PQ/HLG) decode, tone mapping and signalling, 10- and 12-bit AVIF encode and decode, and a `createImageBitmap`-style load. Existing 8-bit encode and decode output is byte-identical to 0.7.4 (pinned by `EightBitPinTests`).
 
+## Platform
+
+- **Targets .NET 10 and .NET 11; .NET 8 is no longer supported.** The library builds with the .NET 11 SDK (pinned in `global.json`). On .NET 11 the vector kernels use the new BCL shuffle and zip APIs (`ZipLower`, `UnzipEven`, and others); .NET 10 keeps the earlier intrinsics path, with identical output.
+- Package consumers on net8.0 stay on 0.7.x.
+
 ## New
 
 - **Named color spaces and built-in profiles.** `NamedColorSpace` (sRGB, Display P3, Rec. 2020, their linear variants, Rec. 2100 PQ and HLG), `ColorProfiles.Get`/`GetBytes` (compact ICC v4 profiles), `ColorSpaceDescription` (primaries, white point, transfer function), `CicpCode` (ITU-T H.273), `IccColorProfile.Describe()`/`Identify()`, and `ImageMetadata.GetColorSpace()`, `GetNamedColorSpace()`, `Cicp`, `IccProfileBytes`, `IsHdr`.
