@@ -78,7 +78,7 @@ jobs:
         # starves its own agent or kills the test process (exit 137) and is lost. A 3 GB heap limit (hex) keeps the peak near 3 GB and does
         # not slow the suite; net10.0 and net11.0 can run in parallel inside a 7 GB runner.
         DOTNET_GCHeapHardLimit: "0xC0000000"
-      run: dotnet test tests/PeachImage.Tests/PeachImage.Tests.csproj --no-build --configuration Release --filter "Category!=Corpus" --blame-hang --blame-hang-timeout 8m --blame-hang-dump-type none --logger "trx;LogFileName=test-results.trx" --collect:"XPlat Code Coverage" --results-directory coverage -- xUnit.LongRunningTestSeconds=30 xUnit.DiagnosticMessages=true
+      run: dotnet test tests/PeachImage.Tests/PeachImage.Tests.csproj --no-build --configuration Release --filter "Category!=Corpus" --logger "trx;LogFileName=test-results.trx" --collect:"XPlat Code Coverage" --results-directory coverage -- xUnit.LongRunningTestSeconds=30 xUnit.DiagnosticMessages=true
 
     - name: Test (corpus)
       if: matrix.lane == 'corpus'
